@@ -9,6 +9,7 @@ import { DEFAULT_STREAM_CONFIG, type StreamConfig } from './config.ts'
 import { injectStreamConfig } from './boot-config.ts'
 import { STREAM_PACKAGE_NAME, STREAM_PACKAGE_VERSION } from './package-meta.ts'
 import { inspectProfileInstallation, updateNpmProfilePackage } from './profile-installation.ts'
+import { registerSettingsChannel } from './settings-channel.ts'
 import {
   STREAM_SETTINGS_RPC,
   STREAM_SETTINGS_RPC_CHANNEL,
@@ -322,10 +323,7 @@ export function apply(ctx: Context, config: Config): void {
         }
         return { ok: false, error: { code: 'internal', message: `unknown smooth-stream endpoint ${JSON.stringify(endpoint)}`, details: {} } }
       }
-      connectionCtx.effect(
-        () => connectionCtx.connection.rpc.handle(STREAM_SETTINGS_RPC_CHANNEL, handle, { authority: 'loopback' }),
-        'dsh-smooth-stream: settings RPC',
-      )
+      registerSettingsChannel(connectionCtx, STREAM_SETTINGS_RPC_CHANNEL, handle)
     })
   })
 }
