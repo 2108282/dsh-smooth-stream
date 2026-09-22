@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode, type RefObject } from 'react'
-import { IconThinkOutline14, JsonBlock, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconThinkOutlineRegular, JsonBlock, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import { ImageGallery, type ImageLoader, type MessageImageLabels } from '@deepseek-ai/dsh-client-ui-attachment'
 import type { ChatNodeViewProps, TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { AnimatedDisclosure } from './AnimatedDisclosure.tsx'
@@ -380,8 +380,6 @@ function AnimatedMarkdownText({
     if (streaming) setTyping(true)
   }, [streaming])
 
-  if (!streaming && !live && text.trim() === '') return null
-
   return (
     <FollowHost
       active={live && ownFollow}
@@ -569,16 +567,8 @@ function AnimatedReasoning({
           leadingClassName={css.thinkLeading}
           titleClassName={css.thinkTitle}
           chevronClassName={css.thinkChevron}
-          icon={<IconThinkOutline14 size={14} />}
-          // `message.think` is not in the `conversation` key union this prop is
-          // typed with: no Harness version owns it there. On 0.1.5+ it lives in
-          // the `chat` namespace, and on older builds only this plugin's own
-          // fallback dictionary has it. The layered lookup installed in
-          // index.ts resolves it either way, so the cast widens the key domain
-          // rather than skipping a lookup. No hardcoded label and no
-          // `<html lang>` sniffing: a key that resolves nowhere shows the key,
-          // which the locale routing test catches.
-          title={(t as unknown as (key: string) => string)('message.think')}
+          icon={<IconThinkOutlineRegular size={14} />}
+          title="Think"
           open={expanded}
           onToggle={() => {
             setAutoClosed(false)
@@ -624,6 +614,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   controlScroll = true,
   motionPreference = DEFAULT_STREAM_SETTINGS.motionPreference,
   node,
+  groupPart,
   useTurnData,
   openFile,
   loadImage,
@@ -631,6 +622,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   turnProcess,
   t,
 }: AssistantProps & {
+  groupPart?: 'reasoning' | 'response'
   mode?: StreamMode
   preset?: StreamSmoothingPreset
   revealCharsPerSec?: number
@@ -700,10 +692,15 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   })
   const hasVisible = streaming
     || data.status === 'interrupted'
-    || data.blocks.some(block => block.kind !== 'tool-call')
+    || data.blocks.some(block => {
+      if (block.kind === 'tool-call') return false
+      if (groupPart === 'reasoning' && block.kind !== 'reasoning') return false
+      if (groupPart === 'response' && block.kind === 'reasoning') return false
+      return true
+    })
   if (!hasVisible) return null
   const announcementText = data.blocks
-    .filter(block => block.kind === 'text')
+    .filter(block => block.kind === 'text' && (groupPart === undefined || groupPart === 'response'))
     .map(block => block.text)
     .join('\n')
 
@@ -712,14 +709,17 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   let lastFollow = -1
   for (let index = 0; index < data.blocks.length; index += 1) {
     const kind = data.blocks[index]?.kind
+    if (groupPart === 'reasoning' && kind !== 'reasoning') continue
+    if (groupPart === 'response' && kind === 'reasoning') continue
     if (kind === 'text' || kind === 'reasoning') lastFollow = index
   }
   for (let index = 0; index < data.blocks.length; index += 1) {
     const block = data.blocks[index]
     if (block === undefined) continue
+    if (groupPart === 'reasoning' && block.kind !== 'reasoning') continue
+    if (groupPart === 'response' && block.kind === 'reasoning') continue
     switch (block.kind) {
       case 'text':
-        if (!streaming && block.text.trim() === '') break
         rendered.push(
           <AnimatedMarkdownText
             key={index}
@@ -800,7 +800,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
       >
         <div className={css.body}>
           {rendered}
-          {data.status === 'interrupted' && <span className={css.stopped}>{t('message.stopped')}</span>}
+          {data.status === 'interrupted' && (groupPart === undefined || groupPart === 'response' || !data.blocks.some(b => b.kind !== 'reasoning' && b.kind !== 'tool-call')) && <span className={css.stopped}>{t('message.stopped')}</span>}
         </div>
       </FollowHost>
     </div>

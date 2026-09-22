@@ -13,7 +13,7 @@ import { SmoothStreamCardController } from './smooth-stream-card-controller.ts'
 import { createSmoothStreamSettingsApi } from './smooth-stream-settings-api.ts'
 import { DebugPanel } from './DebugPanel.tsx'
 import { debugRuntime } from './debugRuntime.ts'
-import { NS as SETTINGS_NS, CHAT_NS, en, zh, chatEn, chatZh } from './locales.ts'
+import { NS as SETTINGS_NS, en, zh } from './locales.ts'
 import { DEFAULT_STREAM_CONFIG, STREAM_BOOT_GLOBAL, type StreamConfig } from '../config.ts'
 import { DEFAULT_STREAM_SETTINGS, STREAM_SETTINGS_NS, type StreamSettings } from '../settings.ts'
 
@@ -37,33 +37,8 @@ const STREAM_PRESETS: readonly string[] = ['realtime', 'balanced', 'silky']
  * generic follow boundary. This is deliberately keyed by the owner that
  * provides the renderer, not by individual tool names, so new Context,
  * Command, and Tool rows are covered automatically.
- *
- * Host chrome and controllers are excluded on a different rule: `turn-process`
- * (the completed-turn process summary control) and `turn-tail` (the turn usage
- * footer) are not Agent output. The Host renders them as bare controls and
- * flips their visibility itself, so wrapping them has three measured costs and
- * no benefit:
- *
- * 1. The wrapper element defeats ChatView's `.flowItem:empty { display: none }`
- *    rule. A `turn-process` renderer returns null whenever the Host's fold is
- *    unavailable (e.g. `processWindowReady === false`), and that null render is
- *    exactly what the `:empty` rule exists to erase; with a wrapper the row
- *    stays in flow and still consumes the 16px column gap, painting an empty
- *    band where the fold control should be.
- * 2. The summary label (`N tool calls · M messages`) is not streamed model
- *    text, so pushing it through the character-reveal engine is wrong by
- *    construction.
- * 3. The row would inherit the generic entrance animation (opacity + clip-path)
- *    on a row the Host may mount and hide inside a single commit.
  */
-const SKIP_WRAP = new Set([
-  'assistant-step',
-  'user',
-  'steering',
-  'command-input',
-  'turn-process',
-  'turn-tail',
-])
+const SKIP_WRAP = new Set(['assistant-step', 'user', 'steering', 'command-input'])
 
 /** React function/class or an exotic component such as memo/forwardRef/lazy. */
 function isWrappableComponent(value: unknown): value is ComponentType<FollowWrapProps> {
@@ -226,55 +201,6 @@ export function apply(ctx: ClientContext): void {
     () => settings.getSnapshot().controlScroll,
   )
 
-  /**
-   * Layered `t` for the assistant renderer.
-   *
-   * The renderer's keys have no single owner: `conversation` owns the
-   * `image.*` family in every Harness version, `chat` (0.1.5+) owns
-   * `message.think`, and three `message.*` keys MOVED from `conversation` to
-   * `chat` between the version this package pins and the current one. Binding
-   * the slot to either namespace alone degrades a real slice of the UI to raw
-   * keys, which is the defect this replaces.
-   *
-   * The order is deliberate: `conversation` first, so the pinned Harness keeps
-   * resolving the keys it still owns there; then `chat` for what moved or is
-   * new; then this plugin's own namespace for keys no Harness version
-   * provides. A namespace that is not registered returns its key unchanged
-   * (`LocaleRuntime.bind` does not throw), so an older Harness without `chat`
-   * falls straight through.
-   *
-   * The reference is built once and held stable: the seat feeds a memoized
-   * renderer, and a fresh identity per render would defeat that memoization.
-   * Until the locale service arrives the seat's own binding stays in use.
-   */
-  let assistantT: AssistantProps['t'] | undefined
-
-  // Locale routing belongs to the renderer lifecycle, not to the optional
-  // Connection-backed settings card. Keeping this injection independent means
-  // a deployment can stream localized replies without Connection, and a
-  // transient disconnect cannot dispose the renderer's fallback dictionary.
-  ctx.inject(['locale'], (localeCtx) => {
-    localeCtx.effect(
-      () => localeCtx.locale.register(CHAT_NS, { zh: chatZh, en: chatEn }),
-      'dsh-smooth-stream: conversation fallback dictionary',
-    )
-    const conversationT = localeCtx.locale.bind('conversation')
-    const chatT = localeCtx.locale.bind('chat') as (key: string, params?: Record<string, unknown>) => string
-    const fallbackT = localeCtx.locale.bind(CHAT_NS) as (key: string, params?: Record<string, unknown>) => string
-    const merged = (key: string, params?: Record<string, unknown>): string => {
-      const primary = (conversationT as (k: string, p?: unknown) => string)(key, params)
-      if (primary !== key) return primary
-      const secondary = chatT(key, params)
-      if (secondary !== key) return secondary
-      return fallbackT(key, params)
-    }
-    const bound = merged as unknown as AssistantProps['t']
-    assistantT = bound
-    return () => {
-      if (assistantT === bound) assistantT = undefined
-    }
-  })
-
   // The card talks to the plugin-owned loopback RPC, so the core settings
   // namespace allowlist cannot make it disappear. The stream still applies
   // with defaults when the optional Settings UI or Connection is absent.
@@ -306,6 +232,58 @@ export function apply(ctx: ClientContext): void {
     syncDebug()
     card.start()
     settingsCtx.effect(() => settingsCtx.locale.register(SETTINGS_NS, { zh, en }), 'dsh-smooth-stream: settings dictionaries')
+
+    const SmoothStreamSectionView = (props: any) => createElement(
+      'div',
+      { style: { width: '100%', maxWidth: '760px', minHeight: '240px', display: 'flex', flexDirection: 'column', gap: '16px', padding: '4px 0 24px 0' } },
+      createElement('h2', { style: { margin: 0, fontSize: '18px', fontWeight: 600 } }, '平滑流式输出'),
+      createElement('p', { style: { color: 'var(--dsw-alias-label-tertiary)', margin: 0, fontSize: '13px' } }, '流畅打字机渲染、丝滑平稳滚动与思考过程折叠配置。'),
+      createElement('ul', { style: { listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column' } }, createElement(SmoothStreamCard as any, { ...props, cardController: card, defaultOpen: true })),
+    )
+
+    const SmoothStreamDetailSectionView = (props: any) => {
+      const subject = props.subject
+      if (subject?.kind === 'bundle' && subject?.pkg?.name === 'dsh-smooth-stream') {
+        return createElement(
+          'div',
+          { style: { marginTop: '16px', display: 'flex', flexDirection: 'column', gap: '12px', width: '100%' } },
+          createElement('h3', { style: { margin: 0, fontSize: '15px', fontWeight: 600 } }, '平滑流式参数配置'),
+          createElement('ul', { style: { listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column' } }, createElement(SmoothStreamCard as any, { ...props, cardController: card, defaultOpen: true })),
+        )
+      }
+      return null
+    }
+
+    // 1. 注册为全局设置左侧一级菜单「平滑流式」
+    settingsCtx.slots.inject('settings.section', () => settingsCtx.slots.register({
+      name: 'settings.section',
+      id: 'smooth-stream',
+      order: 25,
+      label: () => '平滑流式',
+      locale: SETTINGS_NS,
+      inject: () => card.inject(),
+    }, SmoothStreamSectionView))
+
+    // 2. 像 dsh-agy 一样注册进官方内置插件页面下的二级 Tab（官方原生插槽，更新永不消失）
+    settingsCtx.slots.inject('settings.plugins.tab', () => settingsCtx.slots.register({
+      name: 'settings.plugins.tab',
+      id: 'smooth-stream-tab',
+      order: 15,
+      label: () => '平滑流式',
+      locale: SETTINGS_NS,
+      inject: () => card.inject(),
+    }, SmoothStreamSectionView))
+
+    // 3. 注册为侧边栏插件管理器的详情页配置区块
+    settingsCtx.slots.inject('plugins.detail.section', () => settingsCtx.slots.register({
+      name: 'plugins.detail.section',
+      id: 'smooth-stream-detail-settings',
+      order: 10,
+      locale: SETTINGS_NS,
+      inject: () => card.inject(),
+    }, SmoothStreamDetailSectionView))
+
+    // 4. 保留原 settings.plugin.item 插槽注册（向下兼容）
     settingsCtx.slots.inject('settings.plugin.item', () => settingsCtx.slots.register({
       name: 'settings.plugin.item',
       id: 'smooth-stream',
@@ -339,11 +317,6 @@ export function apply(ctx: ClientContext): void {
     )
     return createElement(TypewriterAssistantNodeView, {
       ...props,
-      // Override the seat's single-namespace binding with the layered lookup
-      // described above. Falls back to the seat's own binding only if the
-      // locale service never arrived (renderer then receives the prop it
-      // already had).
-      ...(assistantT === undefined ? {} : { t: assistantT }),
       mode: config.mode,
       preset: config.preset,
       revealCharsPerSec: config.revealCharsPerSec,
@@ -370,11 +343,6 @@ export function apply(ctx: ClientContext): void {
         name: 'conversation.chat.node',
         key: 'assistant-step',
         priority: -100,
-        // `conversation` (not `chat`): it is the namespace the pinned Harness
-        // actually registers, so it is the one whose keys must keep resolving.
-        // The layered `t` handed to the renderer covers what this namespace
-        // does not own. A namespace the composition does not declare would
-        // degrade every `t()` call to its raw key.
         locale: 'conversation',
         registrant: 'dsh-smooth-stream',
       }, configured)

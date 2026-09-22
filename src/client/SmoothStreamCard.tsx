@@ -5,24 +5,68 @@
  * Host cards' chrome is not exported for reuse.
  */
 
-import { useState } from 'react'
+import { useState, useSyncExternalStore } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
-import { IconChevronDownOutline14, IconRefreshOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { SmoothStreamCardFace } from './smooth-stream-card-controller.ts'
+import { IconChevronDownOutlineRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { SmoothStreamCardController, SmoothStreamCardFace } from './smooth-stream-card-controller.ts'
+import { zh } from './locales.ts'
 import css from './SmoothStreamCard.module.css'
 
 /** Props the renderer binds for the smooth-stream card. */
 export type SmoothStreamCardProps =
-  PropsRuntime<'settings.plugin.item'>
-  & PropsLocale<'settings.smoothStream'>
-  & InjectFace<SmoothStreamCardFace>
+  Partial<PropsRuntime<'settings.plugin.item'>>
+  & Partial<PropsLocale<'settings.smoothStream'>>
+  & Partial<InjectFace<SmoothStreamCardFace>>
+  & {
+    cardController?: SmoothStreamCardController
+    defaultOpen?: boolean
+  }
 
 /** Render the smooth-stream card independently of the core settings namespace allowlist. */
 export function SmoothStreamCard(props: SmoothStreamCardProps) {
-  const { t } = props
-  const [open, setOpen] = useState(false)
-  const state = props.useSmoothStreamCard(snapshot => snapshot)
+  const { defaultOpen = false, cardController } = props
+  const [open, setOpen] = useState(defaultOpen)
+  const cardFace = cardController ? cardController.inject() : undefined
+  const state = typeof props.useSmoothStreamCard === 'function'
+    ? props.useSmoothStreamCard(snapshot => snapshot)
+    : (cardController ? useSyncExternalStore(cardController.subscribe, () => cardController.getSnapshot()) : {
+      status: 'ready' as const,
+      writable: true,
+      dirty: false,
+      saving: false,
+      failed: false,
+      enabled: true,
+      controlScroll: true,
+      motionPreference: 'auto' as const,
+      thinkAutoExpand: false,
+      logarithmicFade: true,
+      debugEnabled: false,
+      debugTuning: {
+        revealScale: 1,
+        queuePressure: 0.8,
+        maxRevealCps: 360,
+        springStiffness: 140,
+        springDamping: 24,
+        springMass: 1,
+        runwayPx: 32,
+        reserveResponseMs: 180,
+        backpressureMinScale: 0.5,
+      },
+      debugAvailable: false,
+      version: undefined,
+      installation: 'unmanaged' as const,
+      canUpgrade: false,
+      upgrading: false,
+      upgradeFailed: false,
+      restartRequired: false,
+    })
+  const t = typeof props.t === 'function' ? props.t : ((key: string) => (zh as Record<string, string>)[key] ?? key)
+  const edit = props.edit ?? (patch => { cardFace?.edit(patch) })
+  const save = props.save ?? (() => { cardFace?.save() })
+  const discard = props.discard ?? (() => { cardFace?.discard() })
+  const reload = props.reload ?? (() => { cardFace?.reload() })
+  const upgrade = props.upgrade ?? (() => { cardFace?.upgrade() })
   const blocked = !state.dirty || state.saving || state.status !== 'ready'
   const versionLabel = state.version === undefined
     ? null
@@ -43,7 +87,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
         </span>
         {versionLabel === null ? null : <span className={css.version}>{versionLabel}</span>}
         {state.dirty ? <span className={css.pending}>{t('unsaved')}</span> : null}
-        <IconChevronDownOutline14 className={open ? `${css.chevron} ${css.chevronOpen}` : css.chevron} />
+        <IconChevronDownOutlineRegular className={open ? `${css.chevron} ${css.chevronOpen}` : css.chevron} />
       </button>
       {open
         ? (
@@ -52,7 +96,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
             {state.status === 'unavailable' ? (
               <div className={css.failure}>
                 <p className={css.readOnly} role="status">{t('unavailable')}</p>
-                <button type="button" className={css.discard} onClick={props.reload}>{t('retry')}</button>
+                <button type="button" className={css.discard} onClick={reload}>{t('retry')}</button>
               </div>
             ) : null}
             {state.status === 'ready' ? (
@@ -66,7 +110,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                       className={css.toggle}
                       checked={state.enabled}
                       disabled={!state.writable || state.saving}
-                      onChange={(event) => { props.edit({ enabled: event.target.checked }) }}
+                      onChange={(event) => { edit({ enabled: event.target.checked }) }}
                     />
                   </span>
                   <span className={css.hint}>{t('enabledHint')}</span>
@@ -79,7 +123,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                       className={css.toggle}
                       checked={state.controlScroll}
                       disabled={!state.writable || state.saving || !state.enabled}
-                      onChange={(event) => { props.edit({ controlScroll: event.target.checked }) }}
+                      onChange={(event) => { edit({ controlScroll: event.target.checked }) }}
                     />
                   </span>
                   <span className={css.hint}>{t('controlScrollHint')}</span>
@@ -92,7 +136,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                       className={css.toggle}
                       checked={state.logarithmicFade}
                       disabled={!state.writable || state.saving || !state.enabled}
-                      onChange={(event) => { props.edit({ logarithmicFade: event.target.checked }) }}
+                      onChange={(event) => { edit({ logarithmicFade: event.target.checked }) }}
                     />
                   </span>
                   <span className={css.hint}>{t('logarithmicFadeHint')}</span>
@@ -119,7 +163,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                           name="smooth-stream-motion"
                           checked={state.motionPreference === value}
                           disabled={!state.writable || state.saving || !state.enabled}
-                          onChange={() => { props.edit({ motionPreference: value }) }}
+                          onChange={() => { edit({ motionPreference: value }) }}
                         />
                         {t(label)}
                       </label>
@@ -134,7 +178,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                       className={css.toggle}
                       checked={state.thinkAutoExpand}
                       disabled={!state.writable || state.saving || !state.enabled}
-                      onChange={(event) => { props.edit({ thinkAutoExpand: event.target.checked }) }}
+                      onChange={(event) => { edit({ thinkAutoExpand: event.target.checked }) }}
                     />
                   </span>
                   <span className={css.hint}>{t('thinkAutoExpandHint')}</span>
@@ -147,7 +191,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                       className={css.toggle}
                       checked={state.debugEnabled}
                       disabled={!state.debugAvailable || !state.writable || state.saving}
-                      onChange={(event) => { props.edit({ debugEnabled: event.target.checked }) }}
+                      onChange={(event) => { edit({ debugEnabled: event.target.checked }) }}
                     />
                   </span>
                   <span className={css.hint}>{state.debugAvailable ? t('debugEnabledHint') : t('debugUnavailable')}</span>
@@ -167,9 +211,9 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                     className={css.update}
                     disabled={!state.canUpgrade || state.upgrading || state.restartRequired}
                     title={state.canUpgrade ? undefined : t('updateUnavailable')}
-                    onClick={props.upgrade}
+                    onClick={upgrade}
                   >
-                    <span aria-hidden="true"><IconRefreshOutline14 /></span>
+                    <span aria-hidden="true"><IconRefreshOutlineRegular /></span>
                     {t(state.upgrading ? 'updating' : 'update')}
                   </button>
                 </div>
@@ -180,7 +224,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                     type="button"
                     className={css.discard}
                     disabled={!state.dirty || state.saving}
-                    onClick={props.discard}
+                    onClick={discard}
                   >
                     {t('discard')}
                   </button>
@@ -188,7 +232,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                     type="button"
                     className={css.save}
                     disabled={blocked}
-                    onClick={props.save}
+                    onClick={save}
                   >
                     {t(state.saving ? 'saving' : 'save')}
                   </button>

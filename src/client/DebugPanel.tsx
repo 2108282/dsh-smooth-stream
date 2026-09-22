@@ -3,11 +3,11 @@ import { createPortal } from 'react-dom'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import {
-  IconCloseOutline16,
-  IconCodeOutline16,
-  IconCopyOutline16,
-  IconQuestionOutline14,
-  IconRefreshOutline16,
+  IconCloseOutlineRegular,
+  IconCodeOutlineRegular,
+  IconCopyOutlineRegular,
+  IconQuestionOutlineRegular,
+  IconRefreshOutlineRegular,
   Tooltip,
   writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -74,6 +74,7 @@ function TuningField({
   label: string
   t: DebugPanelProps['t']
 }) {
+  const [showTip, setShowTip] = useState(false)
   const value = state.tuning[control.key]
   const labelId = `smooth-stream-debug-${control.key}`
   const update = (next: number) => {
@@ -92,8 +93,12 @@ function TuningField({
               type="button"
               aria-label={label}
               title={t(control.tip)}
+              onClick={(e) => {
+                e.stopPropagation()
+                setShowTip(s => !s)
+              }}
             >
-              <IconQuestionOutline14 />
+              <IconQuestionOutlineRegular />
             </button>
           </Tooltip>
         </span>
@@ -112,6 +117,21 @@ function TuningField({
           {control.unit === '' ? null : <span className={css.unit}>{control.unit}</span>}
         </span>
       </span>
+      {showTip && (
+        <div style={{
+          fontSize: '11px',
+          lineHeight: '16px',
+          color: 'var(--dsw-alias-label-secondary)',
+          background: 'var(--dsw-alias-bg-layer-2)',
+          padding: '6px 10px',
+          borderRadius: '6px',
+          border: '1px solid var(--dsw-alias-border-l2)',
+          marginTop: '2px',
+          marginBottom: '4px',
+        }}>
+          {t(control.tip)}
+        </div>
+      )}
       <input
         className={css.range}
         type="range"
@@ -165,7 +185,7 @@ export function DebugPanel(props: DebugPanelProps) {
         <span className={css.state}>{t(live ? 'debugLive' : 'debugIdle')}</span>
         {state.dirty ? <span className={css.unsaved}>{t('debugUnsaved')}</span> : null}
         <button className={css.iconButton} type="button" title={t('debugCopy')} aria-label={t('debugCopy')} onClick={() => { void copyDiagnostics() }}>
-          <IconCopyOutline16 />
+          <IconCopyOutlineRegular />
         </button>
         <button
           className={css.iconButton}
@@ -179,7 +199,7 @@ export function DebugPanel(props: DebugPanelProps) {
             props.save()
           }}
         >
-          <IconCloseOutline16 />
+          <IconCloseOutlineRegular />
         </button>
         <span className={css.visuallyHidden} aria-live="polite">{copied ? t('debugCopied') : ''}</span>
       </header>
@@ -220,7 +240,7 @@ export function DebugPanel(props: DebugPanelProps) {
 
       <footer className={css.footer}>
         <button className={css.secondaryButton} type="button" disabled={!state.writable} onClick={props.reset}>
-          <IconRefreshOutline16 />
+          <IconRefreshOutlineRegular />
           {t('debugReset')}
         </button>
         <span className={css.footerSpacer} />
@@ -240,7 +260,7 @@ export function DebugPanel(props: DebugPanelProps) {
         title={t('debugPanelToggle')}
         onClick={() => { setOpen(current => !current) }}
       >
-        <IconCodeOutline16 />
+        <IconCodeOutlineRegular />
       </button>
       {typeof document === 'undefined' || panel === null ? null : createPortal(panel, document.body)}
     </>

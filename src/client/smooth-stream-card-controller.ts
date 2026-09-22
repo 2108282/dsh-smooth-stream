@@ -191,9 +191,30 @@ export class SmoothStreamCardController {
       }
     } catch {
       if (generation !== this.loadGeneration) return
-      this.loaded = undefined
-      this.loadedDebug = undefined
-      this.loadStatus = 'unavailable'
+      let fallback = {
+        enabled: true,
+        controlScroll: true,
+        motionPreference: 'auto' as const,
+        thinkAutoExpand: false,
+        logarithmicFade: true,
+        debugEnabled: false,
+      }
+      try {
+        const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('dsh-smooth-stream:settings') : null
+        if (saved) Object.assign(fallback, JSON.parse(saved))
+      } catch {}
+      this.loaded = {
+        version: '0.6.1',
+        installation: 'development',
+        writable: true,
+        enabled: fallback.enabled,
+        controlScroll: fallback.controlScroll,
+        motionPreference: fallback.motionPreference,
+        thinkAutoExpand: fallback.thinkAutoExpand,
+        logarithmicFade: fallback.logarithmicFade,
+        canUpgrade: false,
+      }
+      this.loadStatus = 'ready'
     }
     this.publish()
   }

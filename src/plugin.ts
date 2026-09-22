@@ -113,7 +113,7 @@ export function apply(ctx: Context, config: Config): void {
       StreamSettingsSchema,
       { applies: 'live' },
     )
-    settingsCtx.inject(['connection'], (connectionCtx) => {
+    settingsCtx.inject(['connection', 'webServer'], (connectionCtx) => {
       let upgrade: Promise<void> | undefined
 
       const view = (): StreamSettingsView => {
