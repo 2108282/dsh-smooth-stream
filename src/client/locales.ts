@@ -58,6 +58,7 @@ export type SmoothStreamLocaleKey =
   | 'motionForceReduced' | 'motionForceReducedHint'
   | 'thinkAutoExpand' | 'thinkAutoExpandHint'
   | 'logarithmicFade' | 'logarithmicFadeHint'
+  | 'keepStreamOnToolCall' | 'keepStreamOnToolCallHint'
   | 'debugEnabled' | 'debugEnabledHint' | 'debugUnavailable'
   | 'debugPanelTitle' | 'debugPanelToggle' | 'debugPanelClose' | 'debugGuide'
   | 'debugLive' | 'debugIdle' | 'debugUnsaved'
@@ -97,6 +98,8 @@ export const en: Record<SmoothStreamLocaleKey, string> = {
   thinkAutoExpand: 'Auto-expand thinking',
   logarithmicFade: 'Logarithmic fade',
   logarithmicFadeHint: 'Fade new answer and expanded thinking text into view. Follows the motion preference.',
+  keepStreamOnToolCall: 'Keep streaming before tool calls',
+  keepStreamOnToolCallHint: 'Do not end text streaming early when followed by a tool call; preserve fluid typewriter reveal.',
   thinkAutoExpandHint: 'Open the thinking block while it streams. Turn off to keep it collapsed.',
   debugEnabled: 'Show render diagnostics',
   debugEnabledHint: 'Show live streaming and scroll metrics on the right side of the chat. Tune values there, then save them here.',
@@ -187,6 +190,8 @@ export const zh: Record<SmoothStreamLocaleKey, string> = {
   thinkAutoExpand: '自动展开思考',
   logarithmicFade: '对数淡入',
   logarithmicFadeHint: '让回答正文和展开的思考文字由淡变实，遵循动效偏好。',
+  keepStreamOnToolCall: '工具引导语保持流式',
+  keepStreamOnToolCallHint: '文字后紧接工具调用时不提前宣告结束，让短引导语保持平滑打字。',
   thinkAutoExpandHint: '思考块在流式时自动展开；关闭后保持折叠，可手动展开。',
   debugEnabled: '显示渲染调试面板',
   debugEnabledHint: '在聊天右侧显示流式渲染和滚动的实时参数，可在面板中调节并在这里保存。',

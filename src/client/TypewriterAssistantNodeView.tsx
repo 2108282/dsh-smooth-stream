@@ -46,6 +46,9 @@ function useMotionReduced(preference: StreamMotionPreference): boolean {
 
 interface AnimatedMarkdownTextProps extends MarkdownProps {
   streaming: boolean
+  hasToolCallBelow?: boolean
+  isTurnOpen?: boolean
+  keepStreamOnToolCall?: boolean
   logarithmicFade: boolean
   /** Whether the resolved reduced-motion gate keeps the reveal engine off. */
   motionReduced: boolean
@@ -309,6 +312,9 @@ function AnimatedMarkdownText({
   labels,
   fileMentions,
   streaming,
+  hasToolCallBelow = false,
+  isTurnOpen = false,
+  keepStreamOnToolCall = true,
   logarithmicFade,
   motionReduced,
   ownFollow,
@@ -321,16 +327,22 @@ function AnimatedMarkdownText({
   controlScroll = true,
 }: AnimatedMarkdownTextProps) {
   const reduced = motionReduced
-  const [typing, setTyping] = useState(streaming)
+  const keepStreaming = keepStreamOnToolCall && hasToolCallBelow && isTurnOpen
+  const [typing, setTyping] = useState(() => streaming || (keepStreaming && text.length > 0))
   const localSpeedCpsRef = useRef(35)
   const followRootRef = useRef<HTMLDivElement>(null)
   const predictionSourceRef = useRef<string | null>(null)
   const predictionStateRef = useRef(false)
   const predictionGeometryRef = useRef<PendingTextGeometry | null>(null)
   const speedCpsRef = followSpeedCpsRef ?? localSpeedCpsRef
+
+  // 如果下面调用工具：在文本全部揭示完毕前不宣告结束（inputComplete 保持 false），避免触发 completion drain 瞬间清仓加速
+  const [shownLength, setShownLength] = useState(0)
+  const effectiveStreaming = streaming || (keepStreaming && shownLength < text.length)
+
   const displayed = useSmoothStreamContent(text, {
     enabled: typing && !reduced,
-    inputComplete: !streaming,
+    inputComplete: !effectiveStreaming,
     preset,
     shouldHoldBack,
     speedCpsRef,
@@ -339,6 +351,11 @@ function AnimatedMarkdownText({
     onRevealCommit: () => { notifyFollowCommit(followRootRef.current) },
   })
   const shown = reduced ? text : displayed
+
+  useEffect(() => {
+    setShownLength(shown.length)
+  }, [shown.length])
+
   const live = typing && !reduced
   useLogarithmicFade(followRootRef, logarithmicFade && !reduced, live, speedCpsRef)
 
@@ -356,7 +373,7 @@ function AnimatedMarkdownText({
     if (onPredictiveChange === undefined) return
     const pending = text.slice(shown.length)
     const sourceChanged = predictionSourceRef.current !== text
-    const next = !live || !streaming || pending === ''
+    const next = !live || !effectiveStreaming || pending === ''
       ? false
       : sourceChanged
         ? pendingTextCanGrow(followRootRef.current, shown, pending, predictionGeometryRef)
@@ -364,21 +381,21 @@ function AnimatedMarkdownText({
     predictionSourceRef.current = text
     predictionStateRef.current = next
     onPredictiveChange(next)
-  }, [live, onPredictiveChange, shown, streaming, text])
+  }, [live, onPredictiveChange, shown, effectiveStreaming, text])
 
   // The stream closed: keep revealing the remaining queue, then swap to the
   // settled parse exactly once. The markdown tree stays mounted until then.
   useEffect(() => {
-    if (typing && !streaming && shown.length === text.length) setTyping(false)
-  }, [shown, streaming, text, typing])
+    if (typing && !effectiveStreaming && shown.length === text.length) setTyping(false)
+  }, [shown, effectiveStreaming, text, typing])
 
   // A row can mount before the projection flips its assistant step to
   // `running`, which would freeze `typing` at false forever and leave the
   // reveal engine off for the whole reply. Re-arm on the rising edge so late
   // stream starts are still smoothed. (Adopted from #22 by @Zn-Dk.)
   useEffect(() => {
-    if (streaming) setTyping(true)
-  }, [streaming])
+    if (streaming || (keepStreaming && shown.length < text.length)) setTyping(true)
+  }, [streaming, keepStreaming, shown.length, text.length])
 
   return (
     <FollowHost
@@ -386,7 +403,7 @@ function AnimatedMarkdownText({
       speedCpsRef={speedCpsRef}
       revealedCharsRef={followRevealedCharsRef}
       revealScaleRef={followRevealScaleRef}
-      predictive={streaming}
+      predictive={effectiveStreaming}
       controlScroll={controlScroll}
       hostRef={followRootRef}
     >
@@ -611,6 +628,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   maxScrollSpeedPxPerSec: _maxScrollSpeedPxPerSec = DEFAULT_STREAM_CONFIG.maxScrollSpeedPxPerSec,
   thinkAutoExpand = DEFAULT_STREAM_SETTINGS.thinkAutoExpand,
   logarithmicFade = DEFAULT_STREAM_SETTINGS.logarithmicFade,
+  keepStreamOnToolCall = DEFAULT_STREAM_SETTINGS.keepStreamOnToolCall,
   controlScroll = true,
   motionPreference = DEFAULT_STREAM_SETTINGS.motionPreference,
   node,
@@ -630,6 +648,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   maxScrollSpeedPxPerSec?: number
   thinkAutoExpand?: boolean
   logarithmicFade?: boolean
+  keepStreamOnToolCall?: boolean
   controlScroll?: boolean
   motionPreference?: StreamMotionPreference
 }) {
@@ -719,7 +738,9 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
     if (groupPart === 'reasoning' && block.kind !== 'reasoning') continue
     if (groupPart === 'response' && block.kind === 'reasoning') continue
     switch (block.kind) {
-      case 'text':
+      case 'text': {
+        const hasToolCallBelow = data.blocks.slice(index + 1).some(b => b.kind === 'tool-call')
+          || data.blocks.some(b => b.kind === 'tool-call')
         rendered.push(
           <AnimatedMarkdownText
             key={index}
@@ -727,6 +748,9 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
             labels={markdownLabels}
             fileMentions={mentions}
             streaming={streaming}
+            hasToolCallBelow={hasToolCallBelow}
+            isTurnOpen={turn !== undefined && turn.status === 'open'}
+            keepStreamOnToolCall={keepStreamOnToolCall}
             logarithmicFade={logarithmicFade && data.status !== 'interrupted'}
             motionReduced={reduced}
             ownFollow={!streaming && index === lastFollow}
@@ -740,6 +764,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
           />,
         )
         break
+      }
       case 'reasoning':
         rendered.push(
           <FoldableReasoning key={index} hidden={reasoningHidden} reveal={revealProcess}>

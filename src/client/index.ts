@@ -160,6 +160,7 @@ class SettingsCell {
       && next.motionPreference === this.value.motionPreference
       && next.thinkAutoExpand === this.value.thinkAutoExpand
       && next.logarithmicFade === this.value.logarithmicFade
+      && next.keepStreamOnToolCall === this.value.keepStreamOnToolCall
       && next.debugEnabled === this.value.debugEnabled
       && next.debugTuning === this.value.debugTuning
     ) return
@@ -324,6 +325,7 @@ export function apply(ctx: ClientContext): void {
       maxScrollSpeedPxPerSec: config.maxScrollSpeedPxPerSec,
       thinkAutoExpand: preferences.thinkAutoExpand,
       logarithmicFade: preferences.logarithmicFade,
+      keepStreamOnToolCall: preferences.keepStreamOnToolCall,
       controlScroll: preferences.controlScroll,
       motionPreference: preferences.motionPreference,
     })

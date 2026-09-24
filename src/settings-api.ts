@@ -33,6 +33,8 @@ export interface StreamSettingsView {
   thinkAutoExpand: boolean
   /** Whether new answer/thinking text fades into its original color. */
   logarithmicFade: boolean
+  /** Whether text followed by a tool call keeps streaming instead of closing immediately. */
+  keepStreamOnToolCall: boolean
   /** Whether a fixed npm update command is safe to offer. */
   canUpgrade: boolean
 }

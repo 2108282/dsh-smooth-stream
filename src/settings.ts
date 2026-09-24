@@ -88,6 +88,8 @@ export interface StreamSettings {
   thinkAutoExpand: boolean
   /** Logarithmic text fade for the answer and expanded thinking body. */
   logarithmicFade: boolean
+  /** Whether text followed by a tool call keeps streaming instead of closing immediately. */
+  keepStreamOnToolCall: boolean
   /** Whether the live renderer diagnostics panel is enabled. */
   debugEnabled: boolean
   /** Values edited by the diagnostics panel. */
@@ -101,6 +103,7 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   motionPreference: 'auto',
   thinkAutoExpand: true,
   logarithmicFade: true,
+  keepStreamOnToolCall: true,
   debugEnabled: false,
   debugTuning: DEFAULT_STREAM_DEBUG_TUNING,
 }

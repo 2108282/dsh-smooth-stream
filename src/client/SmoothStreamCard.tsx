@@ -41,6 +41,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
       motionPreference: 'auto' as const,
       thinkAutoExpand: false,
       logarithmicFade: true,
+      keepStreamOnToolCall: true,
       debugEnabled: false,
       debugTuning: {
         revealScale: 1,
@@ -182,6 +183,19 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                     />
                   </span>
                   <span className={css.hint}>{t('thinkAutoExpandHint')}</span>
+                </label>
+                <label className={state.enabled ? css.field : `${css.field} ${css.fieldDisabled}`}>
+                  <span className={css.fieldHead}>
+                    <span className={css.label}>{t('keepStreamOnToolCall')}</span>
+                    <input
+                      type="checkbox"
+                      className={css.toggle}
+                      checked={state.keepStreamOnToolCall}
+                      disabled={!state.writable || state.saving || !state.enabled}
+                      onChange={(event) => { edit({ keepStreamOnToolCall: event.target.checked }) }}
+                    />
+                  </span>
+                  <span className={css.hint}>{t('keepStreamOnToolCallHint')}</span>
                 </label>
                 <label className={state.debugAvailable ? css.field : `${css.field} ${css.fieldDisabled}`}>
                   <span className={css.fieldHead}>
