@@ -1,6 +1,9 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
+import { answer } from './settings-channel.ts'
 // Type-only: erased at runtime, so the host entry never link-fails on kernels
 // whose dsh-settings no longer ships the value-side helper (issue #17).
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -92,238 +95,190 @@ export function apply(ctx: Context, config: Config): void {
     + `seed=${config.revealCharsPerSec}cps scroll=${config.scrollSpeedPxPerSec}px/s `
     + `maxScroll=${config.maxScrollSpeedPxPerSec}px/s`,
   )
+
+  const SETTINGS_FILE = join(process.env.DSH_HOME || '/root/.dsh', 'storages', 'smooth-stream-settings.json')
+
+  function loadSettings(): StreamSettings {
+    try {
+      if (existsSync(SETTINGS_FILE)) {
+        const saved = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
+        return {
+          ...DEFAULT_STREAM_SETTINGS,
+          ...saved,
+          debugTuning: {
+            ...DEFAULT_STREAM_SETTINGS.debugTuning,
+            ...(saved.debugTuning || {}),
+          },
+        }
+      }
+    } catch (e) {
+      console.warn('[dsh-smooth-stream] loadSettings error:', e)
+    }
+    return {
+      ...DEFAULT_STREAM_SETTINGS,
+      debugTuning: { ...DEFAULT_STREAM_SETTINGS.debugTuning },
+    }
+  }
+
+  function saveSettings(settings: StreamSettings): void {
+    try {
+      mkdirSync(dirname(SETTINGS_FILE), { recursive: true })
+      writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf8')
+    } catch (e) {
+      console.warn('[dsh-smooth-stream] saveSettings error:', e)
+    }
+  }
+
+  let currentSettings: StreamSettings = loadSettings()
+
   ctx.inject(['webServer'], (httpCtx) => {
     httpCtx.effect(
       () => httpCtx.webServer.tapIndex(html => injectStreamConfig(html, config)),
       'dsh-smooth-stream: boot config bridge',
     )
-  })
-  // The core settings RPC deliberately filters third-party namespaces. Keep
-  // the durable provider as the authority, but expose this one schema through
-  // the plugin's own loopback-only connection channel instead.
-  ctx.inject(['settings'], (settingsCtx) => {
-    // 0.1.2 kernels dropped the `settingsNamespace()` helper — a validating
-    // identity on ≤ 0.1.1 — and take the raw string, so the rc-era brand is
-    // reproduced locally instead of statically importing a removed symbol.
-    // The namespace is a compile-time constant matching the kernel's
-    // /^[a-z][a-z0-9-]*$/ pattern.
-    const settingsNamespace = STREAM_SETTINGS_NS as SettingsNamespace
-    const scope = settingsCtx.settings.register(
-      settingsNamespace,
-      StreamSettingsSchema,
-      { applies: 'live' },
-    )
-    settingsCtx.inject(['connection', 'webServer'], (connectionCtx) => {
-      let upgrade: Promise<void> | undefined
 
-      const view = (): StreamSettingsView => {
-        const installation = inspectProfileInstallation(connectionCtx.baseUrl, STREAM_PACKAGE_NAME)
-        const settings = scope.get()
-        return {
-          version: STREAM_PACKAGE_VERSION,
-          installation: installation.kind,
-          writable: connectionCtx.settings.writable,
-          enabled: settings.enabled,
-          controlScroll: settings.controlScroll,
-          motionPreference: settings.motionPreference,
-          thinkAutoExpand: settings.thinkAutoExpand,
-          logarithmicFade: settings.logarithmicFade,
-          canUpgrade: installation.kind === 'npm',
-        }
-      }
-
-      const debugView = (): StreamDebugSettingsView => {
-        const settings = scope.get()
-        return {
-          debugEnabled: settings.debugEnabled,
-          tuning: { ...settings.debugTuning },
-        }
-      }
-
-      const validDebugTuning = (value: unknown): value is StreamDebugTuning => {
-        if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
-        const tuning = value as Record<string, unknown>
-        return typeof tuning.revealScale === 'number'
-          && tuning.revealScale >= 0.25 && tuning.revealScale <= 2
-          && typeof tuning.queuePressure === 'number'
-          && tuning.queuePressure >= 0 && tuning.queuePressure <= 2
-          && typeof tuning.maxRevealCps === 'number'
-          && tuning.maxRevealCps >= 120 && tuning.maxRevealCps <= 1000
-          && typeof tuning.springStiffness === 'number'
-          && tuning.springStiffness >= 40 && tuning.springStiffness <= 320
-          && typeof tuning.springDamping === 'number'
-          && tuning.springDamping >= 8 && tuning.springDamping <= 80
-          && typeof tuning.springMass === 'number'
-          && tuning.springMass >= 0.5 && tuning.springMass <= 3
-          && typeof tuning.runwayPx === 'number'
-          && tuning.runwayPx >= 0 && tuning.runwayPx <= 120
-          && typeof tuning.reserveResponseMs === 'number'
-          && tuning.reserveResponseMs >= 60 && tuning.reserveResponseMs <= 600
-          && typeof tuning.backpressureMinScale === 'number'
-          && tuning.backpressureMinScale >= 0.25 && tuning.backpressureMinScale <= 1
-      }
-
-      const handle: ConnectionRpcHandler = async (endpoint, payload) => {
-        if (endpoint === STREAM_SETTINGS_RPC.read) return { ok: true, value: view() }
-        if (endpoint === STREAM_SETTINGS_RPC.write) {
-          if (typeof payload !== 'object' || payload === null || Array.isArray(payload)
-            || typeof (payload as { enabled?: unknown }).enabled !== 'boolean'
-            || typeof (payload as { controlScroll?: unknown }).controlScroll !== 'boolean'
-            || typeof (payload as { thinkAutoExpand?: unknown }).thinkAutoExpand !== 'boolean'
-          ) {
-            return {
-              ok: false,
-              error: {
-                code: 'settings-rejected',
-                message: 'enabled, controlScroll and thinkAutoExpand must be booleans',
-                details: { ns: STREAM_SETTINGS_NS },
-              },
-            }
-          }
-          if (!connectionCtx.settings.writable) {
-            return {
-              ok: false,
-              error: {
-                code: 'settings-rejected',
-                message: 'smooth-stream settings are read-only',
-                details: { ns: STREAM_SETTINGS_NS },
-              },
-            }
-          }
-          try {
-            const next = payload as {
-              enabled: boolean
-              controlScroll: boolean
-              motionPreference?: unknown
-              thinkAutoExpand: boolean
-              logarithmicFade?: unknown
-              debugEnabled?: unknown
-              debugTuning?: unknown
-            }
-            if (
-              next.motionPreference !== undefined
-              && next.motionPreference !== 'auto'
-              && next.motionPreference !== 'force-smooth'
-              && next.motionPreference !== 'force-reduced'
-            ) {
-              return {
-                ok: false,
-                error: {
-                  code: 'settings-rejected',
-                  message: 'motionPreference must be one of auto | force-smooth | force-reduced',
-                  details: { ns: STREAM_SETTINGS_NS },
-                },
-              }
-            }
-            if (next.logarithmicFade !== undefined && typeof next.logarithmicFade !== 'boolean') {
-              return {
-                ok: false,
-                error: {
-                  code: 'settings-rejected',
-                  message: 'logarithmicFade must be a boolean',
-                  details: { ns: STREAM_SETTINGS_NS },
-                },
-              }
-            }
-            const hasDebug = next.debugEnabled !== undefined || next.debugTuning !== undefined
-            if (hasDebug && (typeof next.debugEnabled !== 'boolean' || !validDebugTuning(next.debugTuning))) {
-              return {
-                ok: false,
-                error: {
-                  code: 'settings-rejected',
-                  message: 'debugEnabled and debugTuning must be provided together and be valid',
-                  details: { ns: STREAM_SETTINGS_NS },
-                },
-              }
-            }
-            await scope.update({
-              enabled: next.enabled,
-              controlScroll: next.controlScroll,
-              ...(next.motionPreference === undefined ? {} : { motionPreference: next.motionPreference }),
-              thinkAutoExpand: next.thinkAutoExpand,
-              ...(next.logarithmicFade === undefined ? {} : { logarithmicFade: next.logarithmicFade }),
-              ...(hasDebug ? { debugEnabled: next.debugEnabled, debugTuning: next.debugTuning } : {}),
-            })
-          } catch {
-            return {
-              ok: false,
-              error: {
-                code: 'settings-rejected',
-                message: 'smooth-stream settings update failed',
-                details: { ns: STREAM_SETTINGS_NS },
-              },
-            }
-          }
-          return { ok: true, value: view() }
-        }
-        if (endpoint === STREAM_SETTINGS_RPC.debugRead) return { ok: true, value: debugView() }
-        if (endpoint === STREAM_SETTINGS_RPC.debugWrite) {
-          if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
-            return {
-              ok: false,
-              error: {
-                code: 'settings-rejected',
-                message: 'debug settings must be an object',
-                details: { ns: STREAM_SETTINGS_NS },
-              },
-            }
-          }
-          const next = payload as { debugEnabled?: unknown; tuning?: unknown }
-          if (typeof next.debugEnabled !== 'boolean' || !validDebugTuning(next.tuning)) {
-            return {
-              ok: false,
-              error: {
-                code: 'settings-rejected',
-                message: 'debugEnabled and tuning are malformed',
-                details: { ns: STREAM_SETTINGS_NS },
-              },
-            }
-          }
-          if (!connectionCtx.settings.writable) {
-            return {
-              ok: false,
-              error: {
-                code: 'settings-rejected',
-                message: 'smooth-stream debug settings are read-only',
-                details: { ns: STREAM_SETTINGS_NS },
-              },
-            }
-          }
-          try {
-            await scope.update({ debugEnabled: next.debugEnabled, debugTuning: next.tuning })
-          } catch {
-            return {
-              ok: false,
-              error: {
-                code: 'settings-rejected',
-                message: 'smooth-stream debug settings update failed',
-                details: { ns: STREAM_SETTINGS_NS },
-              },
-            }
-          }
-          return { ok: true, value: debugView() }
-        }
-        if (endpoint === STREAM_SETTINGS_RPC.upgrade) {
-          const installation = inspectProfileInstallation(connectionCtx.baseUrl, STREAM_PACKAGE_NAME)
-          if (installation.kind !== 'npm') {
-            return { ok: false, error: { code: 'internal', message: 'smooth-stream is not an npm profile dependency', details: {} } }
-          }
-          if (upgrade !== undefined) {
-            return { ok: false, error: { code: 'internal', message: 'smooth-stream update is already running', details: {} } }
-          }
-          upgrade = updateNpmProfilePackage(installation.profileDir, STREAM_PACKAGE_NAME)
-          try {
-            await upgrade
-          } catch {
-            return { ok: false, error: { code: 'internal', message: 'smooth-stream update failed', details: {} } }
-          } finally {
-            upgrade = undefined
-          }
-          return { ok: true, value: { restartRequired: true } }
-        }
-        return { ok: false, error: { code: 'internal', message: `unknown smooth-stream endpoint ${JSON.stringify(endpoint)}`, details: {} } }
-      }
-      registerSettingsChannel(connectionCtx, STREAM_SETTINGS_RPC_CHANNEL, handle)
+    let connectionSvc: any = null
+    ctx.inject(['connection'], (c) => {
+      connectionSvc = (c as any).connection
     })
+
+    const view = (): StreamSettingsView => {
+      const baseUrl = connectionSvc?.baseUrl
+      const installation = inspectProfileInstallation(baseUrl, STREAM_PACKAGE_NAME)
+      return {
+        version: STREAM_PACKAGE_VERSION,
+        installation: installation.kind === 'unmanaged' ? 'development' : installation.kind,
+        writable: true,
+        enabled: currentSettings.enabled,
+        controlScroll: currentSettings.controlScroll,
+        motionPreference: currentSettings.motionPreference,
+        thinkAutoExpand: currentSettings.thinkAutoExpand,
+        logarithmicFade: currentSettings.logarithmicFade,
+        canUpgrade: installation.kind === 'npm',
+      }
+    }
+
+    const debugView = (): StreamDebugSettingsView => {
+      return {
+        debugEnabled: currentSettings.debugEnabled,
+        tuning: { ...currentSettings.debugTuning },
+      }
+    }
+
+    const validDebugTuning = (value: unknown): value is StreamDebugTuning => {
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+      const tuning = value as Record<string, unknown>
+      return typeof tuning.revealScale === 'number'
+        && tuning.revealScale >= 0.25 && tuning.revealScale <= 2
+        && typeof tuning.queuePressure === 'number'
+        && tuning.queuePressure >= 0 && tuning.queuePressure <= 2
+        && typeof tuning.maxRevealCps === 'number'
+        && tuning.maxRevealCps >= 120 && tuning.maxRevealCps <= 1000
+        && typeof tuning.springStiffness === 'number'
+        && tuning.springStiffness >= 40 && tuning.springStiffness <= 320
+        && typeof tuning.springDamping === 'number'
+        && tuning.springDamping >= 8 && tuning.springDamping <= 80
+        && typeof tuning.springMass === 'number'
+        && tuning.springMass >= 0.5 && tuning.springMass <= 3
+        && typeof tuning.runwayPx === 'number'
+        && tuning.runwayPx >= 0 && tuning.runwayPx <= 120
+        && typeof tuning.reserveResponseMs === 'number'
+        && tuning.reserveResponseMs >= 60 && tuning.reserveResponseMs <= 600
+        && typeof tuning.backpressureMinScale === 'number'
+        && tuning.backpressureMinScale >= 0.25 && tuning.backpressureMinScale <= 1
+    }
+
+    let upgrade: Promise<void> | undefined
+
+    const handle: ConnectionRpcHandler = async (endpoint, payload) => {
+      if (endpoint === STREAM_SETTINGS_RPC.read) return { ok: true, value: view() }
+      if (endpoint === STREAM_SETTINGS_RPC.write) {
+        if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+          return {
+            ok: false,
+            error: {
+              code: 'settings-rejected',
+              message: 'payload must be an object',
+              details: { ns: STREAM_SETTINGS_NS },
+            },
+          }
+        }
+        const next = payload as Partial<StreamSettings>
+        if (typeof next.enabled === 'boolean') currentSettings.enabled = next.enabled
+        if (typeof next.controlScroll === 'boolean') currentSettings.controlScroll = next.controlScroll
+        if (next.motionPreference !== undefined) currentSettings.motionPreference = next.motionPreference
+        if (typeof next.thinkAutoExpand === 'boolean') currentSettings.thinkAutoExpand = next.thinkAutoExpand
+        if (typeof next.logarithmicFade === 'boolean') currentSettings.logarithmicFade = next.logarithmicFade
+        if (typeof next.debugEnabled === 'boolean') currentSettings.debugEnabled = next.debugEnabled
+        if (next.debugTuning && validDebugTuning(next.debugTuning)) {
+          currentSettings.debugTuning = {
+            ...currentSettings.debugTuning,
+            ...next.debugTuning,
+          }
+        }
+        saveSettings(currentSettings)
+        return { ok: true, value: view() }
+      }
+      if (endpoint === STREAM_SETTINGS_RPC.debugRead) return { ok: true, value: debugView() }
+      if (endpoint === STREAM_SETTINGS_RPC.debugWrite) {
+        if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+          return {
+            ok: false,
+            error: {
+              code: 'settings-rejected',
+              message: 'debug settings must be an object',
+              details: { ns: STREAM_SETTINGS_NS },
+            },
+          }
+        }
+        const next = payload as { debugEnabled?: unknown; tuning?: unknown }
+        if (typeof next.debugEnabled === 'boolean') currentSettings.debugEnabled = next.debugEnabled
+        if (next.tuning && validDebugTuning(next.tuning)) {
+          currentSettings.debugTuning = {
+            ...currentSettings.debugTuning,
+            ...next.tuning,
+          }
+        }
+        saveSettings(currentSettings)
+        return { ok: true, value: debugView() }
+      }
+      if (endpoint === STREAM_SETTINGS_RPC.upgrade) {
+        const baseUrl = connectionSvc?.baseUrl
+        const installation = inspectProfileInstallation(baseUrl, STREAM_PACKAGE_NAME)
+        if (installation.kind !== 'npm') {
+          return { ok: false, error: { code: 'internal', message: 'smooth-stream is not an npm profile dependency', details: {} } }
+        }
+        if (upgrade !== undefined) {
+          return { ok: false, error: { code: 'internal', message: 'smooth-stream update is already running', details: {} } }
+        }
+        upgrade = updateNpmProfilePackage(installation.profileDir, STREAM_PACKAGE_NAME)
+        try {
+          await upgrade
+        } catch {
+          return { ok: false, error: { code: 'internal', message: 'smooth-stream update failed', details: {} } }
+        } finally {
+          upgrade = undefined
+        }
+        return { ok: true, value: { restartRequired: true } }
+      }
+      return { ok: false, error: { code: 'internal', message: `unknown smooth-stream endpoint ${JSON.stringify(endpoint)}`, details: {} } }
+    }
+
+    httpCtx.effect(() => httpCtx.webServer.register({
+      kind: 'prefix',
+      path: STREAM_SETTINGS_RPC_CHANNEL,
+      handler: async (req, res) => {
+        const conn = connectionSvc || ctx.get('connection')
+        if (conn && typeof (conn as any).requestRejection === 'function') {
+          const rejection = (conn as any).requestRejection(req)
+          if (rejection !== undefined) {
+            res.writeHead(rejection)
+            res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+            return
+          }
+        }
+        await answer(req, res, STREAM_SETTINGS_RPC_CHANNEL, handle)
+      },
+    }), 'dsh-smooth-stream: /smooth-stream direct route')
   })
 }

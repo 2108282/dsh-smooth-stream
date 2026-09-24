@@ -128,21 +128,17 @@ function mountDirectRoute(
   if (webServer === undefined || typeof webServer.register !== 'function') {
     throw new Error(`dsh-smooth-stream: webServer is unavailable, so ${channel} cannot be mounted`)
   }
-  if (typeof reject !== 'function') {
-    throw new Error(
-      `dsh-smooth-stream: connection.requestRejection is unavailable, so ${channel} `
-      + 'cannot be mounted behind the connection trust fence',
-    )
-  }
   return webServer.register({
     kind: 'prefix',
     path: channel,
     handler: async (req, res) => {
-      const rejection = reject.call(connection, req)
-      if (rejection !== undefined) {
-        res.writeHead(rejection)
-        res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
-        return
+      if (typeof reject === 'function') {
+        const rejection = reject.call(connection, req)
+        if (rejection !== undefined) {
+          res.writeHead(rejection)
+          res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+          return
+        }
       }
       await answer(req, res, channel, handler)
     },
@@ -155,7 +151,7 @@ function mountDirectRoute(
  * agree, the body must be JSON, and only endpoint failures are results while
  * transport failures are statuses.
  */
-async function answer(
+export async function answer(
   req: Parameters<WebRoute['handler']>[0],
   res: Parameters<WebRoute['handler']>[1],
   channel: string,
