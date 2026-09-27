@@ -67,6 +67,7 @@ export const StreamSettingsSchema: Schema<StreamSettings> = Schema.object({
   ] as const).default(DEFAULT_STREAM_SETTINGS.motionPreference),
   thinkAutoExpand: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.thinkAutoExpand),
   logarithmicFade: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.logarithmicFade),
+  fastFold: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.fastFold),
   keepStreamOnToolCall: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.keepStreamOnToolCall),
   debugEnabled: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.debugEnabled),
   debugTuning: Schema.object({
@@ -155,6 +156,7 @@ export function apply(ctx: Context, config: Config): void {
         motionPreference: currentSettings.motionPreference,
         thinkAutoExpand: currentSettings.thinkAutoExpand,
         logarithmicFade: currentSettings.logarithmicFade,
+        fastFold: currentSettings.fastFold ?? DEFAULT_STREAM_SETTINGS.fastFold,
         keepStreamOnToolCall: currentSettings.keepStreamOnToolCall,
         canUpgrade: installation.kind === 'npm',
       }
@@ -211,6 +213,7 @@ export function apply(ctx: Context, config: Config): void {
         if (next.motionPreference !== undefined) currentSettings.motionPreference = next.motionPreference
         if (typeof next.thinkAutoExpand === 'boolean') currentSettings.thinkAutoExpand = next.thinkAutoExpand
         if (typeof next.logarithmicFade === 'boolean') currentSettings.logarithmicFade = next.logarithmicFade
+        if (typeof next.fastFold === 'boolean') currentSettings.fastFold = next.fastFold
         if (typeof next.keepStreamOnToolCall === 'boolean') currentSettings.keepStreamOnToolCall = next.keepStreamOnToolCall
         if (typeof next.debugEnabled === 'boolean') currentSettings.debugEnabled = next.debugEnabled
         if (next.debugTuning && validDebugTuning(next.debugTuning)) {

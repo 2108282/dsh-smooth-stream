@@ -58,6 +58,7 @@ export type SmoothStreamLocaleKey =
   | 'motionForceReduced' | 'motionForceReducedHint'
   | 'thinkAutoExpand' | 'thinkAutoExpandHint'
   | 'logarithmicFade' | 'logarithmicFadeHint'
+  | 'fastFold' | 'fastFoldHint'
   | 'keepStreamOnToolCall' | 'keepStreamOnToolCallHint'
   | 'debugEnabled' | 'debugEnabledHint' | 'debugUnavailable'
   | 'debugPanelTitle' | 'debugPanelToggle' | 'debugPanelClose' | 'debugGuide'
@@ -98,6 +99,8 @@ export const en: Record<SmoothStreamLocaleKey, string> = {
   thinkAutoExpand: 'Auto-expand thinking',
   logarithmicFade: 'Logarithmic fade',
   logarithmicFadeHint: 'Fade new answer and expanded thinking text into view. Follows the motion preference.',
+  fastFold: 'Fast fold acceleration',
+  fastFoldHint: 'Detach collapsed tool steps from the layout tree using display: none, eliminating reflow stutter during streaming in long conversations.',
   keepStreamOnToolCall: 'Keep streaming before tool calls',
   keepStreamOnToolCallHint: 'Do not end text streaming early when followed by a tool call; preserve fluid typewriter reveal.',
   thinkAutoExpandHint: 'Open the thinking block while it streams. Turn off to keep it collapsed.',
@@ -190,6 +193,8 @@ export const zh: Record<SmoothStreamLocaleKey, string> = {
   thinkAutoExpand: '自动展开思考',
   logarithmicFade: '对数淡入',
   logarithmicFadeHint: '让回答正文和展开的思考文字由淡变实，遵循动效偏好。',
+  fastFold: '折叠彻底跳过排版（长对话极速出字）',
+  fastFoldHint: '收起已完成的工具步骤时使用 display: none 彻底脱离排版树，根除长对话下出字与滚动的严重卡顿（仅失去针对收缩内容的 Ctrl+F 页面搜索）。',
   keepStreamOnToolCall: '工具引导语保持流式',
   keepStreamOnToolCallHint: '文字后紧接工具调用时不提前宣告结束，让短引导语保持平滑打字。',
   thinkAutoExpandHint: '思考块在流式时自动展开；关闭后保持折叠，可手动展开。',

@@ -88,6 +88,11 @@ export interface StreamSettings {
   thinkAutoExpand: boolean
   /** Logarithmic text fade for the answer and expanded thinking body. */
   logarithmicFade: boolean
+  /**
+   * Fast fold acceleration: detaches collapsed tool process nodes from the layout
+   * tree using display: none, eliminating streaming reflow lag in long conversations.
+   */
+  fastFold: boolean
   /** Whether text followed by a tool call keeps streaming instead of closing immediately. */
   keepStreamOnToolCall: boolean
   /** Whether the live renderer diagnostics panel is enabled. */
@@ -103,6 +108,7 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   motionPreference: 'auto',
   thinkAutoExpand: true,
   logarithmicFade: true,
+  fastFold: true,
   keepStreamOnToolCall: true,
   debugEnabled: false,
   debugTuning: DEFAULT_STREAM_DEBUG_TUNING,

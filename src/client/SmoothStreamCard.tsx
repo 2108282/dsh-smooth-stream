@@ -41,6 +41,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
       motionPreference: 'auto' as const,
       thinkAutoExpand: false,
       logarithmicFade: true,
+      fastFold: true,
       keepStreamOnToolCall: true,
       debugEnabled: false,
       debugTuning: {
@@ -128,6 +129,19 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                     />
                   </span>
                   <span className={css.hint}>{t('controlScrollHint')}</span>
+                </label>
+                <label className={state.enabled ? css.field : `${css.field} ${css.fieldDisabled}`}>
+                  <span className={css.fieldHead}>
+                    <span className={css.label}>{t('fastFold')}</span>
+                    <input
+                      type="checkbox"
+                      className={css.toggle}
+                      checked={state.fastFold}
+                      disabled={!state.writable || state.saving || !state.enabled}
+                      onChange={(event) => { edit({ fastFold: event.target.checked }) }}
+                    />
+                  </span>
+                  <span className={css.hint}>{t('fastFoldHint')}</span>
                 </label>
                 <label className={state.enabled ? css.field : `${css.field} ${css.fieldDisabled}`}>
                   <span className={css.fieldHead}>

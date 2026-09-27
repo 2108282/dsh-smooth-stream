@@ -160,6 +160,7 @@ class SettingsCell {
       && next.motionPreference === this.value.motionPreference
       && next.thinkAutoExpand === this.value.thinkAutoExpand
       && next.logarithmicFade === this.value.logarithmicFade
+      && next.fastFold === this.value.fastFold
       && next.keepStreamOnToolCall === this.value.keepStreamOnToolCall
       && next.debugEnabled === this.value.debugEnabled
       && next.debugTuning === this.value.debugTuning
@@ -182,6 +183,32 @@ class SettingsCell {
   }
 }
 
+const FAST_FOLD_STYLE_ID = 'smooth-stream-fast-fold-style'
+
+function ensureFastFoldStyles(): void {
+  if (typeof document === 'undefined') return
+  if (document.getElementById(FAST_FOLD_STYLE_ID) !== null) return
+  const style = document.createElement('style')
+  style.id = FAST_FOLD_STYLE_ID
+  style.textContent = `
+    html[data-smooth-stream-fast-fold="true"] [data-turn-process-hidden],
+    html[data-smooth-stream-fast-fold="true"] [hidden="until-found"] {
+      display: none !important;
+    }
+  `
+  document.head.appendChild(style)
+}
+
+function syncFastFold(enabled: boolean): void {
+  if (typeof document === 'undefined') return
+  ensureFastFoldStyles()
+  if (enabled) {
+    document.documentElement.setAttribute('data-smooth-stream-fast-fold', 'true')
+  } else {
+    document.documentElement.removeAttribute('data-smooth-stream-fast-fold')
+  }
+}
+
 /**
  * Register the typewriter renderer after the conversation package declares the
  * keyed Chat node seat. A lower priority shadows the built-in assistant row;
@@ -196,6 +223,10 @@ class SettingsCell {
 export function apply(ctx: ClientContext): void {
   const config = readBootConfig()
   const settings = new SettingsCell()
+  syncFastFold(settings.getSnapshot().fastFold)
+  settings.subscribe(() => {
+    syncFastFold(settings.getSnapshot().fastFold)
+  })
   const useControlScroll = (): boolean => useSyncExternalStore(
     settings.subscribe,
     () => settings.getSnapshot().controlScroll,
