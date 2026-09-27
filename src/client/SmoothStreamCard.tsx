@@ -42,6 +42,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
       thinkAutoExpand: false,
       logarithmicFade: true,
       fastFold: true,
+      fastPipeline: true,
       keepStreamOnToolCall: true,
       debugEnabled: false,
       debugTuning: {
@@ -142,6 +143,19 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                     />
                   </span>
                   <span className={css.hint}>{t('fastFoldHint')}</span>
+                </label>
+                <label className={state.enabled ? css.field : `${css.field} ${css.fieldDisabled}`}>
+                  <span className={css.fieldHead}>
+                    <span className={css.label}>{t('fastPipeline')}</span>
+                    <input
+                      type="checkbox"
+                      className={css.toggle}
+                      checked={state.fastPipeline}
+                      disabled={!state.writable || state.saving || !state.enabled}
+                      onChange={(event) => { edit({ fastPipeline: event.target.checked }) }}
+                    />
+                  </span>
+                  <span className={css.hint}>{t('fastPipelineHint')}</span>
                 </label>
                 <label className={state.enabled ? css.field : `${css.field} ${css.fieldDisabled}`}>
                   <span className={css.fieldHead}>

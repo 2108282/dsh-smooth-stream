@@ -93,6 +93,11 @@ export interface StreamSettings {
    * tree using display: none, eliminating streaming reflow lag in long conversations.
    */
   fastFold: boolean
+  /**
+   * Fast pipeline dispatch: bypasses DSH 3-frame nested rAF bottleneck,
+   * restoring true 60/120fps streaming animation without lag.
+   */
+  fastPipeline: boolean
   /** Whether text followed by a tool call keeps streaming instead of closing immediately. */
   keepStreamOnToolCall: boolean
   /** Whether the live renderer diagnostics panel is enabled. */
@@ -109,6 +114,7 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   thinkAutoExpand: true,
   logarithmicFade: true,
   fastFold: true,
+  fastPipeline: true,
   keepStreamOnToolCall: true,
   debugEnabled: false,
   debugTuning: DEFAULT_STREAM_DEBUG_TUNING,

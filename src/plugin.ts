@@ -68,6 +68,7 @@ export const StreamSettingsSchema: Schema<StreamSettings> = Schema.object({
   thinkAutoExpand: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.thinkAutoExpand),
   logarithmicFade: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.logarithmicFade),
   fastFold: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.fastFold),
+  fastPipeline: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.fastPipeline),
   keepStreamOnToolCall: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.keepStreamOnToolCall),
   debugEnabled: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.debugEnabled),
   debugTuning: Schema.object({
@@ -157,6 +158,7 @@ export function apply(ctx: Context, config: Config): void {
         thinkAutoExpand: currentSettings.thinkAutoExpand,
         logarithmicFade: currentSettings.logarithmicFade,
         fastFold: currentSettings.fastFold ?? DEFAULT_STREAM_SETTINGS.fastFold,
+        fastPipeline: currentSettings.fastPipeline ?? DEFAULT_STREAM_SETTINGS.fastPipeline,
         keepStreamOnToolCall: currentSettings.keepStreamOnToolCall,
         canUpgrade: installation.kind === 'npm',
       }
@@ -214,6 +216,7 @@ export function apply(ctx: Context, config: Config): void {
         if (typeof next.thinkAutoExpand === 'boolean') currentSettings.thinkAutoExpand = next.thinkAutoExpand
         if (typeof next.logarithmicFade === 'boolean') currentSettings.logarithmicFade = next.logarithmicFade
         if (typeof next.fastFold === 'boolean') currentSettings.fastFold = next.fastFold
+        if (typeof next.fastPipeline === 'boolean') currentSettings.fastPipeline = next.fastPipeline
         if (typeof next.keepStreamOnToolCall === 'boolean') currentSettings.keepStreamOnToolCall = next.keepStreamOnToolCall
         if (typeof next.debugEnabled === 'boolean') currentSettings.debugEnabled = next.debugEnabled
         if (next.debugTuning && validDebugTuning(next.debugTuning)) {

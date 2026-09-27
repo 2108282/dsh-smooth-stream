@@ -35,6 +35,8 @@ export interface StreamSettingsView {
   logarithmicFade: boolean
   /** Whether collapsed tool steps are detached via display: none. */
   fastFold: boolean
+  /** Whether DSH 3-frame nested rAF throttle is bypassed into native single-frame dispatch. */
+  fastPipeline: boolean
   /** Whether text followed by a tool call keeps streaming instead of closing immediately. */
   keepStreamOnToolCall: boolean
   /** Whether a fixed npm update command is safe to offer. */

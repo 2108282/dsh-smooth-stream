@@ -161,6 +161,7 @@ class SettingsCell {
       && next.thinkAutoExpand === this.value.thinkAutoExpand
       && next.logarithmicFade === this.value.logarithmicFade
       && next.fastFold === this.value.fastFold
+      && next.fastPipeline === this.value.fastPipeline
       && next.keepStreamOnToolCall === this.value.keepStreamOnToolCall
       && next.debugEnabled === this.value.debugEnabled
       && next.debugTuning === this.value.debugTuning
@@ -210,6 +211,68 @@ function syncFastFold(enabled: boolean): void {
 }
 
 /**
+ * Self-healing optimizer for DSH conversation pipeline.
+ *
+ * DSH core (@deepseek-ai/dsh-client-ui-conversation) ships with a nested 3-frame
+ * requestAnimationFrame throttle on "animation-frame" publications, introducing
+ * a hard ~50ms artificial latency between streaming tokens and causing severe
+ * stuttering on long conversations.
+ *
+ * This hook detects the active BoundConversation prototype and replaces the 3-frame
+ * nest with an immediate single-frame dispatch whenever fastPipeline is active.
+ * Because it hooks dynamically in browser memory, it persists across any reinstall
+ * or upgrade of DSH packages.
+ */
+function healDshConversationPipeline(ctx: ClientContext, settings: SettingsCell): void {
+  ctx.inject(['uiConversation'], (scopedCtx: any) => {
+    const uiConv = scopedCtx.uiConversation ?? scopedCtx.get?.('uiConversation')
+    if (!uiConv) return
+
+    const patchPrototype = (binding: any): void => {
+      if (!binding) return
+      const proto = Object.getPrototypeOf(binding)
+      if (proto && !proto.__dshSmoothStreamFastPublishPatched && typeof proto.publish === 'function') {
+        proto.__dshSmoothStreamFastPublishPatched = true
+        const originalPublish = proto.publish
+        proto.publish = function (publication: string) {
+          if (publication === 'animation-frame' && settings.getSnapshot().fastPipeline && typeof requestAnimationFrame === 'function') {
+            if (this.frame !== undefined) return
+            this.frame = requestAnimationFrame(() => {
+              this.frame = undefined
+              this.flush()
+            })
+            return
+          }
+          return originalPublish.call(this, publication)
+        }
+        console.info('[dsh-smooth-stream] Self-healed DSH 3-frame rAF throttle into native 60/120fps dispatch')
+      }
+    }
+
+    try {
+      if (uiConv.bindings && typeof uiConv.bindings.values === 'object') {
+        for (const record of uiConv.bindings.values) {
+          if (record?.binding) {
+            patchPrototype(record.binding)
+            break
+          }
+        }
+      }
+    } catch {}
+
+    const origBinding = uiConv.binding
+    if (typeof origBinding === 'function' && !uiConv.__dshSmoothStreamBindingPatched) {
+      uiConv.__dshSmoothStreamBindingPatched = true
+      uiConv.binding = function (...args: any[]) {
+        const result = origBinding.apply(this, args)
+        patchPrototype(result)
+        return result
+      }
+    }
+  })
+}
+
+/**
  * Register the typewriter renderer after the conversation package declares the
  * keyed Chat node seat. A lower priority shadows the built-in assistant row;
  * every other keyed renderer is wrapped in place so Context, commands, Tool
@@ -227,6 +290,7 @@ export function apply(ctx: ClientContext): void {
   settings.subscribe(() => {
     syncFastFold(settings.getSnapshot().fastFold)
   })
+  healDshConversationPipeline(ctx, settings)
   const useControlScroll = (): boolean => useSyncExternalStore(
     settings.subscribe,
     () => settings.getSnapshot().controlScroll,
