@@ -223,26 +223,67 @@ export function wrapFollowNodeView(
         if (pulseTimerRef.current !== null) clearTimeout(pulseTimerRef.current)
       }
     }, [])
+
+    const [precedingTyping, setPrecedingTyping] = useState(false)
+    const isLocationOpen = openAgentLocation(props.node)
+
+    useLayoutEffect(() => {
+      if (!isLocationOpen) {
+        setPrecedingTyping(false)
+        return
+      }
+      const checkPreceding = () => {
+        const root = hostRef.current
+        if (!root) return false
+        const flowItem = root.closest('[data-chat-flow-key]')
+        if (!flowItem) return false
+        let prev = flowItem.previousElementSibling
+        while (prev instanceof HTMLElement) {
+          if (prev.hasAttribute('data-chat-flow-key')) {
+            return prev.querySelector('[data-smooth-stream-typing="true"]') !== null
+          }
+          prev = prev.previousElementSibling
+        }
+        return false
+      }
+
+      setPrecedingTyping(checkPreceding())
+
+      const root = hostRef.current
+      const flow = root?.closest('[data-chat-flow]')
+      if (!flow || typeof MutationObserver === 'undefined') return
+
+      const observer = new MutationObserver(() => {
+        setPrecedingTyping(checkPreceding())
+      })
+      observer.observe(flow, {
+        attributes: true,
+        attributeFilter: ['data-smooth-stream-typing'],
+        subtree: true,
+      })
+      return () => observer.disconnect()
+    }, [isLocationOpen])
+
+    const waiting = isLocationOpen && precedingTyping
+
     return (
-      <FollowHost
-        active={growing}
-        entrance={entering || growthPulse}
-        onEntranceSettled={finishEntrance}
-        onGrowth={followable ? onGrowth : undefined}
-        entranceExtentRef={growthExtentRef}
-        speedCpsRef={speedCpsRef}
-        controlScroll={controlScroll}
-        // Generic Agent rows reveal and spring their measured growth, but do
-        // not continuously reserve space for a future Markdown line wrap.
-        // Keeping that assistant-only prediction here creates an idle gap
-        // above TurnStatus and a visible return when a short Tool row settles.
-        predictive={false}
-        hostRef={hostRef}
-        className={entranceCss.surface}
-        entranceActive={entering || growthPulse}
-      >
-        {createElement(Inner, props)}
-      </FollowHost>
+      <div style={waiting ? { display: 'none' } : undefined}>
+        <FollowHost
+          active={!waiting && growing}
+          entrance={!waiting && (entering || growthPulse)}
+          onEntranceSettled={finishEntrance}
+          onGrowth={followable && !waiting ? onGrowth : undefined}
+          entranceExtentRef={growthExtentRef}
+          speedCpsRef={speedCpsRef}
+          controlScroll={controlScroll}
+          predictive={false}
+          hostRef={hostRef}
+          className={entranceCss.surface}
+          entranceActive={!waiting && (entering || growthPulse)}
+        >
+          {createElement(Inner, props)}
+        </FollowHost>
+      </div>
     )
   }
 }

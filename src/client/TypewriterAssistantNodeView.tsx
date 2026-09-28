@@ -48,7 +48,6 @@ interface AnimatedMarkdownTextProps extends MarkdownProps {
   streaming: boolean
   hasToolCallBelow?: boolean
   isTurnOpen?: boolean
-  turnKey?: string
   keepStreamOnToolCall?: boolean
   logarithmicFade: boolean
   /** Whether the resolved reduced-motion gate keeps the reveal engine off. */
@@ -59,6 +58,7 @@ interface AnimatedMarkdownTextProps extends MarkdownProps {
   followRevealedCharsRef?: { current: number } | undefined
   followRevealScaleRef?: { current: number } | undefined
   onPredictiveChange?: ((predictive: boolean) => void) | undefined
+  onTypingChange?: ((isTyping: boolean) => void) | undefined
   preset: StreamSmoothingPreset
   shouldHoldBack: () => boolean
   controlScroll?: boolean
@@ -263,7 +263,6 @@ function AnimatedMarkdownText({
   streaming,
   hasToolCallBelow = false,
   isTurnOpen = false,
-  turnKey,
   keepStreamOnToolCall = true,
   logarithmicFade,
   motionReduced,
@@ -272,6 +271,7 @@ function AnimatedMarkdownText({
   followRevealedCharsRef,
   followRevealScaleRef,
   onPredictiveChange,
+  onTypingChange,
   preset,
   shouldHoldBack,
   controlScroll = true,
@@ -306,6 +306,16 @@ function AnimatedMarkdownText({
   }, [shown.length])
 
   const live = typing && !reduced
+  const isRevealing = live && shown.length < text.length
+
+  useEffect(() => {
+    onTypingChange?.(isRevealing)
+  }, [isRevealing, onTypingChange])
+
+  useEffect(() => () => {
+    onTypingChange?.(false)
+  }, [onTypingChange])
+
   useLogarithmicFade(followRootRef, logarithmicFade && !reduced, live, speedCpsRef)
 
   useEffect(() => {
@@ -690,7 +700,6 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
             streaming={streaming}
             hasToolCallBelow={hasToolCallBelow}
             isTurnOpen={turn !== undefined && turn.status === 'open'}
-            turnKey={turnKey}
             keepStreamOnToolCall={keepStreamOnToolCall}
             logarithmicFade={logarithmicFade && data.status !== 'interrupted'}
             motionReduced={reduced}
@@ -699,6 +708,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
             followRevealedCharsRef={index === lastFollow ? rootRevealedCharsRef : undefined}
             followRevealScaleRef={index === lastFollow ? rootRevealScaleRef : undefined}
             onPredictiveChange={index === lastFollow ? updateTextPrediction : undefined}
+            onTypingChange={setChildBlockTyping}
             preset={preset}
             shouldHoldBack={shouldHoldBack}
             controlScroll={controlScroll}
@@ -758,8 +768,16 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
     }
   }
 
+  const [childBlockTyping, setChildBlockTyping] = useState(false)
+  const isTyping = streaming || childBlockTyping
+
   return (
-    <div ref={guardRef} className={css.root} data-streaming={streaming || undefined}>
+    <div
+      ref={guardRef}
+      className={css.root}
+      data-streaming={streaming || undefined}
+      data-smooth-stream-typing={isTyping ? 'true' : undefined}
+    >
       <StreamAnnouncement text={announcementText} active={streaming && !reduced} />
       <FollowHost
         active={streaming && !reduced}
