@@ -1,6 +1,7 @@
-import { createElement, useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentType } from 'react'
+import { createElement, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentType } from 'react'
 import { FollowHost } from './FollowHost.tsx'
 import { useProgressiveDomText } from './useProgressiveDomText.ts'
+import { streamRelay } from './streamRelay.ts'
 import { hasRecentConversationFollow } from './teleprompterGlide.ts'
 import entranceCss from './AgentRowEntrance.module.css'
 
@@ -112,6 +113,17 @@ function liveAgentTailMode(root: HTMLElement): 'turn' | 'handoff' | null {
   return hasRecentConversationFollow(port) ? 'handoff' : null
 }
 
+function getTurnKey(node: unknown): string {
+  if (node === null || typeof node !== 'object' || !('location' in node)) return 'active'
+  const location = (node as { location: unknown }).location
+  if (location === null || typeof location !== 'object') return 'active'
+  if ('turn' in location && location.turn !== null && typeof location.turn === 'object') {
+    const turn = location.turn as { turn?: unknown }
+    if (turn.turn !== undefined) return String(turn.turn)
+  }
+  return 'active'
+}
+
 /**
  * Wrap a prior Agent Chat renderer so its entrance and later growth share
  * conversation follow. Presentation stays with the wrapped component; kit
@@ -122,8 +134,33 @@ function liveAgentTailMode(root: HTMLElement): 'turn' | 'handoff' | null {
 export function wrapFollowNodeView(
   Inner: ComponentType<FollowWrapProps>,
   useControlScroll?: () => boolean,
+  useKeepStreamOnToolCall?: () => boolean,
 ) {
   return function TypewriterFollowNodeView(props: FollowWrapProps) {
+    const keepStreamOnToolCall = useKeepStreamOnToolCall?.() ?? true
+    const turnKey = getTurnKey(props.node)
+    const isLocationOpen = openAgentLocation(props.node)
+    const toolBlocked = useSyncExternalStore(
+      streamRelay.subscribe,
+      () => streamRelay.isToolBlocked(turnKey),
+      () => false,
+    )
+    const [timedOut, setTimedOut] = useState(false)
+    const waiting = keepStreamOnToolCall && isLocationOpen && toolBlocked && !timedOut
+
+    useEffect(() => {
+      if (waiting) {
+        const timer = setTimeout(() => { setTimedOut(true) }, 5000)
+        return () => clearTimeout(timer)
+      } else {
+        setTimedOut(false)
+      }
+    }, [waiting])
+
+    if (waiting) {
+      return null
+    }
+
     const controlScroll = useControlScroll?.() ?? true
     const speedCpsRef = useRef(35)
     const hostRef = useRef<HTMLDivElement>(null)

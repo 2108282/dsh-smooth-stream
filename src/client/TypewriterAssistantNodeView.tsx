@@ -1,9 +1,10 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode, type RefObject } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type ReactNode, type RefObject } from 'react'
 import { IconThinkOutlineRegular, JsonBlock, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import { ImageGallery, type ImageLoader, type MessageImageLabels } from '@deepseek-ai/dsh-client-ui-attachment'
 import type { ChatNodeViewProps, TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { AnimatedDisclosure } from './AnimatedDisclosure.tsx'
 import { notifyFollowCommit } from './teleprompterGlide.ts'
+import { streamRelay } from './streamRelay.ts'
 import { useSmoothStreamContent, type StreamSmoothingPreset } from './useSmoothStreamContent.ts'
 import { useFpsGuard } from './useFpsGuard.ts'
 import { useLogarithmicFade } from './useLogarithmicFade.ts'
@@ -48,6 +49,7 @@ interface AnimatedMarkdownTextProps extends MarkdownProps {
   streaming: boolean
   hasToolCallBelow?: boolean
   isTurnOpen?: boolean
+  turnKey?: string
   keepStreamOnToolCall?: boolean
   logarithmicFade: boolean
   /** Whether the resolved reduced-motion gate keeps the reveal engine off. */
@@ -262,6 +264,7 @@ function AnimatedMarkdownText({
   streaming,
   hasToolCallBelow = false,
   isTurnOpen = false,
+  turnKey,
   keepStreamOnToolCall = true,
   logarithmicFade,
   motionReduced,
@@ -284,12 +287,18 @@ function AnimatedMarkdownText({
   const predictionGeometryRef = useRef<PendingTextGeometry | null>(null)
   const speedCpsRef = followSpeedCpsRef ?? localSpeedCpsRef
 
-  // 如果下面调用工具：在文本全部揭示完毕前不宣告结束（inputComplete 保持 false），避免触发 completion drain 瞬间清仓加速
-  const [shownLength, setShownLength] = useState(0)
-  const effectiveStreaming = streaming || (keepStreaming && shownLength < text.length)
+  // 思考块仍在流式吐字时，正文保持挂起（串行接力）
+  const reasoningActive = useSyncExternalStore(
+    streamRelay.subscribe,
+    () => streamRelay.isReasoningActive(turnKey),
+    () => false,
+  )
+  const waitingForReasoning = isTurnOpen && reasoningActive
+  const canType = typing && !waitingForReasoning
+  const effectiveStreaming = (streaming || (keepStreaming && shownLength < text.length)) && !waitingForReasoning
 
   const displayed = useSmoothStreamContent(text, {
-    enabled: typing && !reduced,
+    enabled: canType && !reduced,
     inputComplete: !effectiveStreaming,
     preset,
     shouldHoldBack,
@@ -298,13 +307,22 @@ function AnimatedMarkdownText({
     revealScaleRef: followRevealScaleRef,
     onRevealCommit: () => { notifyFollowCommit(followRootRef.current) },
   })
-  const shown = reduced ? text : displayed
+  const shown = reduced ? text : waitingForReasoning ? '' : displayed
 
   useEffect(() => {
     setShownLength(shown.length)
   }, [shown.length])
 
-  const live = typing && !reduced
+  useEffect(() => {
+    const key = turnKey ?? 'active'
+    const isTyping = !waitingForReasoning && shownLength < text.length && text.length > 0 && !reduced
+    streamRelay.setTextActive(key, isTyping)
+    return () => {
+      streamRelay.setTextActive(key, false)
+    }
+  }, [waitingForReasoning, shownLength, text.length, reduced, turnKey])
+
+  const live = canType && !reduced
   useLogarithmicFade(followRootRef, logarithmicFade && !reduced, live, speedCpsRef)
 
   useEffect(() => {
@@ -359,7 +377,7 @@ function AnimatedMarkdownText({
         // `shown` stays authoritative through the completion drain: the
         // settled parse swaps in only when the queue has actually emptied.
         // Rendering `text` early bypasses the drain and teleports the tail.
-        text={live ? shown : text}
+        text={live ? shown : (waitingForReasoning ? '' : text)}
         streaming={live}
         labels={labels}
         fileMentions={live ? undefined : fileMentions}
@@ -468,6 +486,7 @@ function AnimatedReasoning({
   followSpeedCpsRef,
   followRevealScaleRef,
   t,
+  turnKey,
 }: {
   text: string
   running: boolean
@@ -479,54 +498,65 @@ function AnimatedReasoning({
   followSpeedCpsRef?: { current: number } | undefined
   followRevealScaleRef?: { current: number } | undefined
   t: AssistantProps['t']
+  turnKey?: string
 }) {
   const reduced = motionReduced
-  const [expanded, setExpanded] = useState(running && thinkAutoExpand)
+  const [shownLength, setShownLength] = useState(0)
+  const stillDraining = shownLength < text.length
+  const activeRunning = running || (stillDraining && text.length > 0)
+  const [expanded, setExpanded] = useState(activeRunning && thinkAutoExpand)
   const [autoClosed, setAutoClosed] = useState(false)
   const summaryRef = useRef<HTMLSpanElement>(null)
   const fadeRootRef = useRef<HTMLDivElement>(null)
   const localFadeSpeedRef = useRef(35)
   const fadeSpeedRef = followSpeedCpsRef ?? localFadeSpeedRef
   const commitAnchorRef = useRef<HTMLDivElement>(null)
-  // The running→false flip is the AUTO-close: it collapses instantly and the
-  // follower's settle spring absorbs the height step. A later manual toggle
-  // keeps the CSS glide.
+
   const displayed = useSmoothStreamContent(text, {
-    enabled: running && !reduced,
+    enabled: activeRunning && !reduced,
+    inputComplete: !running && stillDraining,
     preset,
     shouldHoldBack,
     speedCpsRef: fadeSpeedRef,
     revealScaleRef: followRevealScaleRef,
     onRevealCommit: () => { notifyFollowCommit(commitAnchorRef.current) },
   })
-  const shown = running && !reduced ? displayed : text
-  const summary = running ? latestLine(shown) : firstLine(text)
-  useLogarithmicFade(fadeRootRef, logarithmicFade && !reduced && expanded, running, fadeSpeedRef)
+  const shown = activeRunning && !reduced ? displayed : text
+  const summary = activeRunning ? latestLine(shown) : firstLine(text)
+  useLogarithmicFade(fadeRootRef, logarithmicFade && !reduced && expanded, activeRunning, fadeSpeedRef)
+
+  useEffect(() => {
+    setShownLength(shown.length)
+  }, [shown.length])
+
+  useEffect(() => {
+    const key = turnKey ?? 'active'
+    const isTyping = activeRunning && shownLength < text.length && !reduced
+    streamRelay.setReasoningActive(key, isTyping)
+    return () => {
+      streamRelay.setReasoningActive(key, false)
+    }
+  }, [activeRunning, shownLength, text.length, reduced, turnKey])
 
   useLayoutEffect(() => {
-    // Only the running state owns disclosure while auto-expand is on; with it
-    // off, a manual toggle is never wrestled back by the stream.
     if (thinkAutoExpand) {
-      setExpanded(running)
-      setAutoClosed(!running)
+      setExpanded(activeRunning)
+      setAutoClosed(!activeRunning)
     }
-    // A commit that changes this block's height must hand the follower its
-    // correction in the SAME task, before the grown-but-uncompensated frame
-    // can reach a paint.
     notifyFollowCommit(commitAnchorRef.current)
-  }, [running, thinkAutoExpand])
+  }, [activeRunning, thinkAutoExpand])
 
   useEffect(() => {
     const element = summaryRef.current
     if (element === null) return
-    element.scrollLeft = running ? element.scrollWidth - element.clientWidth : 0
-  }, [running, summary])
+    element.scrollLeft = activeRunning ? element.scrollWidth - element.clientWidth : 0
+  }, [activeRunning, summary])
 
   // Preserve FollowHost's layout wrapper without mounting a second scroll owner.
   return (
     <div className={css.follow} ref={commitAnchorRef}>
-      <div className={css.think} data-variant="think" data-state={running ? 'running' : 'ok'}>
-        {running && <span className={css.visuallyHidden}>{t('row.running')}</span>}
+      <div className={css.think} data-variant="think" data-state={activeRunning ? 'running' : 'ok'}>
+        {activeRunning && <span className={css.visuallyHidden}>{t('row.running')}</span>}
         <AnimatedDisclosure
           rowClassName={css.thinkRow}
           leadingClassName={css.thinkLeading}
@@ -539,15 +569,11 @@ function AnimatedReasoning({
             setAutoClosed(false)
             setExpanded(value => !value)
           }}
-          // The auto-close at stream end snaps (no grid-track animation): the
-          // follower's settle spring absorbs the height step through the
-          // compositor, so animating the track too would double-animate the
-          // collapse. Manual toggles while streaming keep the glide.
           bodyTransition={!autoClosed}
           collapsedContent={(
             <>
               <span className={css.thinkSeparator} aria-hidden />
-              <span ref={summaryRef} className={css.thinkSummary} data-follow-end={running || undefined}>{summary}</span>
+              <span ref={summaryRef} className={css.thinkSummary} data-follow-end={activeRunning || undefined}>{summary}</span>
             </>
           )}
         >
@@ -689,6 +715,9 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
       case 'text': {
         const hasToolCallBelow = data.blocks.slice(index + 1).some(b => b.kind === 'tool-call')
           || data.blocks.some(b => b.kind === 'tool-call')
+        const turnKey = turn !== undefined && typeof turn === 'object' && 'turn' in turn && turn.turn !== undefined
+          ? String(turn.turn)
+          : 'active'
         rendered.push(
           <AnimatedMarkdownText
             key={index}
@@ -698,6 +727,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
             streaming={streaming}
             hasToolCallBelow={hasToolCallBelow}
             isTurnOpen={turn !== undefined && turn.status === 'open'}
+            turnKey={turnKey}
             keepStreamOnToolCall={keepStreamOnToolCall}
             logarithmicFade={logarithmicFade && data.status !== 'interrupted'}
             motionReduced={reduced}
@@ -713,7 +743,10 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
         )
         break
       }
-      case 'reasoning':
+      case 'reasoning': {
+        const turnKey = turn !== undefined && typeof turn === 'object' && 'turn' in turn && turn.turn !== undefined
+          ? String(turn.turn)
+          : 'active'
         rendered.push(
           <FoldableReasoning key={index} hidden={reasoningHidden} reveal={revealProcess}>
             <AnimatedReasoning
@@ -727,10 +760,12 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
               followSpeedCpsRef={reasoningOwnsSpeed && index === last ? rootSpeedRef : undefined}
               followRevealScaleRef={reasoningOwnsSpeed && index === last ? rootRevealScaleRef : undefined}
               t={t}
+              turnKey={turnKey}
             />
           </FoldableReasoning>,
         )
         break
+      }
       case 'image': {
         const start = index
         const group = [block]

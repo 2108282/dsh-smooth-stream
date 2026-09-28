@@ -90,6 +90,7 @@ function readBootConfig(): StreamConfig {
 function wrapAgentChatRows(
   ctx: ClientContext,
   useControlScroll: () => boolean,
+  useKeepStreamOnToolCall: () => boolean,
 ): () => void {
   const restores: Array<() => void> = []
   const wrapped = new WeakSet<object>()
@@ -101,7 +102,7 @@ function wrapAgentChatRows(
       const current = entry.component
       if (!isWrappableComponent(current) || wrapped.has(current)) continue
       const inner = current as ComponentType<FollowWrapProps>
-      const next = wrapFollowNodeView(inner, useControlScroll)
+      const next = wrapFollowNodeView(inner, useControlScroll, useKeepStreamOnToolCall)
       wrapped.add(next)
       entry.component = next
       restores.push(() => {
@@ -296,6 +297,11 @@ export function apply(ctx: ClientContext): void {
     () => settings.getSnapshot().controlScroll,
     () => settings.getSnapshot().controlScroll,
   )
+  const useKeepStreamOnToolCall = (): boolean => useSyncExternalStore(
+    settings.subscribe,
+    () => settings.getSnapshot().keepStreamOnToolCall,
+    () => settings.getSnapshot().keepStreamOnToolCall,
+  )
 
   // The card talks to the plugin-owned loopback RPC, so the core settings
   // namespace allowlist cannot make it disappear. The stream still applies
@@ -435,7 +441,7 @@ export function apply(ctx: ClientContext): void {
         return
       }
       if (releaseTakeover !== undefined) return
-      const unwrap = wrapAgentChatRows(ctx, useControlScroll)
+      const unwrap = wrapAgentChatRows(ctx, useControlScroll, useKeepStreamOnToolCall)
       const unshadow = ctx.slots.register({
         name: 'conversation.chat.node',
         key: 'assistant-step',
