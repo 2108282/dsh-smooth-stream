@@ -59,6 +59,46 @@ Traditional chat UIs bind DOM rendering and scrolling directly to arrival events
 - Reasoning and tool executions remain expanded while streaming.
 - Once a turn settles, intermediate processes cleanly fold behind a minimalist `Processed in Xs` summary row, keeping the conversation view focused on final answers.
 
+### 4. Reactive Baton Relay Queue
+
+When models perform complex reasoning or multi-step Agent loops, their output typically transitions through distinct phases: **Reasoning Chain → Preamble Response Text → Tool Execution**.
+
+Under DeepSeek Harness's decoupled presentation layer, these phases are mounted across independent React subtrees. Uncoordinated rendering causes reasoning, text, and tools to burst simultaneously, clashing for visual focus, triggering layout thrashing, and causing frame drops on mobile devices.
+
+`dsh-smooth-stream` implements an event-driven **Baton Relay Queue (`streamRelay`)** to guarantee strict sequential execution across all stages:
+
+```
+[ Model Generation Stream ]
+            │
+            ▼
+┌────────────────────────────────────────────────────────┐
+│  Phase 1: Reasoning Chain Reveal                       │
+│  - Smooth progressive expansion & logarithmic fade     │
+│  - Text and tools stay suspended in place (0 CPU load) │
+│  - Drains tail buffer at steady pace, then auto-folds  │
+└───────────────────────────┬────────────────────────────┘
+                            │ Relay handoff
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│  Phase 2: Response Text Streaming                      │
+│  - Begins smooth reveal from character 0               │
+│  - 2nd-order damped spring glide, zero visual leaps    │
+│  - Holds tool lock active during entire reveal         │
+│  - Unlocks downstream tools after text settle finishes │
+└───────────────────────────┬────────────────────────────┘
+                            │ Lock released
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│  Phase 3: Tool Execution & Entrance                    │
+│  - Tool cards unlock and glide in with 120ms GPU ease  │
+│  - Tool execution and result display proceed cleanly   │
+│  - Zero DOM loss, zero focus jumping                   │
+└────────────────────────────────────────────────────────┘
+```
+
+- **Zero-Polling Reactivity**: Bypasses costly DOM `MutationObserver` traversals entirely by subscribing via React 18 `useSyncExternalStore` to an atomic in-memory state machine. Delivers sub-millisecond coordination and sustains 60/120fps fluid playback even on mobile devices.
+- **Mental Model Alignment**: Guarantees that reasoning completes and folds before text streams, and preamble text completely reveals before tool execution cards appear.
+
 ---
 
 ## Visual Comparison
