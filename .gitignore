@@ -1,5 +1,5 @@
 node_modules/
-lib/
+# lib/ is committed so DSHA can install directly from Git repo
 *.tsbuildinfo
 .DS_Store
 .idea/
