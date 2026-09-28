@@ -1,6 +1,7 @@
-import { createElement, useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentType } from 'react'
+import { createElement, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentType } from 'react'
 import { FollowHost } from './FollowHost.tsx'
 import { useProgressiveDomText } from './useProgressiveDomText.ts'
+import { streamRelay } from './streamRelay.ts'
 import { hasRecentConversationFollow } from './teleprompterGlide.ts'
 import entranceCss from './AgentRowEntrance.module.css'
 
@@ -224,47 +225,24 @@ export function wrapFollowNodeView(
       }
     }, [])
 
-    const [precedingTyping, setPrecedingTyping] = useState(false)
+    const turnKey = getTurnKey(props.node)
     const isLocationOpen = openAgentLocation(props.node)
+    const toolBlocked = useSyncExternalStore(
+      streamRelay.subscribe,
+      () => streamRelay.isToolBlocked(turnKey),
+      () => false,
+    )
+    const [timedOut, setTimedOut] = useState(false)
+    const waiting = isLocationOpen && toolBlocked && !timedOut
 
-    useLayoutEffect(() => {
-      if (!isLocationOpen) {
-        setPrecedingTyping(false)
-        return
+    useEffect(() => {
+      if (waiting) {
+        const timer = setTimeout(() => { setTimedOut(true) }, 10000)
+        return () => clearTimeout(timer)
+      } else {
+        setTimedOut(false)
       }
-      const checkPreceding = () => {
-        const root = hostRef.current
-        if (!root) return false
-        const flowItem = root.closest('[data-chat-flow-key]')
-        if (!flowItem) return false
-        let prev = flowItem.previousElementSibling
-        while (prev instanceof HTMLElement) {
-          if (prev.hasAttribute('data-chat-flow-key')) {
-            return prev.querySelector('[data-smooth-stream-typing="true"]') !== null
-          }
-          prev = prev.previousElementSibling
-        }
-        return false
-      }
-
-      setPrecedingTyping(checkPreceding())
-
-      const root = hostRef.current
-      const flow = root?.closest('[data-chat-flow]')
-      if (!flow || typeof MutationObserver === 'undefined') return
-
-      const observer = new MutationObserver(() => {
-        setPrecedingTyping(checkPreceding())
-      })
-      observer.observe(flow, {
-        attributes: true,
-        attributeFilter: ['data-smooth-stream-typing'],
-        subtree: true,
-      })
-      return () => observer.disconnect()
-    }, [isLocationOpen])
-
-    const waiting = isLocationOpen && precedingTyping
+    }, [waiting])
 
     return (
       <div style={waiting ? { display: 'none' } : undefined}>

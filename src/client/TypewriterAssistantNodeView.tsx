@@ -1,9 +1,10 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode, type RefObject } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type ReactNode, type RefObject } from 'react'
 import { IconThinkOutlineRegular, JsonBlock, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import { ImageGallery, type ImageLoader, type MessageImageLabels } from '@deepseek-ai/dsh-client-ui-attachment'
 import type { ChatNodeViewProps, TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { AnimatedDisclosure } from './AnimatedDisclosure.tsx'
 import { notifyFollowCommit } from './teleprompterGlide.ts'
+import { streamRelay } from './streamRelay.ts'
 import { useSmoothStreamContent, type StreamSmoothingPreset } from './useSmoothStreamContent.ts'
 import { useFpsGuard } from './useFpsGuard.ts'
 import { useLogarithmicFade } from './useLogarithmicFade.ts'
@@ -48,6 +49,7 @@ interface AnimatedMarkdownTextProps extends MarkdownProps {
   streaming: boolean
   hasToolCallBelow?: boolean
   isTurnOpen?: boolean
+  turnKey?: string
   keepStreamOnToolCall?: boolean
   logarithmicFade: boolean
   /** Whether the resolved reduced-motion gate keeps the reveal engine off. */
@@ -263,6 +265,7 @@ function AnimatedMarkdownText({
   streaming,
   hasToolCallBelow = false,
   isTurnOpen = false,
+  turnKey,
   keepStreamOnToolCall = true,
   logarithmicFade,
   motionReduced,
@@ -286,11 +289,21 @@ function AnimatedMarkdownText({
   const predictionGeometryRef = useRef<PendingTextGeometry | null>(null)
   const speedCpsRef = followSpeedCpsRef ?? localSpeedCpsRef
 
-  const [shownLength, setShownLength] = useState(0)
-  const effectiveStreaming = streaming || (keepStreaming && shownLength < text.length)
+  // 串行接力：只要前序思考块仍在活跃吐字，正文保持静止等待
+  const reasoningActive = useSyncExternalStore(
+    streamRelay.subscribe,
+    () => streamRelay.isReasoningActive(turnKey),
+    () => false,
+  )
+  const waitingForReasoning = isTurnOpen && reasoningActive
+  const canType = typing && !waitingForReasoning
 
-  const displayed = useSmoothStreamContent(text, {
-    enabled: typing && !reduced,
+  const [shownLength, setShownLength] = useState(0)
+  const effectiveStreaming = (streaming || (keepStreaming && shownLength < text.length)) && !waitingForReasoning
+  const feedingText = waitingForReasoning ? '' : text
+
+  const displayed = useSmoothStreamContent(feedingText, {
+    enabled: canType && !reduced,
     inputComplete: !effectiveStreaming,
     preset,
     shouldHoldBack,
@@ -299,22 +312,26 @@ function AnimatedMarkdownText({
     revealScaleRef: followRevealScaleRef,
     onRevealCommit: () => { notifyFollowCommit(followRootRef.current) },
   })
-  const shown = reduced ? text : displayed
+  const shown = reduced ? text : (waitingForReasoning ? '' : displayed)
 
   useEffect(() => {
     setShownLength(shown.length)
   }, [shown.length])
 
-  const live = typing && !reduced
-  const isRevealing = live && shown.length < text.length
+  const live = canType && !reduced
+  const isRevealing = live && shown.length < text.length && !waitingForReasoning
 
+  // 严格向 Relay 报告本正文块的吐字活跃状态（供后续工具调用排队使用）
   useEffect(() => {
-    onTypingChange?.(isRevealing || streaming)
-  }, [isRevealing, streaming, onTypingChange])
-
-  useEffect(() => () => {
-    onTypingChange?.(false)
-  }, [onTypingChange])
+    const isActivelyTyping = !waitingForReasoning && shownLength < text.length && text.length > 0 && !reduced
+    const active = isActivelyTyping || (effectiveStreaming && !waitingForReasoning)
+    streamRelay.setTextActive(turnKey, active)
+    onTypingChange?.(active)
+    return () => {
+      streamRelay.setTextActive(turnKey, false)
+      onTypingChange?.(false)
+    }
+  }, [waitingForReasoning, shownLength, text.length, effectiveStreaming, reduced, turnKey, onTypingChange])
 
   useLogarithmicFade(followRootRef, logarithmicFade && !reduced, live, speedCpsRef)
 
@@ -367,13 +384,10 @@ function AnimatedMarkdownText({
       hostRef={followRootRef}
     >
       <MarkdownText
-        // `shown` stays authoritative through the completion drain: the
-        // settled parse swaps in only when the queue has actually emptied.
-        // Rendering `text` early bypasses the drain and teleports the tail.
-        text={live ? shown : text}
+        text={live ? shown : (waitingForReasoning ? '' : text)}
         streaming={live}
         labels={labels}
-        fileMentions={live ? undefined : fileMentions}
+        fileMentions={live || waitingForReasoning ? undefined : fileMentions}
       />
     </FollowHost>
   )
@@ -479,6 +493,7 @@ function AnimatedReasoning({
   followSpeedCpsRef,
   followRevealScaleRef,
   t,
+  turnKey,
   onTypingChange,
 }: {
   text: string
@@ -491,6 +506,7 @@ function AnimatedReasoning({
   followSpeedCpsRef?: { current: number } | undefined
   followRevealScaleRef?: { current: number } | undefined
   t: AssistantProps['t']
+  turnKey?: string
   onTypingChange?: ((isTyping: boolean) => void) | undefined
 }) {
   const reduced = motionReduced
@@ -522,14 +538,16 @@ function AnimatedReasoning({
     setShownLength(shown.length)
   }, [shown.length])
 
-  const isRevealing = activeRunning && !reduced && shown.length < text.length
+  // 严格向 Relay 报告本思考块的活跃状态（正文与工具依赖此状态排队）
   useEffect(() => {
-    onTypingChange?.(isRevealing || running)
-  }, [isRevealing, running, onTypingChange])
-
-  useEffect(() => () => {
-    onTypingChange?.(false)
-  }, [onTypingChange])
+    const isActivelyReasoning = activeRunning && !reduced
+    streamRelay.setReasoningActive(turnKey, isActivelyReasoning)
+    onTypingChange?.(isActivelyReasoning)
+    return () => {
+      streamRelay.setReasoningActive(turnKey, false)
+      onTypingChange?.(false)
+    }
+  }, [activeRunning, reduced, turnKey, onTypingChange])
 
   useLayoutEffect(() => {
     if (thinkAutoExpand && !userToggled) {
@@ -739,12 +757,13 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
         rendered.push(
           <AnimatedMarkdownText
             key={index}
-            text={textContent}
+            text={block.text}
             labels={markdownLabels}
             fileMentions={mentions}
             streaming={streaming}
             hasToolCallBelow={hasToolCallBelow}
             isTurnOpen={turn !== undefined && turn.status === 'open'}
+            turnKey={turnKey}
             keepStreamOnToolCall={keepStreamOnToolCall}
             logarithmicFade={logarithmicFade && data.status !== 'interrupted'}
             motionReduced={reduced}
