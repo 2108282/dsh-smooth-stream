@@ -128,7 +128,14 @@ function wrapAgentChatRows(
 class SettingsCell {
   private readonly listeners = new Set<() => void>()
   private card: SmoothStreamCardController | undefined
-  private value: StreamSettings = DEFAULT_STREAM_SETTINGS
+  private value: StreamSettings = (() => {
+    const val = { ...DEFAULT_STREAM_SETTINGS }
+    try {
+      const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('dsh-smooth-stream:settings') : null
+      if (saved) Object.assign(val, JSON.parse(saved))
+    } catch {}
+    return val
+  })()
   private pending = false
 
   /** Re-point the cell at the plugin-owned settings controller. */
@@ -171,9 +178,9 @@ class SettingsCell {
     for (const listener of this.listeners) listener()
   }
 
-  /** False while an available settings service is resolving its authority. */
+  /** Always respect the user's enabled preference immediately. */
   takeoverEnabled(): boolean {
-    return !this.pending && this.value.enabled
+    return this.value.enabled
   }
 
   readonly getSnapshot = (): StreamSettings => this.value

@@ -277,7 +277,7 @@ function AnimatedMarkdownText({
   controlScroll = true,
 }: AnimatedMarkdownTextProps) {
   const reduced = motionReduced
-  const keepStreaming = keepStreamOnToolCall && hasToolCallBelow && isTurnOpen
+  const keepStreaming = keepStreamOnToolCall && isTurnOpen
   const [typing, setTyping] = useState(() => streaming || (keepStreaming && text.length > 0))
   const localSpeedCpsRef = useRef(35)
   const followRootRef = useRef<HTMLDivElement>(null)
@@ -309,8 +309,8 @@ function AnimatedMarkdownText({
   const isRevealing = live && shown.length < text.length
 
   useEffect(() => {
-    onTypingChange?.(isRevealing)
-  }, [isRevealing, onTypingChange])
+    onTypingChange?.(isRevealing || streaming)
+  }, [isRevealing, streaming, onTypingChange])
 
   useEffect(() => () => {
     onTypingChange?.(false)
@@ -479,6 +479,7 @@ function AnimatedReasoning({
   followSpeedCpsRef,
   followRevealScaleRef,
   t,
+  onTypingChange,
 }: {
   text: string
   running: boolean
@@ -490,9 +491,13 @@ function AnimatedReasoning({
   followSpeedCpsRef?: { current: number } | undefined
   followRevealScaleRef?: { current: number } | undefined
   t: AssistantProps['t']
+  onTypingChange?: ((isTyping: boolean) => void) | undefined
 }) {
   const reduced = motionReduced
-  const [expanded, setExpanded] = useState(() => running && thinkAutoExpand)
+  const [shownLength, setShownLength] = useState(0)
+  const stillDraining = shownLength < text.length
+  const activeRunning = running || (stillDraining && text.length > 0)
+  const [expanded, setExpanded] = useState(() => activeRunning && thinkAutoExpand)
   const [userToggled, setUserToggled] = useState(false)
   const [autoClosed, setAutoClosed] = useState(false)
   const summaryRef = useRef<HTMLSpanElement>(null)
@@ -501,20 +506,34 @@ function AnimatedReasoning({
   const fadeSpeedRef = followSpeedCpsRef ?? localFadeSpeedRef
   const commitAnchorRef = useRef<HTMLDivElement>(null)
   const displayed = useSmoothStreamContent(text, {
-    enabled: running && !reduced,
+    enabled: activeRunning && !reduced,
+    inputComplete: !running && stillDraining,
     preset,
     shouldHoldBack,
     speedCpsRef: fadeSpeedRef,
     revealScaleRef: followRevealScaleRef,
     onRevealCommit: () => { notifyFollowCommit(commitAnchorRef.current) },
   })
-  const shown = running && !reduced ? displayed : text
-  const summary = running ? latestLine(shown) : firstLine(text)
-  useLogarithmicFade(fadeRootRef, logarithmicFade && !reduced && expanded, running, fadeSpeedRef)
+  const shown = activeRunning && !reduced ? displayed : text
+  const summary = activeRunning ? latestLine(shown) : firstLine(text)
+  useLogarithmicFade(fadeRootRef, logarithmicFade && !reduced && expanded, activeRunning, fadeSpeedRef)
+
+  useEffect(() => {
+    setShownLength(shown.length)
+  }, [shown.length])
+
+  const isRevealing = activeRunning && !reduced && shown.length < text.length
+  useEffect(() => {
+    onTypingChange?.(isRevealing || running)
+  }, [isRevealing, running, onTypingChange])
+
+  useEffect(() => () => {
+    onTypingChange?.(false)
+  }, [onTypingChange])
 
   useLayoutEffect(() => {
     if (thinkAutoExpand && !userToggled) {
-      if (running) {
+      if (activeRunning) {
         setExpanded(true)
         setAutoClosed(false)
       } else {
@@ -523,19 +542,19 @@ function AnimatedReasoning({
       }
     }
     notifyFollowCommit(commitAnchorRef.current)
-  }, [running, thinkAutoExpand, userToggled])
+  }, [activeRunning, thinkAutoExpand, userToggled])
 
   useEffect(() => {
     const element = summaryRef.current
     if (element === null) return
-    element.scrollLeft = running ? element.scrollWidth - element.clientWidth : 0
-  }, [running, summary])
+    element.scrollLeft = activeRunning ? element.scrollWidth - element.clientWidth : 0
+  }, [activeRunning, summary])
 
   // Preserve FollowHost's layout wrapper without mounting a second scroll owner.
   return (
     <div className={css.follow} ref={commitAnchorRef}>
-      <div className={css.think} data-variant="think" data-state={running ? 'running' : 'ok'}>
-        {running && <span className={css.visuallyHidden}>{t('row.running')}</span>}
+      <div className={css.think} data-variant="think" data-state={activeRunning ? 'running' : 'ok'}>
+        {activeRunning && <span className={css.visuallyHidden}>{t('row.running')}</span>}
         <AnimatedDisclosure
           rowClassName={css.thinkRow}
           leadingClassName={css.thinkLeading}
@@ -553,7 +572,7 @@ function AnimatedReasoning({
           collapsedContent={(
             <>
               <span className={css.thinkSeparator} aria-hidden />
-              <span ref={summaryRef} className={css.thinkSummary} data-follow-end={running || undefined}>{summary}</span>
+              <span ref={summaryRef} className={css.thinkSummary} data-follow-end={activeRunning || undefined}>{summary}</span>
             </>
           )}
         >
@@ -689,6 +708,10 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
     .map(block => block.text)
     .join('\n')
 
+  const [reasoningActive, setReasoningActive] = useState(false)
+  const [childBlockTyping, setChildBlockTyping] = useState(false)
+  const isTyping = streaming || reasoningActive || childBlockTyping
+
   const rendered: ReactNode[] = []
   const last = data.blocks.length - 1
   let lastFollow = -1
@@ -705,6 +728,9 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
     if (groupPart === 'response' && block.kind === 'reasoning') continue
     switch (block.kind) {
       case 'text': {
+        const hasPrecedingReasoning = data.blocks.slice(0, index).some(b => b.kind === 'reasoning')
+        const shouldWaitForReasoning = hasPrecedingReasoning && reasoningActive
+        const textContent = shouldWaitForReasoning ? '' : block.text
         const hasToolCallBelow = data.blocks.slice(index + 1).some(b => b.kind === 'tool-call')
           || data.blocks.some(b => b.kind === 'tool-call')
         const turnKey = turn !== undefined && typeof turn === 'object' && 'turn' in turn && turn.turn !== undefined
@@ -713,7 +739,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
         rendered.push(
           <AnimatedMarkdownText
             key={index}
-            text={block.text}
+            text={textContent}
             labels={markdownLabels}
             fileMentions={mentions}
             streaming={streaming}
@@ -754,6 +780,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
               followRevealScaleRef={reasoningOwnsSpeed && isThinkingActive ? rootRevealScaleRef : undefined}
               t={t}
               turnKey={turnKey}
+              onTypingChange={setReasoningActive}
             />
           </FoldableReasoning>,
         )
@@ -787,9 +814,6 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
         break
     }
   }
-
-  const [childBlockTyping, setChildBlockTyping] = useState(false)
-  const isTyping = streaming || childBlockTyping
 
   return (
     <div
