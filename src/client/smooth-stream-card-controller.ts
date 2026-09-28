@@ -204,7 +204,7 @@ export class SmoothStreamCardController {
         enabled: true,
         controlScroll: true,
         motionPreference: 'auto' as const,
-        thinkAutoExpand: false,
+        thinkAutoExpand: true,
         logarithmicFade: true,
         keepStreamOnToolCall: true,
         debugEnabled: false,

@@ -492,7 +492,8 @@ function AnimatedReasoning({
   t: AssistantProps['t']
 }) {
   const reduced = motionReduced
-  const [expanded, setExpanded] = useState(running && thinkAutoExpand)
+  const [expanded, setExpanded] = useState(() => running && thinkAutoExpand)
+  const [userToggled, setUserToggled] = useState(false)
   const [autoClosed, setAutoClosed] = useState(false)
   const summaryRef = useRef<HTMLSpanElement>(null)
   const fadeRootRef = useRef<HTMLDivElement>(null)
@@ -512,12 +513,17 @@ function AnimatedReasoning({
   useLogarithmicFade(fadeRootRef, logarithmicFade && !reduced && expanded, running, fadeSpeedRef)
 
   useLayoutEffect(() => {
-    if (thinkAutoExpand) {
-      setExpanded(running)
-      setAutoClosed(!running)
+    if (thinkAutoExpand && !userToggled) {
+      if (running) {
+        setExpanded(true)
+        setAutoClosed(false)
+      } else {
+        setExpanded(false)
+        setAutoClosed(true)
+      }
     }
     notifyFollowCommit(commitAnchorRef.current)
-  }, [running, thinkAutoExpand])
+  }, [running, thinkAutoExpand, userToggled])
 
   useEffect(() => {
     const element = summaryRef.current
@@ -539,10 +545,11 @@ function AnimatedReasoning({
           title="Think"
           open={expanded}
           onToggle={() => {
+            setUserToggled(true)
             setAutoClosed(false)
             setExpanded(value => !value)
           }}
-          bodyTransition={!autoClosed}
+          bodyTransition={true}
           collapsedContent={(
             <>
               <span className={css.thinkSeparator} aria-hidden />
@@ -616,10 +623,22 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   const rootSpeedRef = useRef(35)
   const rootRevealedCharsRef = useRef(0)
   const rootRevealScaleRef = useRef(1)
-  const reasoningTailIndex = streaming && data.blocks[data.blocks.length - 1]?.kind === 'reasoning'
-    ? data.blocks.length - 1
-    : -1
-  const reasoningOwnsSpeed = reasoningTailIndex !== -1
+
+  // 检查在指定索引之后是否已经产生实质性的正文回复或工具调用
+  const hasSubsequentContent = (fromIndex: number): boolean => {
+    for (let i = fromIndex + 1; i < data.blocks.length; i++) {
+      const b = data.blocks[i]
+      if (b === undefined) continue
+      if (b.kind === 'tool-call') return true
+      if (b.kind === 'text' && b.text.trim().length > 0) return true
+    }
+    return false
+  }
+
+  // 只要后续未产生实质性回复正文或工具，速度控制器就安全归思考块所有
+  const hasAnyReplyOrTool = data.blocks.some(b => b.kind === 'tool-call' || (b.kind === 'text' && b.text.trim().length > 0))
+  const reasoningOwnsSpeed = streaming && !hasAnyReplyOrTool
+  const reasoningTailIndex = reasoningOwnsSpeed ? data.blocks.findIndex(b => b.kind === 'reasoning') : -1
   const rootPredictiveRef = useRef(false)
   const previousReasoningTailRef = useRef(-1)
   if (reasoningTailIndex !== previousReasoningTailRef.current) {
@@ -720,18 +739,19 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
         const turnKey = turn !== undefined && typeof turn === 'object' && 'turn' in turn && turn.turn !== undefined
           ? String(turn.turn)
           : 'active'
+        const isThinkingActive = streaming && !hasSubsequentContent(index)
         rendered.push(
           <FoldableReasoning key={index} hidden={reasoningHidden} reveal={revealProcess}>
             <AnimatedReasoning
               text={block.text}
-              running={streaming && index === last}
+              running={isThinkingActive}
               preset={preset}
               thinkAutoExpand={thinkAutoExpand}
               logarithmicFade={logarithmicFade && data.status !== 'interrupted'}
               motionReduced={reduced}
               shouldHoldBack={shouldHoldBack}
-              followSpeedCpsRef={reasoningOwnsSpeed && index === last ? rootSpeedRef : undefined}
-              followRevealScaleRef={reasoningOwnsSpeed && index === last ? rootRevealScaleRef : undefined}
+              followSpeedCpsRef={reasoningOwnsSpeed && isThinkingActive ? rootSpeedRef : undefined}
+              followRevealScaleRef={reasoningOwnsSpeed && isThinkingActive ? rootRevealScaleRef : undefined}
               t={t}
               turnKey={turnKey}
             />
