@@ -135,7 +135,7 @@ export function wrapFollowNodeView(
     const runtimeHandledRef = useRef(false)
     const followable = structurallyFollowable || runtimeFollowable
     const revealInitialRef = useRef(true)
-    const [entering, setEntering] = useState(() => shouldAnimateChatNodeEntrance(props.node))
+    const [entering, setEntering] = useState(false)
     const [growthPulse, setGrowthPulse] = useState(false)
     const followableRef = useRef(false)
     const growingRef = useRef(growing)
@@ -154,7 +154,7 @@ export function wrapFollowNodeView(
     }, [])
     useProgressiveDomText(
       hostRef,
-      followable,
+      false,
       revealInitialRef.current,
       speedCpsRef,
       runtimeFollowable ? finishRuntimeReveal : undefined,
@@ -175,7 +175,7 @@ export function wrapFollowNodeView(
       if (runtimeHandledRef.current || mode === null) return
       runtimePersistentRef.current = mode === 'turn'
       setRuntimeFollowable(true)
-      setEntering(true)
+      setEntering(false)
     }, [runtimeFollowable, structurallyFollowable])
     const finishEntrance = useCallback(() => {
       growthExtentRef.current = null

@@ -86,48 +86,7 @@ function approximateInlineWidth(text: string, emPx: number): number {
 }
 
 function measurePendingTextGeometry(root: HTMLElement, visibleText: string): PendingTextGeometry {
-  if (
-    typeof document.createTreeWalker !== 'function'
-    || typeof NodeFilter === 'undefined'
-  ) {
-    return { root, visibleText, fontSize: 14, wrapThresholdWidth: null }
-  }
-  const rootRect = root.getBoundingClientRect()
-  const rootWidth = Math.max(0, rootRect.width, rootRect.right - rootRect.left, root.clientWidth)
-  if (rootWidth <= 0) return { root, visibleText, fontSize: 14, wrapThresholdWidth: null }
-
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
-  let tail: Text | null = null
-  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-    if ((node.textContent ?? '').length > 0) tail = node as Text
-  }
-  const parent = tail?.parentElement ?? root
-  const fontSize = Number.parseFloat(getComputedStyle(parent).fontSize) || 14
-  if (tail === null || typeof document.createRange !== 'function') {
-    return { root, visibleText, fontSize, wrapThresholdWidth: rootWidth }
-  }
-
-  try {
-    const length = tail.textContent?.length ?? 0
-    if (length <= 0) return { root, visibleText, fontSize, wrapThresholdWidth: rootWidth }
-    const range = document.createRange()
-    range.setStart(tail, Math.max(0, length - 1))
-    range.setEnd(tail, length)
-    const tailRect = range.getBoundingClientRect()
-    const contentRight = rootRect.right
-    if (!Number.isFinite(tailRect.right) || tailRect.right <= rootRect.left || contentRight <= rootRect.left) {
-      return { root, visibleText, fontSize, wrapThresholdWidth: rootWidth }
-    }
-    const remainingWidth = Math.max(0, contentRight - tailRect.right)
-    return {
-      root,
-      visibleText,
-      fontSize,
-      wrapThresholdWidth: remainingWidth + fontSize * 0.35,
-    }
-  } catch {
-    return { root, visibleText, fontSize, wrapThresholdWidth: rootWidth }
-  }
+  return { root, visibleText, fontSize: 14, wrapThresholdWidth: null }
 }
 
 /** Whether buffered source can reach a new visual line before it drains. */
@@ -139,18 +98,7 @@ function pendingTextCanGrow(
 ): boolean {
   if (pending === '') return false
   if (/[\r\n]/u.test(pending)) return true
-  const pendingChars = [...pending]
-  if (root === null) return pendingChars.length >= PREDICTIVE_WRAP_FALLBACK_CHARS
-
-  let geometry = geometryRef.current
-  if (geometry?.root !== root || geometry.visibleText !== visibleText) {
-    geometry = measurePendingTextGeometry(root, visibleText)
-    geometryRef.current = geometry
-  }
-  if (geometry.wrapThresholdWidth === null) {
-    return pendingChars.length >= PREDICTIVE_WRAP_FALLBACK_CHARS
-  }
-  return approximateInlineWidth(pending, geometry.fontSize) >= geometry.wrapThresholdWidth
+  return [...pending].length >= PREDICTIVE_WRAP_FALLBACK_CHARS
 }
 
 function announcementChunkEnd(source: string, start: number): number {

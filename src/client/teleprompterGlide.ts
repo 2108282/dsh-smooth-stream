@@ -2064,19 +2064,9 @@ export function useConversationFollow(
           // The predictive runway starts pre-opened at the current reveal
           // pressure: it rides canceled by the equal transform, and waiting
           // out the response ramp would leave the first wraps unpinned.
-          const entranceExtent = entrancePending
-            ? entranceExtentRef?.current ?? entranceExtentOf(root)
-            : 0
+          const entranceExtent = 0
           const predictGrowth = predictiveRef?.current ?? predictive
-          // Start the entrance at the pre-insert extent, not the raw reported
-          // lag: holding the reader's small first-frame offset here would keep
-          // the entrance lag above the settle epsilon for ~a second (the
-          // spring's advance at single-digit lag is sub-pixel), leaving the
-          // entrance arm alive past a settled swap and deferring the
-          // completion settle until it finally closes.
-          animatedH = entrancePending
-            ? Math.max(0, nextPort.scrollHeight - entranceExtent)
-            : nextPort.scrollHeight
+          animatedH = nextPort.scrollHeight
           // Established before first paint; the matching margin below is
           // written in the same commit, so this held-and-canceled space
           // never moves a pixel.
