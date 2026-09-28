@@ -90,7 +90,6 @@ function readBootConfig(): StreamConfig {
 function wrapAgentChatRows(
   ctx: ClientContext,
   useControlScroll: () => boolean,
-  useKeepStreamOnToolCall: () => boolean,
 ): () => void {
   const restores: Array<() => void> = []
   const wrapped = new WeakSet<object>()
@@ -102,7 +101,7 @@ function wrapAgentChatRows(
       const current = entry.component
       if (!isWrappableComponent(current) || wrapped.has(current)) continue
       const inner = current as ComponentType<FollowWrapProps>
-      const next = wrapFollowNodeView(inner, useControlScroll, useKeepStreamOnToolCall)
+      const next = wrapFollowNodeView(inner, useControlScroll)
       wrapped.add(next)
       entry.component = next
       restores.push(() => {
@@ -441,7 +440,7 @@ export function apply(ctx: ClientContext): void {
         return
       }
       if (releaseTakeover !== undefined) return
-      const unwrap = wrapAgentChatRows(ctx, useControlScroll, useKeepStreamOnToolCall)
+      const unwrap = wrapAgentChatRows(ctx, useControlScroll)
       const unshadow = ctx.slots.register({
         name: 'conversation.chat.node',
         key: 'assistant-step',
