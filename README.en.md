@@ -99,6 +99,11 @@ Under DeepSeek Harness's decoupled presentation layer, these phases are mounted 
 - **Zero-Polling Reactivity**: Bypasses costly DOM `MutationObserver` traversals entirely by subscribing via React 18 `useSyncExternalStore` to an atomic in-memory state machine. Delivers sub-millisecond coordination and sustains 60/120fps fluid playback even on mobile devices.
 - **Mental Model Alignment**: Guarantees that reasoning completes and folds before text streams, and preamble text completely reveals before tool execution cards appear.
 
+### 5. Running Status & Bottom Baseline Stabilization
+- **Accurate DSH Status Container Targeting**: Specifically matches Harness's native running indicator via `[data-chat-running]` (including the "Deep diving..." status and `runningDivider`), strictly isolating it from ordinary message transform surfaces (`shiftSurfaces`).
+- **Eliminates Bottom Bobbing & Whiplash**: Prevents the status container from inheriting dynamic `transform: translate3d`, eliminating the artifact where the bottom edge was steadily dragged upward during line reveals and snapped downward upon hard text wraps.
+- **Proper Layout Runway Placement**: Directs predictive layout runway margins into the status container's `marginTop` rather than bottom padding, ensuring the running indicator and divider stay rock-solid at the bottom of the viewport throughout generation.
+
 ---
 
 ## Visual Comparison
