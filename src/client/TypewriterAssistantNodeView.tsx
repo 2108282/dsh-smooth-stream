@@ -347,17 +347,13 @@ function AnimatedMarkdownText({
 
   useLayoutEffect(() => {
     if (onPredictiveChange === undefined) return
-    const pending = text.slice(shown.length)
-    const sourceChanged = predictionSourceRef.current !== text
-    const next = !live || !effectiveStreaming || pending === ''
-      ? false
-      : sourceChanged
-        ? pendingTextCanGrow(followRootRef.current, shown, pending, predictionGeometryRef)
-        : predictionStateRef.current
+    // 流式生成期间保持预测跑道稳定开启，避免因分块到达间隙而发生上下剧烈抽搐
+    const isStreamActive = live && effectiveStreaming && text.length > 0
+    const next = isStreamActive
     predictionSourceRef.current = text
     predictionStateRef.current = next
     onPredictiveChange(next)
-  }, [live, onPredictiveChange, shown, effectiveStreaming, text])
+  }, [live, onPredictiveChange, effectiveStreaming, text])
 
   // The stream closed: keep revealing the remaining queue, then swap to the
   // settled parse exactly once. The markdown tree stays mounted until then.

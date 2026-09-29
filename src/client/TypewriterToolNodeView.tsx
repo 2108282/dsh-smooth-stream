@@ -232,12 +232,55 @@ export function wrapFollowNodeView(
       () => streamRelay.isToolBlocked(turnKey),
       () => false,
     )
+
+    // 双轨时序门禁：内存状态机 + DOM 前驱流式标记，杜绝工具卡片在初次挂载时抢跑
+    const [precedingTyping, setPrecedingTyping] = useState(false)
+    const isUnsettledTool = isGrowingChatNode(props.node) || isLocationOpen
+
+    useLayoutEffect(() => {
+      if (!isUnsettledTool) {
+        setPrecedingTyping(false)
+        return
+      }
+      const checkPreceding = () => {
+        const root = hostRef.current
+        if (!root) return false
+        const flowItem = root.closest('[data-chat-flow-key]')
+        if (!flowItem) return false
+        let prev = flowItem.previousElementSibling
+        while (prev instanceof HTMLElement) {
+          if (prev.hasAttribute('data-chat-flow-key')) {
+            return prev.querySelector('[data-streaming], [data-smooth-stream-typing="true"]') !== null
+          }
+          prev = prev.previousElementSibling
+        }
+        return false
+      }
+
+      setPrecedingTyping(checkPreceding())
+
+      const root = hostRef.current
+      const flow = root?.closest('[data-chat-flow]')
+      if (!flow || typeof MutationObserver === 'undefined') return
+
+      const observer = new MutationObserver(() => {
+        setPrecedingTyping(checkPreceding())
+      })
+      observer.observe(flow, {
+        attributes: true,
+        attributeFilter: ['data-streaming', 'data-smooth-stream-typing'],
+        subtree: true,
+      })
+      return () => observer.disconnect()
+    }, [isUnsettledTool])
+
     const [timedOut, setTimedOut] = useState(false)
-    const waiting = isLocationOpen && toolBlocked && !timedOut
+    const isBlocked = toolBlocked || precedingTyping
+    const waiting = isUnsettledTool && isBlocked && !timedOut
 
     useEffect(() => {
       if (waiting) {
-        const timer = setTimeout(() => { setTimedOut(true) }, 10000)
+        const timer = setTimeout(() => { setTimedOut(true) }, 8000)
         return () => clearTimeout(timer)
       } else {
         setTimedOut(false)

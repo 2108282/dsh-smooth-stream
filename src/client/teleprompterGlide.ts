@@ -1066,15 +1066,21 @@ function ensureRunway(
   const current = followRunways.get(port)
   if (current?.element === element
     && current.property === target.property
-    && current.requestedPx === requestedRunwayPx) return
+    && Math.abs(current.requestedPx - requestedRunwayPx) < 1) return
 
-  restoreRunway(port)
+  const original = current?.element === element && current.property === target.property
+    ? current.original
+    : element.style[target.property]
+
+  if (current?.element !== element || current?.property !== target.property) {
+    restoreRunway(port)
+  }
+
   const beforeHeight = port.scrollHeight
-  const original = element.style[target.property]
   element.style[target.property] = original === ''
     ? `${requestedRunwayPx}px`
     : `calc(${original} + ${requestedRunwayPx}px)`
-  const offset = Math.max(0, port.scrollHeight - beforeHeight)
+  const offset = Math.max(0, port.scrollHeight - beforeHeight + (current?.offset ?? 0))
   followRunways.set(port, {
     element,
     offset,
@@ -2307,9 +2313,8 @@ export function useConversationFollow(
           trajectoryGrowthSamples = 0
         }
         trajectoryFloorPx = floorNow
-        const phaseTarget = revealedCharsRef === undefined
-          ? floorNow
-          : revealPhase.advance(floorNow, revealedCharsRef.current).targetPx
+        // 锚定真实自然的物理高度，二阶弹簧以连续阻尼平滑推进，消除行内向上拉高与换行瞬间暴跌的上下晃动
+        const phaseTarget = floorNow
         const trajectoryStep = computeFollowTrajectoryStep(elapsedMs, {
           positionPx: trajectoryPositionPx,
           velocityPxPerMs: trajectoryVelocityPxPerMs,
