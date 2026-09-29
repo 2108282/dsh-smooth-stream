@@ -726,6 +726,19 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   const [childBlockTyping, setChildBlockTyping] = useState(false)
   const isTyping = streaming || reasoningActive || childBlockTyping
 
+  useLayoutEffect(() => {
+    const el = guardRef.current
+    if (!el) return
+    const card = el.closest('[data-chat-flow-key]')
+    if (card instanceof HTMLElement) {
+      if (!streaming && !isTyping) {
+        card.setAttribute('data-smooth-stream-settled', 'true')
+      } else {
+        card.removeAttribute('data-smooth-stream-settled')
+      }
+    }
+  }, [streaming, isTyping])
+
   const rendered: ReactNode[] = []
   const last = data.blocks.length - 1
   let lastFollow = -1

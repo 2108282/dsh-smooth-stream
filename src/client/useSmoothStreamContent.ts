@@ -128,7 +128,11 @@ export function computeAdaptiveQueueStep(
   )
   const effectiveScale = clamp(revealScale * tuning.revealScale, 0.05, 2)
   const accumulated = Math.max(0, debt) + speedCps * effectiveScale * (dtMs / 1000)
-  const revealChars = Math.min(backlog, Math.floor(accumulated))
+  const rawRevealChars = Math.min(backlog, Math.floor(accumulated))
+  // 单帧防爆微步长限制（Cadence Clamp）：
+  // 杜绝因上下文变长导致主线程掉帧时，一帧瞬时吐出几十个字的大块蹦字感，永远维持细腻流水步长
+  const frameLimit = Math.max(1, Math.min(4, Math.ceil(speedCps * effectiveScale * 0.025)))
+  const revealChars = Math.min(rawRevealChars, frameLimit)
   return { revealChars, debt: revealChars >= backlog ? 0 : accumulated - revealChars, speedCps }
 }
 
@@ -550,6 +554,10 @@ export function useSmoothStreamContent(
 
   useEffect(() => {
     if (!enabled) {
+      if (displayedCountRef.current < targetCountRef.current && content.startsWith(targetContentRef.current)) {
+        startFrameLoop()
+        return
+      }
       syncImmediate(content)
       return
     }

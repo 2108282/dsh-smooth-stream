@@ -203,6 +203,10 @@ function ensureFastFoldStyles(): void {
     html[data-smooth-stream-fast-fold="true"] [hidden="until-found"] {
       display: none !important;
     }
+    /* 核心性能优化：历史已结算的对话卡片施加布局与绘制隔离，阻断长上下文全局重排 */
+    [data-chat-flow] > [data-chat-flow-key][data-smooth-stream-settled="true"] {
+      contain: layout paint style;
+    }
   `
   document.head.appendChild(style)
 }

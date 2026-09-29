@@ -1057,7 +1057,7 @@ function ensureRunway(
   }
   const target = status === null
     ? { element: composer === null ? undefined : surfaces.at(-1), property: 'marginBottom' as const }
-    : { element: status, property: 'marginTop' as const }
+    : { element: status, property: 'marginBottom' as const }
   if (target.element === undefined) {
     restoreRunway(port)
     return
@@ -1194,11 +1194,7 @@ function setFollowScrollTop(port: HTMLElement, nextTop: number): void {
   if (ledger !== undefined && traceActive() && Math.abs(port.scrollTop - ledger) > 1) {
     followTrace('external-scroll', { from: Math.round(port.scrollTop), to: Math.round(nextTop), ledger: Math.round(ledger) })
   }
-  // 核心约束：在自动跟随状态下，禁止任何自动向下回落！上抬后保持位置不变
-  const targetTop = readerScrolledUp(port) || followReaderHolds.has(port)
-    ? nextTop
-    : Math.max(port.scrollTop, nextTop)
-  if (Math.abs(port.scrollTop - targetTop) > 0.01) port.scrollTop = targetTop
+  if (Math.abs(port.scrollTop - nextTop) > 0.01) port.scrollTop = nextTop
   followScrollLedgers.set(port, port.scrollTop)
   const ownedTop = String(port.scrollTop)
   if (port.getAttribute(FOLLOW_OWNED_ATTR) !== ownedTop) {

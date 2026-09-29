@@ -213,6 +213,19 @@ export function wrapFollowNodeView(
       }
     }, [])
 
+    useLayoutEffect(() => {
+      const el = hostRef.current
+      if (!el) return
+      const card = el.closest('[data-chat-flow-key]')
+      if (card instanceof HTMLElement) {
+        if (!growing && !entering && !growthPulse) {
+          card.setAttribute('data-smooth-stream-settled', 'true')
+        } else {
+          card.removeAttribute('data-smooth-stream-settled')
+        }
+      }
+    }, [growing, entering, growthPulse])
+
     return (
       <FollowHost
         active={growing}
