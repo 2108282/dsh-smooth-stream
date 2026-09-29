@@ -1080,7 +1080,7 @@ function ensureRunway(
   element.style[target.property] = original === ''
     ? `${requestedRunwayPx}px`
     : `calc(${original} + ${requestedRunwayPx}px)`
-  const offset = Math.max(0, port.scrollHeight - beforeHeight + (current?.offset ?? 0))
+  const offset = Math.min(requestedRunwayPx, Math.max(0, port.scrollHeight - beforeHeight + (current?.offset ?? 0)))
   followRunways.set(port, {
     element,
     offset,
@@ -2234,7 +2234,7 @@ export function useConversationFollow(
         // margin on the next surface in the same frame, sized to cover both,
         // or the floor sinks by that height and the transcript slides down
         // under the pin before the replacement margin can land.
-        reservePx = Math.max(reservePx, tuning.runwayPx) + lastStatusHeightPx
+        reservePx = Math.max(reservePx, tuning.runwayPx)
       }
       statusWasPresent = hasStatus
       const reserveEnabled = hasStatus
@@ -2305,6 +2305,7 @@ export function useConversationFollow(
           }
           trajectoryGrowthSamples += 1
           trajectoryGrowthAtMs = now
+          trajectoryPositionPx = Math.min(floorNow, (trajectoryPositionPx ?? floorNow) + (floorNow - trajectoryFloorPx))
         } else if (floorNow < trajectoryFloorPx - 0.5) {
           trajectoryPositionPx = floorNow - minLagPx
           trajectoryGrowthAtMs = now

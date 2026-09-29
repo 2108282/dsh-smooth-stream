@@ -101,8 +101,9 @@ Under DeepSeek Harness's decoupled presentation layer, these phases are mounted 
 
 ### 5. Running Status & Bottom Baseline Stabilization
 - **Accurate DSH Status Container Targeting**: Specifically matches Harness's native running indicator via `[data-chat-running]` (including the "Deep diving..." status and `runningDivider`), strictly isolating it from ordinary message transform surfaces (`shiftSurfaces`).
-- **Eliminates Bottom Bobbing & Whiplash**: Prevents the status container from inheriting dynamic `transform: translate3d`, eliminating the artifact where the bottom edge was steadily dragged upward during line reveals and snapped downward upon hard text wraps.
-- **Proper Layout Runway Placement**: Directs predictive layout runway margins into the status container's `marginTop` rather than bottom padding, ensuring the running indicator and divider stay rock-solid at the bottom of the viewport throughout generation.
+- **Synchronized Trajectory Position on Text Wraps**: Immediately steps `trajectoryPositionPx` in lockstep with wrap growth (`floorNow - trajectoryFloorPx`), preserving visual shift continuity and completely eliminating the abrupt upward jerk when lines wrap.
+- **Elimination of Artificial Height Stacking on Tool/Command Transitions**: Removes the buggy `lastStatusHeightPx` accumulation onto `reservePx` during step transitions, putting an end to the sudden upward bottom ballooning whenever a tool or command is invoked.
+- **Strict Clamping on Runway Offset**: Caps the layout runway offset within `requestedRunwayPx` to prevent concurrent wrap heights from leaking into padding calculations, guaranteeing that the running status and divider remain rock-solid across all execution stages.
 
 ---
 
