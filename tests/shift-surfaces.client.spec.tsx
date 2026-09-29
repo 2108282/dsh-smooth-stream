@@ -60,6 +60,47 @@ describe('shiftSurfacesOf', () => {
     ])
   })
 
+  it('excludes the real DSH running status container with data-chat-running and divider', () => {
+    const port = document.createElement('div')
+    port.setAttribute('data-conversation-scroll', '')
+    const flow = document.createElement('div')
+    flow.setAttribute('data-chat-flow', '')
+    port.appendChild(flow)
+
+    const first = document.createElement('div')
+    first.setAttribute('data-chat-anchor-key', '1:user')
+    flow.appendChild(first)
+
+    const second = document.createElement('div')
+    second.setAttribute('data-chat-anchor-key', '2:assistant')
+    flow.appendChild(second)
+
+    // Real DSH structure: container with data-chat-running, nested hidden role="status", divider, and content
+    const running = document.createElement('div')
+    running.className = 'EvIC1a_running'
+    running.setAttribute('data-chat-running', 'true')
+    const hiddenStatus = document.createElement('span')
+    hiddenStatus.className = 'visuallyHidden'
+    hiddenStatus.setAttribute('role', 'status')
+    hiddenStatus.textContent = '深度求索中...'
+    running.appendChild(hiddenStatus)
+    const divider = document.createElement('span')
+    divider.className = 'EvIC1a_runningDivider'
+    running.appendChild(divider)
+    const content = document.createElement('span')
+    content.className = 'EvIC1a_runningContent'
+    content.textContent = '深度求索中...'
+    running.appendChild(content)
+    flow.appendChild(running)
+
+    const surfaces = shiftSurfacesOf(port)
+    expect(surfaces.includes(running)).toBe(false)
+    expect(surfaces.map(el => el.getAttribute('data-chat-anchor-key'))).toEqual([
+      '1:user',
+      '2:assistant',
+    ])
+  })
+
   it('keeps the single transcript surface when the conversation exposes one', () => {
     const port = document.createElement('div')
     const transcript = document.createElement('div')

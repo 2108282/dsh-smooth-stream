@@ -486,8 +486,8 @@ function setShift(element: HTMLElement, px: number): void {
 
 function turnStatusOf(port: HTMLElement): HTMLElement | null {
   return port.querySelector<HTMLElement>(
-    '[data-chat-turn-status], [data-chat-flow] > [role="status"]',
-  )
+    '[data-chat-running], [data-chat-turn-status], [data-chat-flow] > [role="status"]',
+  ) ?? port.querySelector<HTMLElement>('[data-chat-flow] [role="status"]')?.closest<HTMLElement>('[data-chat-flow] > *') ?? null
 }
 
 /**
