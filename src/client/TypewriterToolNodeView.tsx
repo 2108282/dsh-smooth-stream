@@ -1,7 +1,6 @@
-import { createElement, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentType } from 'react'
+import { createElement, useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentType } from 'react'
 import { FollowHost } from './FollowHost.tsx'
 import { useProgressiveDomText } from './useProgressiveDomText.ts'
-import { streamRelay } from './streamRelay.ts'
 import { hasRecentConversationFollow } from './teleprompterGlide.ts'
 import entranceCss from './AgentRowEntrance.module.css'
 
@@ -113,17 +112,6 @@ function liveAgentTailMode(root: HTMLElement): 'turn' | 'handoff' | null {
   return hasRecentConversationFollow(port) ? 'handoff' : null
 }
 
-function getTurnKey(node: unknown): string {
-  if (node === null || typeof node !== 'object' || !('location' in node)) return 'active'
-  const location = (node as { location: unknown }).location
-  if (location === null || typeof location !== 'object') return 'active'
-  if ('turn' in location && location.turn !== null && typeof location.turn === 'object') {
-    const turn = location.turn as { turn?: unknown }
-    if (turn.turn !== undefined) return String(turn.turn)
-  }
-  return 'active'
-}
-
 /**
  * Wrap a prior Agent Chat renderer so its entrance and later growth share
  * conversation follow. Presentation stays with the wrapped component; kit
@@ -166,7 +154,7 @@ export function wrapFollowNodeView(
     }, [])
     useProgressiveDomText(
       hostRef,
-      false,
+      followable,
       revealInitialRef.current,
       speedCpsRef,
       runtimeFollowable ? finishRuntimeReveal : undefined,
@@ -225,86 +213,22 @@ export function wrapFollowNodeView(
       }
     }, [])
 
-    const turnKey = getTurnKey(props.node)
-    const isLocationOpen = openAgentLocation(props.node)
-    const toolBlocked = useSyncExternalStore(
-      streamRelay.subscribe,
-      () => streamRelay.isToolBlocked(turnKey),
-      () => false,
-    )
-
-    // 双轨时序门禁：内存状态机 + DOM 前驱流式标记，杜绝工具卡片在初次挂载时抢跑
-    const [precedingTyping, setPrecedingTyping] = useState(false)
-    const isUnsettledTool = isGrowingChatNode(props.node) || isLocationOpen
-
-    useLayoutEffect(() => {
-      if (!isUnsettledTool) {
-        setPrecedingTyping(false)
-        return
-      }
-      const checkPreceding = () => {
-        const root = hostRef.current
-        if (!root) return false
-        const flowItem = root.closest('[data-chat-flow-key]')
-        if (!flowItem) return false
-        let prev = flowItem.previousElementSibling
-        while (prev instanceof HTMLElement) {
-          if (prev.hasAttribute('data-chat-flow-key')) {
-            return prev.querySelector('[data-streaming], [data-smooth-stream-typing="true"]') !== null
-          }
-          prev = prev.previousElementSibling
-        }
-        return false
-      }
-
-      setPrecedingTyping(checkPreceding())
-
-      const root = hostRef.current
-      const flow = root?.closest('[data-chat-flow]')
-      if (!flow || typeof MutationObserver === 'undefined') return
-
-      const observer = new MutationObserver(() => {
-        setPrecedingTyping(checkPreceding())
-      })
-      observer.observe(flow, {
-        attributes: true,
-        attributeFilter: ['data-streaming', 'data-smooth-stream-typing'],
-        subtree: true,
-      })
-      return () => observer.disconnect()
-    }, [isUnsettledTool])
-
-    const [timedOut, setTimedOut] = useState(false)
-    const isBlocked = toolBlocked || precedingTyping
-    const waiting = isUnsettledTool && isBlocked && !timedOut
-
-    useEffect(() => {
-      if (waiting) {
-        const timer = setTimeout(() => { setTimedOut(true) }, 8000)
-        return () => clearTimeout(timer)
-      } else {
-        setTimedOut(false)
-      }
-    }, [waiting])
-
     return (
-      <div style={waiting ? { display: 'none' } : undefined}>
-        <FollowHost
-          active={!waiting && growing}
-          entrance={!waiting && (entering || growthPulse)}
-          onEntranceSettled={finishEntrance}
-          onGrowth={followable && !waiting ? onGrowth : undefined}
-          entranceExtentRef={growthExtentRef}
-          speedCpsRef={speedCpsRef}
-          controlScroll={controlScroll}
-          predictive={false}
-          hostRef={hostRef}
-          className={entranceCss.surface}
-          entranceActive={!waiting && (entering || growthPulse)}
-        >
-          {createElement(Inner, props)}
-        </FollowHost>
-      </div>
+      <FollowHost
+        active={growing}
+        entrance={entering || growthPulse}
+        onEntranceSettled={finishEntrance}
+        onGrowth={followable ? onGrowth : undefined}
+        entranceExtentRef={growthExtentRef}
+        speedCpsRef={speedCpsRef}
+        controlScroll={controlScroll}
+        predictive={false}
+        hostRef={hostRef}
+        className={entranceCss.surface}
+        entranceActive={entering || growthPulse}
+      >
+        {createElement(Inner, props)}
+      </FollowHost>
     )
   }
 }

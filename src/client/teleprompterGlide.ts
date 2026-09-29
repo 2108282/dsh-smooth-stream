@@ -1194,7 +1194,11 @@ function setFollowScrollTop(port: HTMLElement, nextTop: number): void {
   if (ledger !== undefined && traceActive() && Math.abs(port.scrollTop - ledger) > 1) {
     followTrace('external-scroll', { from: Math.round(port.scrollTop), to: Math.round(nextTop), ledger: Math.round(ledger) })
   }
-  if (Math.abs(port.scrollTop - nextTop) > 0.01) port.scrollTop = nextTop
+  // 核心约束：在自动跟随状态下，禁止任何自动向下回落！上抬后保持位置不变
+  const targetTop = readerScrolledUp(port) || followReaderHolds.has(port)
+    ? nextTop
+    : Math.max(port.scrollTop, nextTop)
+  if (Math.abs(port.scrollTop - targetTop) > 0.01) port.scrollTop = targetTop
   followScrollLedgers.set(port, port.scrollTop)
   const ownedTop = String(port.scrollTop)
   if (port.getAttribute(FOLLOW_OWNED_ATTR) !== ownedTop) {
@@ -2493,7 +2497,6 @@ export function useConversationFollow(
         followTraceUntilMs = Math.max(followTraceUntilMs, performance.now() + 10000)
         followTrace('fast-gate', { sh: host.scrollHeight, st: Math.round(host.scrollTop), pad: Math.round(flowPadOf(host)) })
         restoreRunway(host)
-        setFlowPad(host, 0)
         finishAtNaturalFloor(host, !startedAsEntrance, true)
         followLeaders.delete(host)
         followCompletionSettle.delete(host)
@@ -2694,10 +2697,6 @@ export function useConversationFollow(
                 ((tuning.runwayPx || FOLLOW_STATUS_RUNWAY_PX) / FOLLOW_RUNWAY_RETIRE_MS) * dt,
               )
           const transferredPx = transferRunwayToFlowPad(host, requestedTransferPx)
-          // Do not bank a completion pad. The margin release and pad removal
-          // happen in one layout pass, so there is no extra extent to retire
-          // later and no second slow rebound after the cascade quiets.
-          if (transferredPx > 0) setFlowPad(host, Math.max(0, flowPadOf(host) - transferredPx))
           reservePx = Math.max(0, reservePx - transferredPx)
           // targetHeight = scrollHeight - runway. The equal margin-to-pad
           // transfer keeps scrollHeight fixed and lowers runway by δ, so the
@@ -2709,39 +2708,10 @@ export function useConversationFollow(
         }
         const runwayOffset = runwayOffsetOf(host)
         const lag = Math.max(0, host.scrollHeight - animatedH - runwayOffset)
-        // PAD RETIREMENT (the final glide of 收尾归位): cascade quiet, drain
-        // closed — the pad that kept every host commit pixel-stable is handed
-        // back to the layout at the bounded settle rate. The floor sinks with
-        // it and the pinned viewport glides down to the natural resting
-        // position against the composer; smooth and rate-limited, never the
-        // single-frame slam the raw host snap paints.
-        if (
-          !settleRetiring
-          && lag <= FOLLOW_SETTLE_EPSILON_PX
-          && reservePx <= FOLLOW_SETTLE_EPSILON_PX
-          && settleQuietMs >= FOLLOW_SETTLE_QUIET_MS
-          && flowPadOf(host) > FOLLOW_SETTLE_EPSILON_PX
-        ) {
-          followTrace('retire-start', { pad: Math.round(flowPadOf(host)), sh: host.scrollHeight, st: Math.round(host.scrollTop) })
-          settleRetiring = true
-        }
-        if (settleRetiring) {
-          const padPx = flowPadOf(host)
-          const retirePx = Math.min(
-            padPx,
-            ((tuning.runwayPx || FOLLOW_STATUS_RUNWAY_PX) / FOLLOW_RUNWAY_RETIRE_MS) * dt,
-          )
-          if (padPx - retirePx <= FOLLOW_SETTLE_EPSILON_PX) {
-            setFlowPad(host, 0)
-            settleRetiring = false
-          } else {
-            setFlowPad(host, padPx - retirePx)
-          }
-        }
+        // 彻底消除收尾慢慢滑落下降（glides down）：上抬后保持位置绝对稳定，不再扣减底边 padding
         if (
           lag <= FOLLOW_SETTLE_EPSILON_PX
           && (reservePx <= FOLLOW_SETTLE_EPSILON_PX || settleStatus === null)
-          && flowPadOf(host) <= FOLLOW_SETTLE_EPSILON_PX
           && settleQuietMs >= FOLLOW_SETTLE_QUIET_MS
         ) {
           followTrace('finish', { st: Math.round(host.scrollTop), sh: host.scrollHeight, pad: Math.round(flowPadOf(host)) })
