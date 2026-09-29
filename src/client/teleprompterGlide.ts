@@ -1048,9 +1048,8 @@ function ensureRunway(
   // would expose the whole runway as empty space below a short/early Think.
   const naturalHeight = Math.max(0, port.scrollHeight - runwayOffsetOf(port))
   const existing = followRunways.get(port)
-  const requestedRunwayPx = migratedLegacy || existing?.normalizedLegacy === true
-    ? FOLLOW_STATUS_RUNWAY_PX
-    : runwayPx
+  // 尊重用户在调试面板中自定义的预测预留空间数值，禁止被常量硬编码强制覆盖为 72px
+  const requestedRunwayPx = Math.max(0, runwayPx)
   if (requestedRunwayPx <= 0 || port.clientHeight <= 0 || naturalHeight <= port.clientHeight) {
     restoreRunway(port)
     return
