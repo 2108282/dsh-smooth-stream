@@ -257,8 +257,11 @@ function healDshConversationPipeline(ctx: ClientContext, settings: SettingsCell)
     }
 
     try {
-      if (uiConv.bindings && typeof uiConv.bindings.values === 'object') {
-        for (const record of uiConv.bindings.values) {
+      if (uiConv.bindings) {
+        const list = typeof uiConv.bindings.values === 'function'
+          ? Array.from(uiConv.bindings.values())
+          : (uiConv.bindings.values ? Array.from(uiConv.bindings.values as any) : [])
+        for (const record of list as any[]) {
           if (record?.binding) {
             patchPrototype(record.binding)
             break

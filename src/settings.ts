@@ -110,7 +110,7 @@ export interface StreamSettings {
 export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   enabled: true,
   controlScroll: true,
-  motionPreference: 'auto',
+  motionPreference: 'force-smooth',
   thinkAutoExpand: true,
   logarithmicFade: true,
   fastFold: true,
