@@ -422,28 +422,30 @@ function resizeProxyOf(port: HTMLElement): HTMLElement | null {
  * child therefore rides the same transform, keeping the visual order of the
  * column intact.
  */
+const directShiftCache = new WeakMap<HTMLElement, number>()
+
 export function shiftSurfacesOf(port: HTMLElement): HTMLElement[] {
   const transcript = port.querySelector<HTMLElement>('[data-chat-transcript]')
   if (transcript !== null) return [transcript]
-  const anchored = [...port.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')]
-    .filter(row => row.parentElement?.closest('[data-chat-anchor-key]') === null)
   const flow = port.querySelector<HTMLElement>('[data-chat-flow]')
-  if (flow === null) return anchored
+  if (flow === null) {
+    return [...port.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')]
+      .filter(row => row.parentElement?.closest('[data-chat-anchor-key]') === null)
+  }
   const status = turnStatusOf(port)
-  const anchoredSet = new Set(anchored)
-  // One document-order pass: an anchored row, or a foreign child that contains
-  // no anchored row of its own (a wrapper around real rows would double-shift
-  // the rows inside it).
+  // 高性能路径：直接取 flow 的直接子节点并排除 status，杜绝在长上下文中进行昂贵的全树 querySelectorAll 扫描
   return [...flow.children].filter((child): child is HTMLElement =>
-    child instanceof HTMLElement
-    && child !== status
-    && (anchoredSet.has(child) || child.querySelector('[data-chat-anchor-key]') === null))
+    child instanceof HTMLElement && child !== status)
 }
 
 function currentShiftOf(element: HTMLElement): number {
-  return Number(
+  const cached = directShiftCache.get(element)
+  if (cached !== undefined) return cached
+  const parsed = Number(
     /translate3d\(0(?:px)?,\s*(-?[\d.]+)px,\s*0(?:px)?\)/.exec(element.style.transform)?.[1] ?? 0,
   )
+  directShiftCache.set(element, parsed)
+  return parsed
 }
 
 /* An open fixed tooltip (role="tooltip") inside a surface is the only reason a
@@ -457,15 +459,18 @@ function currentShiftOf(element: HTMLElement): number {
  * it closes. */
 
 function setDirectShift(element: HTMLElement, px: number): void {
+  const current = currentShiftOf(element)
   if (Math.abs(px) > 0.01) {
     if (
-      Math.abs(currentShiftOf(element) - px) <= 0.01
+      Math.abs(current - px) <= 0.01
       && element.style.willChange === 'transform'
       && element.style.clipPath === ''
     ) return
+    directShiftCache.set(element, px)
     element.style.transform = `translate3d(0, ${px}px, 0)`
     element.style.willChange = 'transform'
   } else {
+    directShiftCache.set(element, 0)
     if (element.style.transform === '' && element.style.willChange === '' && element.style.clipPath === '') return
     element.style.transform = ''
     element.style.willChange = ''
@@ -1889,7 +1894,8 @@ export function useConversationFollow(
       // anchor hold reads the shared per-port baseline (see
       // followGuardAnchors); it runs for structural commits only and stands
       // down while this settle's retirement glide runs (that motion is ours).
-      if (!settleRetiring) {
+      // 流式输出期间禁止调用 measureReadingAnchor，避免逐字符调用 getBoundingClientRect 造成强制同步重排
+      if (!settleRetiring && !activeRef.current) {
         const measured = measureReadingAnchor(port)
         if (measured !== null && measured.delta > 0.5) {
           if (pruneDeadRunway(port)) reservePx = 0
@@ -1999,7 +2005,7 @@ export function useConversationFollow(
         const flow = flowElementOf(port)
         if (flow !== null) {
           mutations = new MutationObserver(() => { restoreBeforePaint() })
-          mutations.observe(flow, { childList: true, subtree: true })
+          mutations.observe(flow, { childList: true })
         }
       }
     }
@@ -2606,7 +2612,7 @@ export function useConversationFollow(
         const flow = flowElementOf(host)
         if (flow !== null) {
           mutations = new MutationObserver(() => { restoreBeforePaint() })
-          mutations.observe(flow, { childList: true, subtree: true })
+          mutations.observe(flow, { childList: true })
         }
       }
       // From here this closure's observers are the completion guard of last

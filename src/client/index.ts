@@ -203,8 +203,8 @@ function ensureFastFoldStyles(): void {
     html[data-smooth-stream-fast-fold="true"] [hidden="until-found"] {
       display: none !important;
     }
-    /* 核心性能优化：历史已结算的对话卡片施加布局与绘制隔离，阻断长上下文全局重排 */
-    [data-chat-flow] > [data-chat-flow-key][data-smooth-stream-settled="true"] {
+    /* 核心性能优化：凡是未处于流式输出状态的历史卡片，直接开启硬隔离，从根源切断长上下文全局回流 */
+    [data-chat-flow] > [data-chat-flow-key]:not(:has([data-streaming])):not(:has([data-smooth-stream-typing="true"])) {
       contain: layout paint style;
     }
   `

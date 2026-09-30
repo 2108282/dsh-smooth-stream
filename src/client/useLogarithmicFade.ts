@@ -165,17 +165,22 @@ export class LogarithmicFadeController {
     let prefix = 0
     while (prefix < previous.length && prefix < text.length && previous[prefix] === text[prefix]) prefix += 1
     const appended = text.startsWith(previous)
+    const tailLimit = FADE_MAX_TAIL_SIZE * 2
+    const tailCutoff = Math.max(0, text.length - tailLimit)
     const nodes: { node: Text, start: number, end: number, eligible: boolean }[] = []
     const walker = this.root.ownerDocument.createTreeWalker(this.root, NodeFilter.SHOW_TEXT)
     let offset = 0
     for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-      const end = offset + (node.textContent?.length ?? 0)
-      nodes.push({ node: node as Text, start: offset, end, eligible: node.parentElement?.closest(EXCLUDED) === null })
+      const len = node.textContent?.length ?? 0
+      const end = offset + len
+      if (end > tailCutoff) {
+        nodes.push({ node: node as Text, start: offset, end, eligible: node.parentElement?.closest(EXCLUDED) === null })
+      }
       offset = end
     }
-    // containing() walks backwards by grapheme without segmenting the entire
-    // answer into an array. Offsets still refer to the original DOM text.
-    const segments = segmenter.segment(text)
+    // 渐隐尾部只关注最后 tailLimit 字符，杜绝在长文本下对全量字符串进行昂贵的分词
+    const tailText = tailCutoff > 0 ? text.slice(tailCutoff) : text
+    const segments = segmenter.segment(tailText)
     // Keep existing characters alive when the engine resets its speed during
     // completion. A shrinking window must not abruptly darken the old tail.
     const tailSize = fadeTailSize(this.speedCps)
@@ -185,10 +190,11 @@ export class LogarithmicFadeController {
         : start
     ), Infinity)
     let end = text.length
-    for (let count = 0; count < FADE_MAX_TAIL_SIZE && end > 0 && (count < tailSize || end > oldestLiveStart); count += 1) {
-      const segment = segments.containing(end - 1)
+    for (let count = 0; count < FADE_MAX_TAIL_SIZE && end > tailCutoff && (count < tailSize || end > oldestLiveStart); count += 1) {
+      const localPos = (end - 1) - tailCutoff
+      const segment = segments.containing(localPos)
       if (segment === undefined) break
-      const start = segment.index
+      const start = tailCutoff + segment.index
       const parts = nodes.filter(node => node.end > start && node.start < end)
       const retained = old.find(character => character.start === start && character.end === end && end <= prefix)
       const born = retained?.born ?? (this.active && appended && start >= previous.length ? now : null)
