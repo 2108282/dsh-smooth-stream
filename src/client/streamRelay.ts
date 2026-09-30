@@ -66,6 +66,24 @@ class StreamRelay {
   }
 
   /**
+   * Reset a turn's state immediately (e.g. upon turn settle or interruption).
+   */
+  resetTurn(turnKey?: string | null): void {
+    const key = turnKey || 'active'
+    if (this.turns.has(key)) {
+      this.turns.delete(key)
+      this.notify()
+    }
+  }
+
+  clearAll(): void {
+    if (this.turns.size > 0) {
+      this.turns.clear()
+      this.notify()
+    }
+  }
+
+  /**
    * Whether a tool call in this step/turn must wait.
    * Blocked as long as any preceding reasoning or text is actively revealing.
    */

@@ -47,6 +47,7 @@ function useMotionReduced(preference: StreamMotionPreference): boolean {
 
 interface AnimatedMarkdownTextProps extends MarkdownProps {
   streaming: boolean
+  isHistorical?: boolean
   hasToolCallBelow?: boolean
   isTurnOpen?: boolean
   turnKey?: string
@@ -263,6 +264,7 @@ function AnimatedMarkdownText({
   labels,
   fileMentions,
   streaming,
+  isHistorical = false,
   hasToolCallBelow = false,
   isTurnOpen = false,
   turnKey,
@@ -280,8 +282,15 @@ function AnimatedMarkdownText({
   controlScroll = true,
 }: AnimatedMarkdownTextProps) {
   const reduced = motionReduced
-  const keepStreaming = keepStreamOnToolCall && isTurnOpen
-  const [typing, setTyping] = useState(() => streaming || (keepStreaming && text.length > 0))
+  // 核心守卫：准确记录该卡片是否曾真正处于 streaming 活跃流中
+  const wasStreamingRef = useRef(streaming)
+  if (streaming) wasStreamingRef.current = true
+
+  // 历史卡片与未加载成功（中断/已结算）卡片判定：
+  // 若挂载时非 streaming 且从未经历活跃流，则绝对属于已完成的历史卡片，杜绝二次从 0 字符打字
+  const isHistoryOrSettled = !streaming && !wasStreamingRef.current
+  const keepStreaming = !isHistoryOrSettled && keepStreamOnToolCall && isTurnOpen && wasStreamingRef.current
+  const [typing, setTyping] = useState(() => streaming)
   const localSpeedCpsRef = useRef(35)
   const followRootRef = useRef<HTMLDivElement>(null)
   const predictionSourceRef = useRef<string | null>(null)
@@ -296,10 +305,10 @@ function AnimatedMarkdownText({
     () => false,
   )
   const waitingForReasoning = isTurnOpen && reasoningActive
-  const canType = typing && !waitingForReasoning
+  const canType = typing && !waitingForReasoning && !isHistoryOrSettled
 
-  const [shownLength, setShownLength] = useState(0)
-  const effectiveStreaming = (streaming || (keepStreaming && shownLength < text.length)) && !waitingForReasoning
+  const [shownLength, setShownLength] = useState(() => (streaming ? 0 : text.length))
+  const effectiveStreaming = (streaming || (keepStreaming && shownLength < text.length)) && !waitingForReasoning && !isHistoryOrSettled
   const feedingText = waitingForReasoning ? '' : text
 
   const displayed = useSmoothStreamContent(feedingText, {
@@ -312,7 +321,7 @@ function AnimatedMarkdownText({
     revealScaleRef: followRevealScaleRef,
     onRevealCommit: () => { notifyFollowCommit(followRootRef.current) },
   })
-  const shown = reduced ? text : (waitingForReasoning ? '' : displayed)
+  const shown = reduced || isHistoryOrSettled ? text : (waitingForReasoning ? '' : displayed)
 
   useEffect(() => {
     setShownLength(shown.length)
@@ -323,6 +332,11 @@ function AnimatedMarkdownText({
 
   // 严格向 Relay 报告本正文块的吐字活跃状态（供后续工具调用排队使用）
   useEffect(() => {
+    if (isHistoryOrSettled) {
+      streamRelay.setTextActive(turnKey, false)
+      onTypingChange?.(false)
+      return
+    }
     const isActivelyTyping = !waitingForReasoning && shownLength < text.length && text.length > 0 && !reduced
     const active = isActivelyTyping || (effectiveStreaming && !waitingForReasoning)
     streamRelay.setTextActive(turnKey, active)
@@ -331,7 +345,7 @@ function AnimatedMarkdownText({
       streamRelay.setTextActive(turnKey, false)
       onTypingChange?.(false)
     }
-  }, [waitingForReasoning, shownLength, text.length, effectiveStreaming, reduced, turnKey, onTypingChange])
+  }, [isHistoryOrSettled, waitingForReasoning, shownLength, text.length, effectiveStreaming, reduced, turnKey, onTypingChange])
 
   useLogarithmicFade(followRootRef, logarithmicFade && !reduced, live, speedCpsRef)
 
@@ -366,8 +380,12 @@ function AnimatedMarkdownText({
   // reveal engine off for the whole reply. Re-arm on the rising edge so late
   // stream starts are still smoothed. (Adopted from #22 by @Zn-Dk.)
   useEffect(() => {
+    if (isHistoryOrSettled) {
+      setTyping(false)
+      return
+    }
     if (streaming || (keepStreaming && shown.length < text.length)) setTyping(true)
-  }, [streaming, keepStreaming, shown.length, text.length])
+  }, [isHistoryOrSettled, streaming, keepStreaming, shown.length, text.length])
 
   return (
     <FollowHost
@@ -506,8 +524,12 @@ function AnimatedReasoning({
   onTypingChange?: ((isTyping: boolean) => void) | undefined
 }) {
   const reduced = motionReduced
-  const [shownLength, setShownLength] = useState(0)
-  const stillDraining = shownLength < text.length
+  const wasRunningRef = useRef(running)
+  if (running) wasRunningRef.current = true
+
+  const [shownLength, setShownLength] = useState(() => (running ? 0 : text.length))
+  // 只有真正曾经处于 running 状态的思考过程在转入静止后才需要 draining 泄压；初次挂载非 running 的卡片属于历史卡片，绝不处于 draining 阶段
+  const stillDraining = wasRunningRef.current && shownLength < text.length
   const activeRunning = running || (stillDraining && text.length > 0)
   const [expanded, setExpanded] = useState(() => activeRunning && thinkAutoExpand)
   const [userToggled, setUserToggled] = useState(false)
@@ -640,7 +662,10 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   motionPreference?: StreamMotionPreference
 }) {
   const data = node.data
-  const streaming = data.status === 'running'
+  // 核心铁律：初次挂载时若非 running 状态，说明属于历史卡片或前序已完成步骤，永不二次流式打字！
+  const wasMountRunningRef = useRef(data.status === 'running')
+  const isHistorical = !wasMountRunningRef.current && data.status !== 'running'
+  const streaming = !isHistorical && data.status === 'running'
   const reduced = useMotionReduced(motionPreference)
   // The Host's completion-fold decision for THIS node's inline reasoning:
   // only the answer step folds, only in compact-transcript mode, and only
@@ -691,6 +716,18 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   const turn = node.location.kind === 'turn' || node.location.kind === 'step'
     ? node.location.turn
     : undefined
+  const step = node.location.kind === 'step' ? node.location.step : undefined
+  const isStepOpen = streaming && turn !== undefined && turn.status === 'open' && (step === undefined || step.status === 'open')
+  const turnKey = turn !== undefined && typeof turn === 'object' && 'turn' in turn && turn.turn !== undefined
+    ? String(turn.turn)
+    : 'active'
+
+  // 未加载成功（interrupted）或已结算时，无条件清理该轮次接力棒阻塞，杜绝后续卡片死锁
+  useEffect(() => {
+    if (data.status === 'interrupted' || data.status === 'settled') {
+      streamRelay.resetTurn(turnKey)
+    }
+  }, [data.status, turnKey])
   const tail = useTurnData('turn-tail')
   const owner = useMemo<TurnTailOwnerProps | undefined>(() => {
     if (turn?.status !== 'closed' || data.finalNode === undefined) return undefined
@@ -731,13 +768,13 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
     if (!el) return
     const card = el.closest('[data-chat-flow-key]')
     if (card instanceof HTMLElement) {
-      if (!streaming && !isTyping) {
+      if (isHistorical || (!streaming && !isTyping)) {
         card.setAttribute('data-smooth-stream-settled', 'true')
       } else {
         card.removeAttribute('data-smooth-stream-settled')
       }
     }
-  }, [streaming, isTyping])
+  }, [isHistorical, streaming, isTyping])
 
   const rendered: ReactNode[] = []
   const last = data.blocks.length - 1
@@ -770,8 +807,9 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
             labels={markdownLabels}
             fileMentions={mentions}
             streaming={streaming}
+            isHistorical={isHistorical}
             hasToolCallBelow={hasToolCallBelow}
-            isTurnOpen={turn !== undefined && turn.status === 'open'}
+            isTurnOpen={isStepOpen}
             turnKey={turnKey}
             keepStreamOnToolCall={keepStreamOnToolCall}
             logarithmicFade={logarithmicFade && data.status !== 'interrupted'}
@@ -798,7 +836,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
           <FoldableReasoning key={index} hidden={reasoningHidden} reveal={revealProcess}>
             <AnimatedReasoning
               text={block.text}
-              running={isThinkingActive}
+              running={isThinkingActive && !isHistorical}
               preset={preset}
               thinkAutoExpand={thinkAutoExpand}
               logarithmicFade={logarithmicFade && data.status !== 'interrupted'}

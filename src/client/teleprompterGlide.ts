@@ -874,9 +874,12 @@ function pruneDeadRunway(port: HTMLElement): boolean {
 function setFlowPad(port: HTMLElement, px: number): void {
   const flow = flowElementOf(port)
   if (flow === null) return
+  // 定额封顶：底部 padding 绝对不允许超过用户在调试面板中设定的预留跑道上限，杜绝滚雪球累加
+  const maxPad = Math.max(0, debugRuntime.activeTuning().runwayPx)
+  const clampedPx = Math.min(maxPad, Math.max(0, px))
   const existing = followSettlePads.get(port)
   const original = existing?.original ?? flow.style.paddingBottom
-  if (px <= FOLLOW_SETTLE_EPSILON_PX) {
+  if (clampedPx <= FOLLOW_SETTLE_EPSILON_PX) {
     if (existing !== undefined) {
       flow.style.paddingBottom = existing.original
       followSettlePads.delete(port)
@@ -884,16 +887,17 @@ function setFlowPad(port: HTMLElement, px: number): void {
     return
   }
   flow.style.paddingBottom = original === ''
-    ? `${px}px`
-    : `calc(${original} + ${px}px)`
-  followSettlePads.set(port, { element: flow, original, px })
+    ? `${clampedPx}px`
+    : `calc(${original} + ${clampedPx}px)`
+  followSettlePads.set(port, { element: flow, original, px: clampedPx })
 }
 
 /** Extent the follower owns below the content: the live runway margin plus
  *  the retired completion pad. At adopt the pad is reclaimed into the fresh
  *  reservation (same frame, pre-paint), so the floor never steps. */
 function ownedBottomSpaceOf(port: HTMLElement): number {
-  return runwayOffsetOf(port) + flowPadOf(port)
+  const maxPad = Math.max(0, debugRuntime.activeTuning().runwayPx)
+  return Math.min(maxPad, runwayOffsetOf(port) + flowPadOf(port))
 }
 
 /**
@@ -1053,8 +1057,11 @@ function ensureRunway(
   // would expose the whole runway as empty space below a short/early Think.
   const naturalHeight = Math.max(0, port.scrollHeight - runwayOffsetOf(port))
   const existing = followRunways.get(port)
-  // 尊重用户在调试面板中自定义的预测预留空间数值，禁止被常量硬编码强制覆盖为 72px
-  const requestedRunwayPx = Math.max(0, runwayPx)
+  // 尊重用户在调试面板中自定义的预测预留空间数值，底边总预算（flowPad + runway）绝不叠加超标
+  const maxRunway = Math.max(0, runwayPx)
+  const currentPad = flowPadOf(port)
+  const remainingAllowance = Math.max(0, maxRunway - currentPad)
+  const requestedRunwayPx = Math.min(maxRunway, remainingAllowance)
   if (requestedRunwayPx <= 0 || port.clientHeight <= 0 || naturalHeight <= port.clientHeight) {
     restoreRunway(port)
     return
@@ -1127,7 +1134,8 @@ function transferRunwayToFlowPad(port: HTMLElement, requestedPx: number): number
     })
   }
   if (transferredPx > 0) {
-    setFlowPad(port, flowPadOf(port) + transferredPx)
+    const maxPad = Math.max(0, debugRuntime.activeTuning().runwayPx)
+    setFlowPad(port, Math.min(maxPad, flowPadOf(port) + transferredPx))
     invalidatePaintLimit(port)
   }
   return transferredPx
