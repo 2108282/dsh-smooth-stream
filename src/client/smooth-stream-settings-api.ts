@@ -53,6 +53,7 @@ function debugSettingsView(value: unknown): StreamDebugSettingsView {
     || typeof tuning.revealScale !== 'number'
     || typeof tuning.queuePressure !== 'number'
     || typeof tuning.maxRevealCps !== 'number'
+    || (tuning.cadenceClamp !== undefined && typeof tuning.cadenceClamp !== 'number')
     || typeof tuning.springStiffness !== 'number'
     || typeof tuning.springDamping !== 'number'
     || typeof tuning.springMass !== 'number'
@@ -63,7 +64,10 @@ function debugSettingsView(value: unknown): StreamDebugSettingsView {
   }
   return {
     debugEnabled: data.debugEnabled,
-    tuning: tuning as unknown as StreamDebugTuning,
+    tuning: {
+      cadenceClamp: 4,
+      ...(tuning as unknown as StreamDebugTuning),
+    },
   }
 }
 

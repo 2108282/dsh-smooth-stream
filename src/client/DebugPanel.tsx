@@ -37,6 +37,7 @@ const REVEAL_CONTROLS: readonly TuningControl[] = [
   { key: 'revealScale', label: 'debugRevealMultiplier', tip: 'debugTipRevealMultiplier', min: 0.25, max: 2, step: 0.05, unit: 'x' },
   { key: 'queuePressure', label: 'debugQueuePressure', tip: 'debugTipQueuePressure', min: 0, max: 2, step: 0.05, unit: 'x' },
   { key: 'maxRevealCps', label: 'debugMaxReveal', tip: 'debugTipMaxReveal', min: 120, max: 1000, step: 10, unit: 'cps' },
+  { key: 'cadenceClamp', label: 'debugCadenceClamp', tip: 'debugTipCadenceClamp', min: 1, max: 16, step: 1, unit: '字/帧' },
 ]
 
 const FOLLOW_CONTROLS: readonly TuningControl[] = [

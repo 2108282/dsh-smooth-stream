@@ -69,7 +69,7 @@ export type SmoothStreamLocaleKey =
   | 'debugFps' | 'debugFrameTime' | 'debugBacklog' | 'debugRevealSpeed' | 'debugProgress'
   | 'debugFollowState' | 'debugFollowing' | 'debugReleased'
   | 'debugLag' | 'debugVelocity' | 'debugReserve' | 'debugCapacity' | 'debugAppliedScale'
-  | 'debugRevealMultiplier' | 'debugQueuePressure' | 'debugMaxReveal'
+  | 'debugRevealMultiplier' | 'debugQueuePressure' | 'debugMaxReveal' | 'debugCadenceClamp'
   | 'debugSpringStiffness' | 'debugSpringDamping' | 'debugSpringMass'
   | 'debugRunway' | 'debugReserveResponse' | 'debugBackpressureMin'
   | 'debugTipRevealMultiplier' | 'debugTipQueuePressure' | 'debugTipMaxReveal'
@@ -141,6 +141,7 @@ export const en: Record<SmoothStreamLocaleKey, string> = {
   debugRevealMultiplier: 'Reveal multiplier',
   debugQueuePressure: 'Queue pressure',
   debugMaxReveal: 'Maximum reveal',
+  debugCadenceClamp: 'Cadence clamp',
   debugSpringStiffness: 'Spring stiffness',
   debugSpringDamping: 'Spring damping',
   debugSpringMass: 'Spring mass',
@@ -150,6 +151,7 @@ export const en: Record<SmoothStreamLocaleKey, string> = {
   debugTipRevealMultiplier: 'Overall reveal speed multiplier. Higher reveals text faster and clears backlog sooner, but can feel jumpy. Lower is smoother but takes longer to finish.',
   debugTipQueuePressure: 'Backlog acceleration strength. Higher catches up to a growing queue more aggressively; lower keeps speed steadier but may leave backlog.',
   debugTipMaxReveal: 'Hard cap for reveal speed in characters per second. Higher allows faster catch-up; lower limits bursts and keeps motion calmer.',
+  debugTipCadenceClamp: 'Micro-step character limit per rendering frame (1~16). Prevents burst jumps during frame drops and maintains silky fluid pacing.',
   debugTipSpringStiffness: 'Scroll spring strength. Higher closes visual lag faster but can feel sharp; lower feels softer but follows more slowly.',
   debugTipSpringDamping: 'Scroll energy damping. Higher suppresses overshoot and jitter but feels heavier; lower feels livelier but may oscillate.',
   debugTipSpringMass: 'Scroll inertia. Higher makes movement slower and heavier; lower makes it react faster but can feel abrupt.',
@@ -237,6 +239,7 @@ export const zh: Record<SmoothStreamLocaleKey, string> = {
   debugRevealMultiplier: '揭示倍率',
   debugQueuePressure: '队列压力',
   debugMaxReveal: '最大揭示速度',
+  debugCadenceClamp: '单帧微步长上限',
   debugSpringStiffness: '弹簧刚度',
   debugSpringDamping: '弹簧阻尼',
   debugSpringMass: '弹簧质量',
@@ -246,6 +249,7 @@ export const zh: Record<SmoothStreamLocaleKey, string> = {
   debugTipRevealMultiplier: '整体文字揭示速度倍率。调大能更快清空积压，但可能显得跳；调小更平滑，但完成回复需要更久。',
   debugTipQueuePressure: '积压对加速的影响强度。调大能更积极追赶增长中的队列；调小速度更稳定，但积压可能持续。',
   debugTipMaxReveal: '每秒揭示字符数上限。调大允许更快追赶；调小限制突发速度，让动作更平稳。',
+  debugTipCadenceClamp: '单帧渲染最多吐出的字符数上限（Cadence Clamp，1~16 字/帧）。调小能杜绝手机掉帧时的大块蹦字感，保持极度细腻的流水感；调大在快节奏下吐字更激进。',
   debugTipSpringStiffness: '滚动弹簧刚度。调大更快收拢视觉滞后，但感觉更硬；调小更柔和，但跟随更慢。',
   debugTipSpringDamping: '滚动能量阻尼。调大能抑制过冲和抖动，但感觉更沉；调小更灵活，但可能回弹。',
   debugTipSpringMass: '滚动惯性。调大移动更慢更沉；调小反应更快，但可能显得突兀。',

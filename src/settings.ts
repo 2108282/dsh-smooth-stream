@@ -18,6 +18,8 @@ export interface StreamDebugTuning {
   queuePressure: number
   /** Upper bound for reveal cadence, in characters per second. */
   maxRevealCps: number
+  /** Micro-step limit per frame to prevent bursting, in characters per frame. */
+  cadenceClamp: number
   /** Spring stiffness used by the conversation follower. */
   springStiffness: number
   /** Spring damping used by the conversation follower. */
@@ -37,6 +39,7 @@ export const DEFAULT_STREAM_DEBUG_TUNING: StreamDebugTuning = {
   revealScale: 1,
   queuePressure: 0.85,
   maxRevealCps: 600,
+  cadenceClamp: 4,
   springStiffness: 130,
   springDamping: 24,
   springMass: 1,

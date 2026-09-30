@@ -131,7 +131,8 @@ export function computeAdaptiveQueueStep(
   const rawRevealChars = Math.min(backlog, Math.floor(accumulated))
   // 单帧防爆微步长限制（Cadence Clamp）：
   // 杜绝因上下文变长导致主线程掉帧时，一帧瞬时吐出几十个字的大块蹦字感，永远维持细腻流水步长
-  const frameLimit = Math.max(1, Math.min(4, Math.ceil(speedCps * effectiveScale * 0.025)))
+  const maxClamp = Math.max(1, tuning.cadenceClamp ?? 4)
+  const frameLimit = Math.max(1, Math.min(maxClamp, Math.ceil(speedCps * effectiveScale * 0.025)))
   const revealChars = Math.min(rawRevealChars, frameLimit)
   return { revealChars, debt: revealChars >= backlog ? 0 : accumulated - revealChars, speedCps }
 }
