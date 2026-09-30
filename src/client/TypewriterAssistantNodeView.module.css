@@ -208,11 +208,10 @@
 }
 
 .disclosureContent[data-collapsed] {
+  display: none !important;
   grid-template-rows: 0fr;
   visibility: hidden;
-  transition:
-    grid-template-rows var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, cubic-bezier(0.4, 0, 0.2, 1)),
-    visibility 0s var(--ds-transition-duration, 0.2s);
+  transition: none;
 }
 
 .disclosureContent[data-collapsed] > * {

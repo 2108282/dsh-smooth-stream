@@ -200,10 +200,13 @@ function ensureFastFoldStyles(): void {
   style.id = FAST_FOLD_STYLE_ID
   style.textContent = `
     html[data-smooth-stream-fast-fold="true"] [data-turn-process-hidden],
-    html[data-smooth-stream-fast-fold="true"] [hidden="until-found"] {
+    html[data-smooth-stream-fast-fold="true"] [hidden="until-found"],
+    [data-disclosure-content][data-collapsed] {
       display: none !important;
     }
-    /* 核心性能优化：凡是未处于流式输出状态的历史卡片，直接开启硬隔离，从根源切断长上下文全局回流 */
+    /* 核心性能优化：单步已结算卡片与历史卡片均开启严格局部隔离，切断回流蔓延且彻底杜绝视口高度跳变 */
+    [data-smooth-stream-settled="true"],
+    [data-chat-flow] > [data-chat-flow-key][data-smooth-stream-settled="true"],
     [data-chat-flow] > [data-chat-flow-key]:not(:has([data-streaming])):not(:has([data-smooth-stream-typing="true"])) {
       contain: layout paint style;
     }

@@ -25,7 +25,8 @@ export function isSettledChatNode(node: unknown): boolean {
     // 工具卡片已产出最终执行结果
     if (data.root !== null && typeof data.root === 'object') {
       const root = data.root as Record<string, unknown>
-      if (root.kind === 'tool-result') return true
+      if (root.kind === 'tool-result' || ('result' in root && root.result !== undefined)) return true
+      if ('state' in root && (root.state === 'ok' || root.state === 'error' || root.state === 'stopped')) return true
     }
     // 命令卡片已执行完毕（无论是 ok 还是 error）
     if (data.command !== null && typeof data.command === 'object') {
@@ -38,6 +39,7 @@ export function isSettledChatNode(node: unknown): boolean {
       const cur = data.current as Record<string, unknown>
       if (cur.retryState !== undefined && cur.retryState !== 'scheduled') return true
     }
+    if (data.state === 'ok' || data.state === 'error' || data.state === 'stopped') return true
   }
   const location = n.location as Record<string, unknown> | undefined
   if (location !== undefined && typeof location === 'object') {
@@ -204,7 +206,7 @@ export function wrapFollowNodeView(
       () => false,
     )
 
-    // DOM 前驱时序门禁：检查紧邻的前驱卡片是否仍在流式打字中
+    // DOM 前驱时序门禁：仅检查并监听紧邻的前驱卡片，切断全容器广播风暴
     const [precedingTyping, setPrecedingTyping] = useState(false)
     const isUnsettled = !isSettled && (growing || structurallyFollowable)
 
@@ -213,31 +215,45 @@ export function wrapFollowNodeView(
         setPrecedingTyping(false)
         return
       }
-      const checkPreceding = () => {
-        const root = hostRef.current
-        if (!root) return false
-        const flowItem = root.closest('[data-chat-flow-key]')
-        if (!flowItem) return false
-        let prev = flowItem.previousElementSibling
-        while (prev instanceof HTMLElement) {
-          if (prev.hasAttribute('data-chat-flow-key')) {
-            return prev.querySelector('[data-streaming], [data-smooth-stream-typing="true"]') !== null
-          }
-          prev = prev.previousElementSibling
+      const root = hostRef.current
+      if (!root) return
+      const flowItem = root.closest('[data-chat-flow-key]')
+      if (!flowItem) return
+
+      // 仅定位紧邻的上一张卡片（O(1) 局部定位）
+      let prev: HTMLElement | null = null
+      let cur = flowItem.previousElementSibling
+      while (cur instanceof HTMLElement) {
+        if (cur.hasAttribute('data-chat-flow-key')) {
+          prev = cur
+          break
         }
-        return false
+        cur = cur.previousElementSibling
       }
 
-      setPrecedingTyping(checkPreceding())
+      if (!prev) {
+        setPrecedingTyping(false)
+        return
+      }
 
-      const root = hostRef.current
-      const flow = root?.closest('[data-chat-flow]')
-      if (!flow || typeof MutationObserver === 'undefined') return
+      const checkPreceding = () => {
+        if (!prev) return false
+        return prev.querySelector('[data-streaming], [data-smooth-stream-typing="true"]') !== null
+      }
 
+      const isTyping = checkPreceding()
+      setPrecedingTyping(isTyping)
+      if (!isTyping || typeof MutationObserver === 'undefined') return
+
+      // 仅监听紧邻前驱，且一旦前驱完成立即销毁 observer，彻底杜绝 N^2 全局监听
       const observer = new MutationObserver(() => {
-        setPrecedingTyping(checkPreceding())
+        const stillTyping = checkPreceding()
+        setPrecedingTyping(stillTyping)
+        if (!stillTyping) {
+          observer.disconnect()
+        }
       })
-      observer.observe(flow, {
+      observer.observe(prev, {
         attributes: true,
         attributeFilter: ['data-streaming', 'data-smooth-stream-typing'],
         subtree: true,
@@ -339,12 +355,13 @@ export function wrapFollowNodeView(
       const el = hostRef.current
       if (!el) return
       const card = el.closest('[data-chat-flow-key]')
-      if (card instanceof HTMLElement) {
-        if (isSettled || (!growing && !entering && !growthPulse && !waiting)) {
-          card.setAttribute('data-smooth-stream-settled', 'true')
-        } else {
-          card.removeAttribute('data-smooth-stream-settled')
-        }
+      const settled = isSettled || (!growing && !entering && !growthPulse && !waiting)
+      if (settled) {
+        el.setAttribute('data-smooth-stream-settled', 'true')
+        if (card instanceof HTMLElement) card.setAttribute('data-smooth-stream-settled', 'true')
+      } else {
+        el.removeAttribute('data-smooth-stream-settled')
+        if (card instanceof HTMLElement) card.removeAttribute('data-smooth-stream-settled')
       }
     }, [isSettled, growing, entering, growthPulse, waiting])
 
