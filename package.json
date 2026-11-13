@@ -1,6 +1,6 @@
 {
   "name": "dsh-smooth-stream",
-  "version": "0.6.2",
+  "version": "0.9.0",
   "description": "Fluid streaming rendering and silky scrolling for DeepSeek Harness replies, including Markdown, code blocks, tables, and tool results.",
   "license": "MIT",
   "type": "module",
@@ -11,10 +11,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Laplace-bit/dsh-smooth-stream.git"
+    "url": "git+https://github.com/2108282/dsh-smooth-stream.git"
   },
   "bugs": {
-    "url": "https://github.com/Laplace-bit/dsh-smooth-stream/issues"
+    "url": "https://github.com/2108282/dsh-smooth-stream/issues"
   },
   "homepage": "https://laplace-bit.github.io/dsh-smooth-stream/",
   "keywords": [
