@@ -433,9 +433,23 @@ export function shiftSurfacesOf(port: HTMLElement): HTMLElement[] {
       .filter(row => row.parentElement?.closest('[data-chat-anchor-key]') === null)
   }
   const status = turnStatusOf(port)
-  // 高性能路径：直接取 flow 的直接子节点并排除 status，杜绝在长上下文中进行昂贵的全树 querySelectorAll 扫描
-  return [...flow.children].filter((child): child is HTMLElement =>
-    child instanceof HTMLElement && child !== status)
+  // Renderer slots are display:contents seats, not paint surfaces. Walk only
+  // their immediate children; process groups remain whole surfaces so their
+  // nested [data-chat-flow] members never receive a second transform.
+  const surfaces: HTMLElement[] = []
+  const append = (parent: HTMLElement): void => {
+    for (const child of parent.children) {
+      if (!(child instanceof HTMLElement) || child === status) continue
+      if (child.getAttribute('data-slot') === 'conversation.chat.flow'
+        || child.style.display === 'contents') {
+        append(child)
+      } else if (!child.hasAttribute('data-text-interaction-surface')) {
+        surfaces.push(child)
+      }
+    }
+  }
+  append(flow)
+  return surfaces
 }
 
 function currentShiftOf(element: HTMLElement): number {
@@ -578,22 +592,6 @@ function restoreFlowFill(port: HTMLElement): void {
   followFlowFills.delete(port)
 }
 
-/** Height committed by one newly mounted Chat row, including its flex gap. */
-function entranceExtentOf(root: HTMLElement): number {
-  const row = root.closest<HTMLElement>('[data-chat-flow-key]') ?? root
-  const rect = row.getBoundingClientRect()
-  const height = Math.max(0, rect.height, rect.bottom - rect.top, row.offsetHeight)
-  let previous = row.previousElementSibling
-  while (previous instanceof HTMLElement) {
-    const previousRect = previous.getBoundingClientRect()
-    if (previousRect.height > 0 || previousRect.bottom > previousRect.top) {
-      return Math.max(height, rect.bottom - previousRect.bottom)
-    }
-    previous = previous.previousElementSibling
-  }
-  return height
-}
-
 interface FollowRunway {
   readonly element: HTMLElement
   readonly offset: number
@@ -699,8 +697,7 @@ function countUserRows(port: HTMLElement): number {
   if (flow === null) return -1
   let count = 0
   let sawKind = false
-  for (const child of flow.children) {
-    if (!(child instanceof HTMLElement)) continue
+  for (const child of shiftSurfacesOf(port)) {
     const kind = child.getAttribute('data-chat-flow-kind')
     if (kind !== null) sawKind = true
     if (kind === 'user') count++
@@ -732,8 +729,7 @@ function readingAnchorOf(port: HTMLElement): HTMLElement | null {
   const flow = flowElementOf(port)
   if (flow === null) return null
   let anchor: HTMLElement | null = null
-  for (const child of flow.children) {
-    if (!(child instanceof HTMLElement)) continue
+  for (const child of shiftSurfacesOf(port)) {
     if (child.getAttribute('data-chat-flow-kind') === 'assistant' || child.querySelector('[data-variant="think"]') !== null) {
       anchor = child
     }
@@ -766,7 +762,7 @@ function measureReadingAnchor(port: HTMLElement): { anchor: HTMLElement; index: 
   const scrollTop = port.scrollTop
   const scrollHeight = port.scrollHeight
   const flow = flowElementOf(port)
-  const index = flow === null ? -1 : [...flow.children].indexOf(anchor)
+  const index = flow === null ? -1 : shiftSurfacesOf(port).indexOf(anchor)
   const stored = followGuardAnchors.get(port)
   if (stored === undefined) {
     followGuardAnchors.set(port, { element: anchor, top, index, shift, pad, scrollTop, scrollHeight })
@@ -1058,9 +1054,16 @@ function ensureRunway(
   const naturalHeight = Math.max(0, port.scrollHeight - runwayOffsetOf(port))
   const existing = followRunways.get(port)
   // 尊重用户在调试面板中自定义的预测预留空间数值，底边总预算（flowPad + runway）绝不叠加超标
-  const maxRunway = Math.max(0, runwayPx)
+  const maxRunway = Math.max(
+    0,
+    runwayPx,
+    migratedLegacy || existing?.normalizedLegacy === true ? debugRuntime.activeTuning().runwayPx : 0,
+  )
   const currentPad = flowPadOf(port)
   const remainingAllowance = Math.max(0, maxRunway - currentPad)
+  // Legacy residue is normalized to one owned runway even when the current
+  // reasoning arm has prediction disabled. Its equal transform keeps the
+  // already-scrolled reading position while removing accumulated margins.
   const requestedRunwayPx = Math.min(maxRunway, remainingAllowance)
   if (requestedRunwayPx <= 0 || port.clientHeight <= 0 || naturalHeight <= port.clientHeight) {
     restoreRunway(port)
@@ -1068,7 +1071,7 @@ function ensureRunway(
   }
   const target = status === null
     ? { element: composer === null ? undefined : surfaces.at(-1), property: 'marginBottom' as const }
-    : { element: status, property: 'marginBottom' as const }
+    : { element: status, property: 'marginTop' as const }
   if (target.element === undefined) {
     restoreRunway(port)
     return
@@ -1344,6 +1347,9 @@ function applyVisual(
   // lines) advancing smoothly at the spring cadence; when typing stops and lag
   // exhausts, scrollTop converges to the floor. The shift below still holds the
   // reserve so no per-wrap tail jump appears.
+  // Clearance is meaningful at the physical floor. Measuring at the previous
+  // scrollTop makes a fresh wrap look as if it already overlaps the status.
+  if (writeScrollTop) setFollowScrollTop(port, floor)
   const limit = safeShiftLimit(port, surfaces)
   followSlackTransition.delete(port)
   const visibleReserve = Math.min(runwayOffset, Math.max(0, reservePx))
@@ -1366,8 +1372,8 @@ function applyVisual(
     trajectoryShiftPx ?? baselineShift + requestedLag,
     availableShift,
   )
-  const idlePromotion = promoteAtRest && motionShift <= 0.01 && availableShift > 0 ? 0.1 : 0
-  let shift = Math.max(motionShift, idlePromotion)
+  void promoteAtRest
+  let shift = motionShift
   const previousShift = followLastShiftPx.get(port)
   // The per-frame decay bound paces the engine's OWN glide (the margin
   // transfer retires at well under 8px/frame, so the limiter never binds for
@@ -1454,6 +1460,7 @@ function clearVisual(port: HTMLElement): void {
 
 /** Keep an already-promoted surface at zero until one stable final paint lands. */
 function holdCompositorAtRest(element: HTMLElement): void {
+  directShiftCache.set(element, 0)
   element.style.transform = 'translate3d(0, 0px, 0)'
   element.style.willChange = 'transform'
   element.style.clipPath = ''
@@ -1580,7 +1587,6 @@ export function useConversationFollow(
     let mutations: MutationObserver | null = null
     let observedTail: HTMLElement | null = null
     let statusWasPresent: boolean | null = null
-    let lastStatusHeightPx = 0
     let trajectoryPositionPx: number | null = null
     let trajectoryVelocityPxPerMs = 0
     let trajectoryTargetVelocityPxPerMs = 0
@@ -1593,6 +1599,20 @@ export function useConversationFollow(
     const revealPhase = new FollowRevealPhaseTracker()
     let holding: HTMLElement | null = null
     let entrancePending = entranceRef.current
+    let predictionNaturalHeight: number | null = null
+    let predictionSawGrowth = false
+    const predictsGrowth = (next: HTMLElement): boolean => {
+      if (predictiveRef === undefined) return predictive
+      const naturalHeight = next.scrollHeight - ownedBottomSpaceOf(next)
+      if (!predictiveRef.current) {
+        predictionNaturalHeight = naturalHeight
+        predictionSawGrowth = false
+        return false
+      }
+      if (predictionNaturalHeight === null) predictionNaturalHeight = naturalHeight
+      if (naturalHeight > predictionNaturalHeight + 0.5) predictionSawGrowth = true
+      return predictionSawGrowth
+    }
 
     const finishEntrance = (): void => {
       if (!entrancePending) return
@@ -1935,7 +1955,7 @@ export function useConversationFollow(
       // The same-task correction still runs, but ordinary glyph commits do not
       // force a fresh chrome rect read.
       const tuning = debugRuntime.activeTuning()
-      const predictGrowth = predictiveRef?.current ?? predictive
+      const predictGrowth = predictsGrowth(port)
       const floor = Math.max(0, port.scrollHeight - port.clientHeight)
       // A wrap or other layout growth changes the real floor and may change the
       // natural tail clearance. Re-measure that boundary; same-floor glyph
@@ -2013,7 +2033,7 @@ export function useConversationFollow(
         const flow = flowElementOf(port)
         if (flow !== null) {
           mutations = new MutationObserver(() => { restoreBeforePaint() })
-          mutations.observe(flow, { childList: true })
+          mutations.observe(flow, { childList: true, subtree: true })
         }
       }
     }
@@ -2083,9 +2103,11 @@ export function useConversationFollow(
           // The predictive runway starts pre-opened at the current reveal
           // pressure: it rides canceled by the equal transform, and waiting
           // out the response ramp would leave the first wraps unpinned.
-          const entranceExtent = 0
-          const predictGrowth = predictiveRef?.current ?? predictive
-          animatedH = nextPort.scrollHeight
+          const predictGrowth = predictsGrowth(nextPort)
+          const entranceHeight = entranceRef.current
+            ? Math.max(0, entranceExtentRef?.current ?? root.getBoundingClientRect().height)
+            : 0
+          animatedH = Math.max(0, nextPort.scrollHeight - entranceHeight)
           // Established before first paint; the matching margin below is
           // written in the same commit, so this held-and-canceled space
           // never moves a pixel.
@@ -2150,14 +2172,14 @@ export function useConversationFollow(
               && runwayOffsetOf(nextPort) > 0
             ) {
               const floor = Math.max(0, nextPort.scrollHeight - nextPort.clientHeight)
-              const requestedMinLagPx = Math.max(
-                FOLLOW_TRAJECTORY_MIN_LAG_PX,
-                runwayOffsetOf(nextPort) - FOLLOW_TRAJECTORY_PHASE_PX,
-              )
               const paintMaxLagPx = Math.max(0, safeShiftLimit(nextPort, shiftSurfacesOf(nextPort)) - FOLLOW_PAINT_GUARD_PX)
-              const minLagPx = Math.min(requestedMinLagPx, paintMaxLagPx)
               const currentShift = currentShiftOf(shiftSurfacesOf(nextPort).at(-1) ?? nextPort)
-              trajectoryPositionPx = floor - Math.min(paintMaxLagPx, Math.max(minLagPx, currentShift))
+              trajectoryPositionPx = floor - Math.min(paintMaxLagPx, Math.max(
+                predictiveRef === undefined
+                  ? Math.max(FOLLOW_TRAJECTORY_MIN_LAG_PX, runwayOffsetOf(nextPort) - FOLLOW_TRAJECTORY_PHASE_PX)
+                  : runwayOffsetOf(nextPort),
+                currentShift,
+              ))
               trajectoryTargetVelocityPxPerMs = Math.max(0, speedCpsRef.current) * 0.4 / 1000
               trajectoryVelocityPxPerMs = trajectoryTargetVelocityPxPerMs
               trajectoryFloorPx = floor
@@ -2236,10 +2258,9 @@ export function useConversationFollow(
       // so their difference (the only part that can move pixels) stays
       // constant. Growing the reservation without the margin would glide the
       // whole column; growing both together is invisible.
-      const predictGrowth = predictiveRef?.current ?? predictive
+      const predictGrowth = predictsGrowth(nextPort)
       const statusElement = turnStatusOf(nextPort)
       const hasStatus = statusElement !== null
-      if (statusElement !== null) lastStatusHeightPx = statusElement.offsetHeight
       const statusJustRemoved = predictGrowth && statusWasPresent === true && !hasStatus
       if (statusJustRemoved) {
         // The dying status row takes its own layout height AND the margin
@@ -2270,7 +2291,11 @@ export function useConversationFollow(
       // grows in the same frame and the baseline difference never moves.
       const effectiveReserveTarget = Math.max(reservePx, pressureReserveTarget)
       const reserveStep = 1 - Math.exp(-elapsedMs / tuning.reserveResponseMs)
-      reservePx += (effectiveReserveTarget - reservePx) * reserveStep
+      // The first confirmed wrap needs its room before this paint. Once open,
+      // pressure changes can use the ordinary response ramp.
+      reservePx = predictionSawGrowth && reservePx <= FOLLOW_SETTLE_EPSILON_PX
+        ? effectiveReserveTarget
+        : reservePx + (effectiveReserveTarget - reservePx) * reserveStep
       if (predictGrowth || runwayOffsetOf(nextPort) > 0.5) {
         ensureRunway(nextPort, shiftSurfacesOf(nextPort), reservePx)
       }
@@ -2295,7 +2320,10 @@ export function useConversationFollow(
         const minLagPx = Math.min(requestedMinLagPx, maxLagPx)
         if (trajectoryPositionPx === null || trajectoryFloorPx === null) {
           const currentShift = currentShiftOf(shiftSurfacesOf(nextPort).at(-1) ?? nextPort)
-          trajectoryPositionPx = floorNow - Math.min(maxLagPx, Math.max(minLagPx, currentShift))
+          trajectoryPositionPx = floorNow - Math.min(maxLagPx, Math.max(
+            predictiveRef === undefined ? minLagPx : runwayOffset,
+            currentShift,
+          ))
           trajectoryTargetVelocityPxPerMs = Math.max(0, speedCpsRef.current) * 0.4 / 1000
           trajectoryVelocityPxPerMs = trajectoryTargetVelocityPxPerMs
           trajectoryGrowthAtMs = now
@@ -2318,7 +2346,8 @@ export function useConversationFollow(
           }
           trajectoryGrowthSamples += 1
           trajectoryGrowthAtMs = now
-          trajectoryPositionPx = Math.min(floorNow, (trajectoryPositionPx ?? floorNow) + (floorNow - trajectoryFloorPx))
+          // Keep the effective viewport continuous across a stepped wrap. The
+          // floor delta belongs in the compositor shift, not in the trajectory.
         } else if (floorNow < trajectoryFloorPx - 0.5) {
           trajectoryPositionPx = floorNow - minLagPx
           trajectoryGrowthAtMs = now
@@ -2327,8 +2356,11 @@ export function useConversationFollow(
           trajectoryGrowthSamples = 0
         }
         trajectoryFloorPx = floorNow
-        // 锚定真实自然的物理高度，二阶弹簧以连续阻尼平滑推进，消除行内向上拉高与换行瞬间暴跌的上下晃动
-        const phaseTarget = floorNow
+        // Committed glyph progress leads the stepped floor where available;
+        // the effective viewport itself stays continuous when a wrap lands.
+        const phaseTarget = revealedCharsRef === undefined
+          ? floorNow
+          : revealPhase.advance(floorNow, revealedCharsRef.current).targetPx
         const trajectoryStep = computeFollowTrajectoryStep(elapsedMs, {
           positionPx: trajectoryPositionPx,
           velocityPxPerMs: trajectoryVelocityPxPerMs,
@@ -2502,7 +2534,8 @@ export function useConversationFollow(
       // measure the extent against it):
       let settleQuietMs = 0
       let settleSig = ''
-      if (!activeRef.current) {
+      const finalGrowthPx = Math.max(0, host.scrollHeight - animatedH - runwayOffsetOf(host))
+      if (!activeRef.current && finalGrowthPx <= FOLLOW_SETTLE_EPSILON_PX) {
         followTraceUntilMs = Math.max(followTraceUntilMs, performance.now() + 10000)
         followTrace('fast-gate', { sh: host.scrollHeight, st: Math.round(host.scrollTop), pad: Math.round(flowPadOf(host)) })
         restoreRunway(host)
@@ -2518,7 +2551,8 @@ export function useConversationFollow(
       // observer above; the settle's first rAF frame funds the re-open.
       // Entrance handoffs are mount transients with no collapse in flight:
       // their first cover must paint immediately (the soften contract).
-      const completionShiftCeiling = startedAsEntrance && completionShift <= FOLLOW_SETTLE_EPSILON_PX
+      const completionShiftCeiling = finalGrowthPx > FOLLOW_SETTLE_EPSILON_PX
+        || (startedAsEntrance && completionShift <= FOLLOW_SETTLE_EPSILON_PX)
         ? Number.POSITIVE_INFINITY
         : completionShift
       if (hostOwnsScroll) {
@@ -2620,7 +2654,7 @@ export function useConversationFollow(
         const flow = flowElementOf(host)
         if (flow !== null) {
           mutations = new MutationObserver(() => { restoreBeforePaint() })
-          mutations.observe(flow, { childList: true })
+          mutations.observe(flow, { childList: true, subtree: true })
         }
       }
       // From here this closure's observers are the completion guard of last
@@ -2637,6 +2671,17 @@ export function useConversationFollow(
       // settle rate and the pinned viewport glides down to the natural
       // resting position against the composer.
       const settleFrame = (now: number): void => {
+        if (!host.isConnected) {
+          clearVisual(host)
+          setFlowPad(host, 0)
+          restoreFlowFill(host)
+          followCompletionSettle.delete(host)
+          if (isLeader(host)) followLeaders.delete(host)
+          releaseRevealScale()
+          debugRuntime.reportFollow(host, null)
+          stopSettleListeners()
+          return
+        }
         if (!isLeader(host)) {
           stopSettleListeners()
           return

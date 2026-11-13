@@ -6,8 +6,8 @@
  */
 
 import { useState, useSyncExternalStore } from 'react'
-import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
+import type { InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { IconChevronDownOutlineRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SmoothStreamCardController, SmoothStreamCardFace } from './smooth-stream-card-controller.ts'
 import { zh } from './locales.ts'
@@ -15,8 +15,7 @@ import css from './SmoothStreamCard.module.css'
 
 /** Props the renderer binds for the smooth-stream card. */
 export type SmoothStreamCardProps =
-  Partial<PropsRuntime<'settings.plugin.item'>>
-  & Partial<PropsLocale<'settings.smoothStream'>>
+  Partial<PropsLocale<'settings.smoothStream'>>
   & Partial<InjectFace<SmoothStreamCardFace>>
   & {
     cardController?: SmoothStreamCardController

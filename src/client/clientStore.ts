@@ -11,7 +11,8 @@
  * DSH Desktop 2.0.4 / kernel 0.1.2-alpha.1).
  */
 
-type ClientRuntimeClient = typeof import('@deepseek-ai/dsh-client-runtime/client')
+// Type-only: the store engine is a module-table seed, not a client plugin value import.
+type ClientStore = typeof import('@deepseek-ai/dsh-client-store')
 
 export interface SnapshotStoreLike<T> {
   getSnapshot(): T
@@ -69,18 +70,18 @@ function pickRequire(): NodeRequire | null {
   return null
 }
 
-let clientStore: Partial<ClientRuntimeClient> | undefined
+let clientStore: Partial<ClientStore> | undefined
 
 try {
   const req = pickRequire()
   if (req !== null) {
     try {
       // 0.1.2+ seeds the split store package directly into the module table.
-      clientStore = req('@deepseek-ai/dsh-client-store') as ClientRuntimeClient
+      clientStore = req('@deepseek-ai/dsh-client-store') as ClientStore
     } catch {
       try {
         // ≤ 0.1.1 owns the store engine on the client-runtime client face.
-        clientStore = req('@deepseek-ai/dsh-client-runtime/client') as ClientRuntimeClient
+        clientStore = req('@deepseek-ai/dsh-client-runtime/client') as ClientStore
       } catch {
         // Fallback below
       }

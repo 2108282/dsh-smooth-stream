@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from 'react'
+import { useLayoutEffect, useRef, type ReactNode } from 'react'
 import { useConversationFollow } from './teleprompterGlide.ts'
 import css from './TypewriterAssistantNodeView.module.css'
 
@@ -58,8 +58,11 @@ export function FollowHost({
     revealedCharsRef,
     controlScroll,
   )
-  useEffect(() => {
-    if (onGrowth === undefined || typeof ResizeObserver === 'undefined') return
+  const onGrowthRef = useRef(onGrowth)
+  onGrowthRef.current = onGrowth
+  const watchesGrowth = onGrowth !== undefined
+  useLayoutEffect(() => {
+    if (!watchesGrowth || typeof ResizeObserver === 'undefined') return
     const root = rootRef.current
     if (root === null) return
     let previousHeight: number | null = null
@@ -70,7 +73,7 @@ export function FollowHost({
       if (pendingGrowth <= 0) return
       const delta = pendingGrowth
       pendingGrowth = 0
-      onGrowth(delta)
+      onGrowthRef.current?.(delta)
     }
     const observer = new ResizeObserver(entries => {
       const measuredHeight = entries[0]?.contentRect.height
@@ -87,7 +90,7 @@ export function FollowHost({
       observer.disconnect()
       if (growthFrame !== null) cancelAnimationFrame(growthFrame)
     }
-  }, [onGrowth])
+  }, [rootRef, watchesGrowth])
   return (
     <div
       ref={rootRef}

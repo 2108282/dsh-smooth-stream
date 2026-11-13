@@ -1,12 +1,15 @@
 import { createElement, useSyncExternalStore, type ComponentType } from 'react'
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-// Type-only: the connection Context merge and the plugins section's SlotMap
-// entry ('settings.plugin.item').
+// Type-only: the connection and settings slot declarations.
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
-import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import { TypewriterAssistantNodeView } from './TypewriterAssistantNodeView.tsx'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client'
+import { NativeAssistantNodeView } from './NativeAssistantNodeView.tsx'
+import { installRendererAdapter } from './rendererAdapter.ts'
+import { installConversationPipeline } from './conversationPipeline.ts'
 import { wrapFollowNodeView, type FollowWrapProps } from './TypewriterToolNodeView.tsx'
 import { SmoothStreamCard } from './SmoothStreamCard.tsx'
 import { SmoothStreamCardController } from './smooth-stream-card-controller.ts'
@@ -15,7 +18,7 @@ import { DebugPanel } from './DebugPanel.tsx'
 import { debugRuntime } from './debugRuntime.ts'
 import { NS as SETTINGS_NS, en, zh } from './locales.ts'
 import { DEFAULT_STREAM_CONFIG, STREAM_BOOT_GLOBAL, type StreamConfig } from '../config.ts'
-import { DEFAULT_STREAM_SETTINGS, STREAM_SETTINGS_NS, type StreamSettings } from '../settings.ts'
+import { DEFAULT_STREAM_SETTINGS, type StreamSettings } from '../settings.ts'
 
 /**
  * Cordis services required by the browser half. Only `slots` is load-bearing
@@ -38,7 +41,7 @@ const STREAM_PRESETS: readonly string[] = ['realtime', 'balanced', 'silky']
  * provides the renderer, not by individual tool names, so new Context,
  * Command, and Tool rows are covered automatically.
  */
-const SKIP_WRAP = new Set(['assistant-step', 'user', 'steering', 'command-input'])
+const SKIP_WRAP = new Set(['user', 'steering', 'command-input', 'turn-process', 'turn-tail'])
 
 /** React function/class or an exotic component such as memo/forwardRef/lazy. */
 function isWrappableComponent(value: unknown): value is ComponentType<FollowWrapProps> {
@@ -72,52 +75,6 @@ function readBootConfig(): StreamConfig {
     throw new Error(`[dsh-smooth-stream] malformed ${STREAM_BOOT_GLOBAL} boot global: ${JSON.stringify(raw)}`)
   }
   return raw as StreamConfig
-}
-
-/**
- * Wrap every Agent-owned keyed Chat row except the assistant renderer in
- * place. A second
- * register with the same `children` table throws because the child slot is
- * already declared, and only the winning entry receives `renderSlot`;
- * swapping `entry.component` keeps the original children, locale, and inject
- * seats. `assistant-step` is replaced below so text and Think use the
- * typewriter reveal. The wrapper owns only the shared layout-growth/follow
- * lifecycle; the Harness keeps each renderer's controls, disclosures, and
- * cards intact.
- * @param ctx - Browser context carrying the slot registry.
- * @returns Restorer that puts the original components back.
- */
-function wrapAgentChatRows(
-  ctx: ClientContext,
-  useControlScroll: () => boolean,
-): () => void {
-  const restores: Array<() => void> = []
-  const wrapped = new WeakSet<object>()
-
-  const wrapAll = (): void => {
-    for (const entry of ctx.slots.entries('conversation.chat.node')) {
-      const key = entry.options.key
-      if (key === undefined || SKIP_WRAP.has(key)) continue
-      const current = entry.component
-      if (!isWrappableComponent(current) || wrapped.has(current)) continue
-      const inner = current as ComponentType<FollowWrapProps>
-      const next = wrapFollowNodeView(inner, useControlScroll)
-      wrapped.add(next)
-      entry.component = next
-      restores.push(() => {
-        if (entry.component === next) entry.component = inner
-      })
-    }
-  }
-
-  wrapAll()
-  const off = ctx.on('slots/changed', (key: string) => {
-    if (key === 'conversation.chat.node') wrapAll()
-  })
-  return () => {
-    off()
-    for (const restore of restores) restore()
-  }
 }
 
 /**
@@ -180,7 +137,7 @@ class SettingsCell {
 
   /** Always respect the user's enabled preference immediately. */
   takeoverEnabled(): boolean {
-    return this.value.enabled
+    return !this.pending && this.value.enabled
   }
 
   readonly getSnapshot = (): StreamSettings => this.value
@@ -199,16 +156,13 @@ function ensureFastFoldStyles(): void {
   const style = document.createElement('style')
   style.id = FAST_FOLD_STYLE_ID
   style.textContent = `
-    html[data-smooth-stream-fast-fold="true"] [data-turn-process-hidden],
-    html[data-smooth-stream-fast-fold="true"] [hidden="until-found"],
-    [data-disclosure-content][data-collapsed] {
+    /* Only committed hidden process rows detach; never interrupt the Host fold clock. */
+    html[data-smooth-stream-fast-fold="true"] [data-chat-flow] [data-turn-process-hidden][hidden] {
       display: none !important;
     }
-    /* 核心性能优化：单步已结算卡片与历史卡片均开启严格局部隔离，切断回流蔓延且彻底杜绝视口高度跳变 */
-    [data-smooth-stream-settled="true"],
-    [data-chat-flow] > [data-chat-flow-key][data-smooth-stream-settled="true"],
-    [data-chat-flow] > [data-chat-flow-key]:not(:has([data-streaming])):not(:has([data-smooth-stream-typing="true"])) {
-      contain: layout paint style;
+    /* Preserve popovers and wide Markdown: paint containment would clip them. */
+    html[data-smooth-stream-fast-fold="true"] [data-smooth-stream-settled="true"] {
+      contain: layout style;
     }
   `
   document.head.appendChild(style)
@@ -224,69 +178,12 @@ function syncFastFold(enabled: boolean): void {
   }
 }
 
-/**
- * Self-healing optimizer for DSH conversation pipeline.
- *
- * DSH core (@deepseek-ai/dsh-client-ui-conversation) ships with a nested 3-frame
- * requestAnimationFrame throttle on "animation-frame" publications, introducing
- * a hard ~50ms artificial latency between streaming tokens and causing severe
- * stuttering on long conversations.
- *
- * This hook detects the active BoundConversation prototype and replaces the 3-frame
- * nest with an immediate single-frame dispatch whenever fastPipeline is active.
- * Because it hooks dynamically in browser memory, it persists across any reinstall
- * or upgrade of DSH packages.
- */
+/** Install only the feature-detected, instance-local publishing optimization. */
 function healDshConversationPipeline(ctx: ClientContext, settings: SettingsCell): void {
-  ctx.inject(['uiConversation'], (scopedCtx: any) => {
-    const uiConv = scopedCtx.uiConversation ?? scopedCtx.get?.('uiConversation')
-    if (!uiConv) return
-
-    const patchPrototype = (binding: any): void => {
-      if (!binding) return
-      const proto = Object.getPrototypeOf(binding)
-      if (proto && !proto.__dshSmoothStreamFastPublishPatched && typeof proto.publish === 'function') {
-        proto.__dshSmoothStreamFastPublishPatched = true
-        const originalPublish = proto.publish
-        proto.publish = function (publication: string) {
-          if (publication === 'animation-frame' && settings.getSnapshot().fastPipeline && typeof requestAnimationFrame === 'function') {
-            if (this.frame !== undefined) return
-            this.frame = requestAnimationFrame(() => {
-              this.frame = undefined
-              this.flush()
-            })
-            return
-          }
-          return originalPublish.call(this, publication)
-        }
-        console.info('[dsh-smooth-stream] Self-healed DSH 3-frame rAF throttle into native 60/120fps dispatch')
-      }
-    }
-
-    try {
-      if (uiConv.bindings) {
-        const list = typeof uiConv.bindings.values === 'function'
-          ? Array.from(uiConv.bindings.values())
-          : (uiConv.bindings.values ? Array.from(uiConv.bindings.values as any) : [])
-        for (const record of list as any[]) {
-          if (record?.binding) {
-            patchPrototype(record.binding)
-            break
-          }
-        }
-      }
-    } catch {}
-
-    const origBinding = uiConv.binding
-    if (typeof origBinding === 'function' && !uiConv.__dshSmoothStreamBindingPatched) {
-      uiConv.__dshSmoothStreamBindingPatched = true
-      uiConv.binding = function (...args: any[]) {
-        const result = origBinding.apply(this, args)
-        patchPrototype(result)
-        return result
-      }
-    }
-  })
+  ctx.inject(['uiConversation'], scopedCtx => installConversationPipeline(
+    scopedCtx.uiConversation,
+    () => settings.getSnapshot().enabled && settings.getSnapshot().fastPipeline,
+  ))
 }
 
 /**
@@ -303,9 +200,13 @@ function healDshConversationPipeline(ctx: ClientContext, settings: SettingsCell)
 export function apply(ctx: ClientContext): void {
   const config = readBootConfig()
   const settings = new SettingsCell()
-  syncFastFold(settings.getSnapshot().fastFold)
-  settings.subscribe(() => {
-    syncFastFold(settings.getSnapshot().fastFold)
+  const syncStyles = (): void => { syncFastFold(settings.getSnapshot().enabled && settings.getSnapshot().fastFold) }
+  syncStyles()
+  const offStyles = settings.subscribe(syncStyles)
+  ctx.effect(() => () => {
+    offStyles()
+    document.documentElement.removeAttribute('data-smooth-stream-fast-fold')
+    document.getElementById(FAST_FOLD_STYLE_ID)?.remove()
   })
   healDshConversationPipeline(ctx, settings)
   const useControlScroll = (): boolean => useSyncExternalStore(
@@ -313,12 +214,6 @@ export function apply(ctx: ClientContext): void {
     () => settings.getSnapshot().controlScroll,
     () => settings.getSnapshot().controlScroll,
   )
-  const useKeepStreamOnToolCall = (): boolean => useSyncExternalStore(
-    settings.subscribe,
-    () => settings.getSnapshot().keepStreamOnToolCall,
-    () => settings.getSnapshot().keepStreamOnToolCall,
-  )
-
   // The card talks to the plugin-owned loopback RPC, so the core settings
   // namespace allowlist cannot make it disappear. The stream still applies
   // with defaults when the optional Settings UI or Connection is absent.
@@ -359,19 +254,6 @@ export function apply(ctx: ClientContext): void {
       createElement('ul', { style: { listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column' } }, createElement(SmoothStreamCard as any, { ...props, cardController: card, defaultOpen: true })),
     )
 
-    const SmoothStreamDetailSectionView = (props: any) => {
-      const subject = props.subject
-      if (subject?.kind === 'bundle' && subject?.pkg?.name === 'dsh-smooth-stream') {
-        return createElement(
-          'div',
-          { style: { marginTop: '16px', display: 'flex', flexDirection: 'column', gap: '12px', width: '100%' } },
-          createElement('h3', { style: { margin: 0, fontSize: '15px', fontWeight: 600 } }, '平滑流式参数配置'),
-          createElement('ul', { style: { listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column' } }, createElement(SmoothStreamCard as any, { ...props, cardController: card, defaultOpen: true })),
-        )
-      }
-      return null
-    }
-
     // 1. 注册为全局设置左侧一级菜单「平滑流式」
     settingsCtx.slots.inject('settings.section', () => settingsCtx.slots.register({
       name: 'settings.section',
@@ -392,26 +274,6 @@ export function apply(ctx: ClientContext): void {
       inject: () => card.inject(),
     }, SmoothStreamSectionView))
 
-    // 3. 注册为侧边栏插件管理器的详情页配置区块
-    settingsCtx.slots.inject('plugins.detail.section', () => settingsCtx.slots.register({
-      name: 'plugins.detail.section',
-      id: 'smooth-stream-detail-settings',
-      order: 10,
-      locale: SETTINGS_NS,
-      inject: () => card.inject(),
-    }, SmoothStreamDetailSectionView))
-
-    // 4. 保留原 settings.plugin.item 插槽注册（向下兼容）
-    settingsCtx.slots.inject('settings.plugin.item', () => settingsCtx.slots.register({
-      name: 'settings.plugin.item',
-      id: 'smooth-stream',
-      key: STREAM_SETTINGS_NS,
-      order: 30,
-      locale: SETTINGS_NS,
-      inject: () => card.inject(),
-    // Older Harness declares this slot as a list (`id`); newer Harness uses a
-    // keyed slot filtered by the Host settings namespace (`key`).
-    } as never, SmoothStreamCard))
     settingsCtx.slots.inject('conversation.session.header.utilities', () => settingsCtx.slots.register({
       name: 'conversation.session.header.utilities',
       id: 'smooth-stream-debug',
@@ -427,56 +289,33 @@ export function apply(ctx: ClientContext): void {
     }
   })
 
-  const configured = function StreamConfiguredView(props: AssistantProps) {
-    const preferences = useSyncExternalStore(
-      settings.subscribe,
-      settings.getSnapshot,
-      settings.getSnapshot,
-    )
-    return createElement(TypewriterAssistantNodeView, {
-      ...props,
-      mode: config.mode,
-      preset: config.preset,
-      revealCharsPerSec: config.revealCharsPerSec,
-      scrollSpeedPxPerSec: config.scrollSpeedPxPerSec,
-      maxScrollSpeedPxPerSec: config.maxScrollSpeedPxPerSec,
-      thinkAutoExpand: preferences.thinkAutoExpand,
-      logarithmicFade: preferences.logarithmicFade,
-      keepStreamOnToolCall: preferences.keepStreamOnToolCall,
-      controlScroll: preferences.controlScroll,
-      motionPreference: preferences.motionPreference,
-    })
-  }
   ctx.slots.inject('conversation.chat.node', () => {
-    let releaseTakeover: (() => void) | undefined
-
-    const syncTakeover = (): void => {
-      if (!settings.takeoverEnabled()) {
-        releaseTakeover?.()
-        releaseTakeover = undefined
-        return
+    const release = installRendererAdapter(ctx, (key, original) => {
+      if (!isWrappableComponent(original) || SKIP_WRAP.has(key)) return original
+      const Inner = original
+      // Stable across settings/parent updates: do not reset tool-local hooks.
+      const Follow = key === 'assistant-step' ? undefined
+        : wrapFollowNodeView(Inner as ComponentType<FollowWrapProps>, useControlScroll)
+      return function SmoothStreamRendererAdapter(props: AssistantProps & FollowWrapProps) {
+        const preferences = useSyncExternalStore(settings.subscribe, settings.getSnapshot, settings.getSnapshot)
+        if (!preferences.enabled) return createElement(Inner, props)
+        if (key === 'assistant-step') {
+          return createElement(NativeAssistantNodeView, {
+            Inner: Inner as unknown as ComponentType<AssistantProps>,
+            owner: props as AssistantProps,
+            preferences: {
+              controlScroll: preferences.controlScroll,
+              motionPreference: preferences.motionPreference,
+              logarithmicFade: preferences.logarithmicFade,
+              thinkAutoExpand: preferences.thinkAutoExpand,
+              keepStreamOnToolCall: preferences.keepStreamOnToolCall,
+              preset: config.preset,
+            },
+          })
+        }
+        return createElement(Follow ?? Inner, props)
       }
-      if (releaseTakeover !== undefined) return
-      const unwrap = wrapAgentChatRows(ctx, useControlScroll)
-      const unshadow = ctx.slots.register({
-        name: 'conversation.chat.node',
-        key: 'assistant-step',
-        priority: -100,
-        locale: 'conversation',
-        registrant: 'dsh-smooth-stream',
-      }, configured)
-      releaseTakeover = () => {
-        // Stop observing slot changes before the shadow entry is removed.
-        unwrap()
-        unshadow()
-      }
-    }
-
-    const unsubscribe = settings.subscribe(syncTakeover)
-    syncTakeover()
-    return () => {
-      unsubscribe()
-      releaseTakeover?.()
-    }
+      })
+    return release
   })
 }

@@ -9,15 +9,14 @@
  * mounted — the browser then reports the settings card as unreachable.
  *
  * When the service call fails, this module mounts the same absolute channel
- * prefix directly on `webServer`, behind the connection service's own request
- * fence and speaking the documented request/response envelopes. Nothing here
- * weakens the fence: a kernel without `requestRejection` fails closed instead
- * of exposing the channel to whoever can reach the port. The fallback retires
- * on its own the moment the service call works again.
+ * prefix directly on `webServer`, after the connection service admits the
+ * request and supplies its authenticated Peer. A kernel without admission
+ * support fails closed. The fallback retires on its own when service
+ * registration succeeds.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
+import type { ConnectionRpcHandler, HostConnectionHandle, PeerScope } from '@deepseek-ai/dsh-client-connection'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 
 /** Largest request body this channel buffers; settings payloads are tiny. */
@@ -42,13 +41,9 @@ interface RequestEnvelope {
 /** The subset of the Host Connection handle this module depends on. */
 interface ChannelConnection {
   readonly rpc?: {
-    handle?: (
-      channel: string,
-      handler: ConnectionRpcHandler,
-      options: { readonly authority: 'loopback' },
-    ) => unknown
+    handle?: (channel: string, handler: ConnectionRpcHandler) => unknown
   }
-  readonly requestRejection?: (request: unknown) => 401 | 403 | undefined
+  readonly admit?: HostConnectionHandle['admit']
 }
 
 /** The subset of the Web server service this module depends on. */
@@ -97,9 +92,9 @@ function tryServiceChannel(
   const rpc = connection?.rpc
   if (rpc === undefined || typeof rpc.handle !== 'function') return undefined
   try {
-    const release = rpc.handle(channel, handler, { authority: 'loopback' })
+    const release = rpc.handle(channel, handler)
     if (typeof release !== 'function') return undefined
-    return () => { void (release as () => unknown)() }
+    return release as () => void
   } catch (error) {
     // A kernel that cannot resolve `webServer` inside the service throws here;
     // the direct route below keeps the card reachable on that kernel.
@@ -113,8 +108,8 @@ function tryServiceChannel(
 }
 
 /**
- * Mount the channel prefix on the Web server with the connection fence intact.
- * @throws when the kernel exposes neither the fence nor a Web server, so the
+ * Mount the channel prefix on the Web server after authenticated admission.
+ * @throws when the kernel exposes neither admission nor a Web server, so the
  * failure is reported instead of silently leaving the card unreachable.
  */
 function mountDirectRoute(
@@ -124,23 +119,24 @@ function mountDirectRoute(
   handler: ConnectionRpcHandler,
 ): () => void {
   const webServer = ctx.get('webServer') as ChannelWebServer | undefined
-  const reject = connection?.requestRejection
+  const admit = connection?.admit
   if (webServer === undefined || typeof webServer.register !== 'function') {
     throw new Error(`dsh-smooth-stream: webServer is unavailable, so ${channel} cannot be mounted`)
+  }
+  if (typeof admit !== 'function') {
+    throw new Error(`dsh-smooth-stream: connection admission is unavailable, so ${channel} cannot be mounted`)
   }
   return webServer.register({
     kind: 'prefix',
     path: channel,
     handler: async (req, res) => {
-      if (typeof reject === 'function') {
-        const rejection = reject.call(connection, req)
-        if (rejection !== undefined) {
-          res.writeHead(rejection)
-          res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
-          return
-        }
+      const admission = admit.call(connection, req)
+      if ('rejection' in admission) {
+        res.writeHead(admission.rejection)
+        res.end(admission.rejection === 401 ? 'unauthorized' : 'forbidden')
+        return
       }
-      await answer(req, res, channel, handler)
+      await answer(req, res, channel, handler, admission.peer)
     },
   })
 }
@@ -156,6 +152,7 @@ export async function answer(
   res: Parameters<WebRoute['handler']>[1],
   channel: string,
   handler: ConnectionRpcHandler,
+  peer: PeerScope,
 ): Promise<void> {
   const endpoint = endpointOf(channel, req.url)
   if (req.method !== 'POST' || endpoint === undefined) {
@@ -206,7 +203,7 @@ export async function answer(
   const controller = new AbortController()
   res.on('close', () => { controller.abort() })
   try {
-    write(res, envelope.rpcId, await handler(endpoint, envelope.payload, controller.signal))
+    write(res, envelope.rpcId, await handler(endpoint, envelope.payload, controller.signal, peer))
   } catch (error) {
     res.writeHead(500)
     res.end(`handler failure: ${String(error)}`)

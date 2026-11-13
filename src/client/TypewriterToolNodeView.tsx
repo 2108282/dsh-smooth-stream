@@ -1,7 +1,7 @@
 import { createElement, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentType } from 'react'
 import { FollowHost } from './FollowHost.tsx'
 import { useProgressiveDomText } from './useProgressiveDomText.ts'
-import { streamRelay } from './streamRelay.ts'
+import { relayScope, streamRelay } from './streamRelay.ts'
 import { hasRecentConversationFollow } from './teleprompterGlide.ts'
 import entranceCss from './AgentRowEntrance.module.css'
 
@@ -130,17 +130,6 @@ export function shouldAnimateChatNodeEntrance(node: unknown): boolean {
   return isFollowableChatNode(node)
 }
 
-function getTurnKey(node: unknown): string {
-  if (node === null || typeof node !== 'object' || !('location' in node)) return 'active'
-  const location = (node as { location: unknown }).location
-  if (location === null || typeof location !== 'object') return 'active'
-  if ('turn' in location && location.turn !== null && typeof location.turn === 'object') {
-    const turn = location.turn as { turn?: unknown }
-    if (turn.turn !== undefined) return String(turn.turn)
-  }
-  return 'active'
-}
-
 /** Runtime-only fallback for unknown or terminal rows at the active flow tip. */
 function liveAgentTailMode(root: HTMLElement): 'turn' | 'handoff' | null {
   const port = root.closest<HTMLElement>('[data-conversation-scroll]')
@@ -182,9 +171,12 @@ export function wrapFollowNodeView(
     const [runtimeFollowable, setRuntimeFollowable] = useState(false)
     const runtimePersistentRef = useRef(false)
     const runtimeHandledRef = useRef(false)
-    const followable = !isSettled && (structurallyFollowable || runtimeFollowable)
+    const seenFollowable = useRef(structurallyFollowable)
+    if (structurallyFollowable) seenFollowable.current = true
+    const settledOpenGrowth = isSettled && seenFollowable.current && openAgentLocation(props.node)
+    const followable = (!isSettled && (structurallyFollowable || runtimeFollowable)) || settledOpenGrowth
     const revealInitialRef = useRef(true)
-    const [entering, setEntering] = useState(false)
+    const [entering, setEntering] = useState(structurallyFollowable)
     const [growthPulse, setGrowthPulse] = useState(false)
     const followableRef = useRef(false)
     const growingRef = useRef(growing)
@@ -199,16 +191,28 @@ export function wrapFollowNodeView(
     entranceActiveRef.current = entering || growthPulse
 
     // 内存接力棒门禁：检查前序思考或正文是否仍在活跃输出中
-    const turnKey = getTurnKey(props.node)
+    const scope = relayScope(props.node, props.sessionId)
     const relayBlocked = useSyncExternalStore(
       streamRelay.subscribe,
-      () => streamRelay.isToolBlocked(turnKey),
+      () => streamRelay.isBlocked(scope, 'tool'),
       () => false,
     )
+    const nodeKind = props.node !== null && typeof props.node === 'object' && 'kind' in props.node
+      ? props.node.kind : undefined
+    const toolPresence = nodeKind === 'tool-call'
+      || (props.node !== null && typeof props.node === 'object' && 'data' in props.node
+        && props.node.data !== null && typeof props.node.data === 'object' && 'root' in props.node.data)
+    useLayoutEffect(() => {
+      if (!toolPresence) return
+      const token = streamRelay.acquire(scope, 'tool', false)
+      return () => { streamRelay.release(token) }
+    }, [scope.session, scope.turn, scope.step, scope.node, scope.order, toolPresence])
 
     // DOM 前驱时序门禁：仅检查并监听紧邻的前驱卡片，切断全容器广播风暴
     const [precedingTyping, setPrecedingTyping] = useState(false)
-    const isUnsettled = !isSettled && (growing || structurallyFollowable)
+    // A tool may settle before its preceding assistant has drained. Completion
+    // never bypasses that queue; historical rows have no preceding live lease.
+    const isUnsettled = relayBlocked || growing || structurallyFollowable
 
     useLayoutEffect(() => {
       if (!isUnsettled) {
@@ -238,6 +242,10 @@ export function wrapFollowNodeView(
 
       const checkPreceding = () => {
         if (!prev) return false
+        // Native rows publish scoped leases, including unmount cleanup. Do not
+        // duplicate that gate from DOM producer markers or a different Session.
+        const managed = prev.querySelector('[data-smooth-stream-phase]')
+        if (managed !== null) return false
         return prev.querySelector('[data-streaming], [data-smooth-stream-typing="true"]') !== null
       }
 
@@ -255,24 +263,16 @@ export function wrapFollowNodeView(
       })
       observer.observe(prev, {
         attributes: true,
-        attributeFilter: ['data-streaming', 'data-smooth-stream-typing'],
+        childList: true,
+        attributeFilter: ['data-streaming', 'data-smooth-stream-typing', 'data-smooth-stream-phase'],
         subtree: true,
       })
       return () => observer.disconnect()
-    }, [isUnsettled])
+    }, [isUnsettled, relayBlocked, scope.session, scope.turn, scope.step, scope.node])
 
-    // 超时自愈保护：若前序卡片因异常未能释放锁，6 秒后自动放行，绝不永久卡死
-    const [timedOut, setTimedOut] = useState(false)
-    const waiting = isUnsettled && (relayBlocked || precedingTyping) && !timedOut
-
-    useEffect(() => {
-      if (waiting) {
-        const timer = setTimeout(() => { setTimedOut(true) }, 6000)
-        return () => clearTimeout(timer)
-      } else {
-        setTimedOut(false)
-      }
-    }, [waiting])
+    // Scoped leases release on drain/interruption/unmount. There is no elapsed
+    // time that can prove the preceding text really committed to the screen.
+    const waiting = relayBlocked || (isUnsettled && precedingTyping)
 
     // 前序完成后顺畅触发入场动画
     const wasWaitingRef = useRef(waiting)
@@ -332,7 +332,7 @@ export function wrapFollowNodeView(
         || !followableRef.current
         || growingRef.current
         || entranceActiveRef.current
-        || isSettled
+        || (isSettled && !settledOpenGrowth)
       ) return
       growthExtentRef.current = deltaPx
       setGrowthPulse(true)
@@ -341,7 +341,7 @@ export function wrapFollowNodeView(
         pulseTimerRef.current = null
         setGrowthPulse(false)
       }, 1200)
-    }, [isSettled])
+    }, [isSettled, settledOpenGrowth])
 
     useEffect(() => {
       mountedRef.current = true

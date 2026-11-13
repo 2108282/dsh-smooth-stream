@@ -1,7 +1,9 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type ReactNode, type RefObject } from 'react'
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type ReactNode, type RefObject } from 'react'
 import { IconThinkOutlineRegular, JsonBlock, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
-import { ImageGallery, type ImageLoader, type MessageImageLabels } from '@deepseek-ai/dsh-client-ui-attachment'
-import type { ChatNodeViewProps, TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { ChatNodeViewProps, TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-chat/client'
+import type { MessageImageLoader } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { PropsRenderFactories, PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
+import type { TurnProcessOwnerFace } from './turn-process-face.d.ts'
 import { AnimatedDisclosure } from './AnimatedDisclosure.tsx'
 import { notifyFollowCommit } from './teleprompterGlide.ts'
 import { streamRelay } from './streamRelay.ts'
@@ -13,8 +15,15 @@ import { DEFAULT_STREAM_CONFIG, type StreamMode } from '../config.ts'
 import { DEFAULT_STREAM_SETTINGS, type StreamMotionPreference } from '../settings.ts'
 import css from './TypewriterAssistantNodeView.module.css'
 
-type AssistantProps = ChatNodeViewProps<'assistant-step'>
 type MarkdownProps = Pick<ComponentProps<typeof MarkdownText>, 'labels' | 'fileMentions' | 'text'>
+
+/** Optional adapters for the legacy standalone renderer, outside the official owner contract. */
+type AssistantProps = Omit<ChatNodeViewProps<'assistant-step'>, 'turnProcess' | 'renderFactorySlot'>
+  & Partial<PropsRenderFactories & PropsRenderSlots<'conversation.chat.message.images'>>
+  & {
+    fileMentions?: ((owner: TurnTailOwnerProps) => MarkdownProps['fileMentions']) | undefined
+    turnProcess?: TurnProcessOwnerFace | undefined
+  }
 
 function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(
@@ -47,8 +56,6 @@ function useMotionReduced(preference: StreamMotionPreference): boolean {
 
 interface AnimatedMarkdownTextProps extends MarkdownProps {
   streaming: boolean
-  isHistorical?: boolean
-  hasToolCallBelow?: boolean
   isTurnOpen?: boolean
   turnKey?: string
   keepStreamOnToolCall?: boolean
@@ -67,43 +74,8 @@ interface AnimatedMarkdownTextProps extends MarkdownProps {
   controlScroll?: boolean
 }
 
-/** Conservative fallback before the streaming Markdown tail has geometry. */
-const PREDICTIVE_WRAP_FALLBACK_CHARS = 32
 const STREAM_ANNOUNCEMENT_INTERVAL_MS = 800
 const STREAM_ANNOUNCEMENT_MAX_CHARS = 320
-
-interface PendingTextGeometry {
-  root: HTMLElement
-  visibleText: string
-  fontSize: number
-  wrapThresholdWidth: number | null
-}
-
-function approximateInlineWidth(text: string, emPx: number): number {
-  let width = 0
-  for (const char of text) {
-    if (/\s/u.test(char)) width += emPx * 0.33
-    else if (/^[\x00-\x7f]$/u.test(char)) width += emPx * 0.56
-    else width += emPx
-  }
-  return width
-}
-
-function measurePendingTextGeometry(root: HTMLElement, visibleText: string): PendingTextGeometry {
-  return { root, visibleText, fontSize: 14, wrapThresholdWidth: null }
-}
-
-/** Whether buffered source can reach a new visual line before it drains. */
-function pendingTextCanGrow(
-  root: HTMLElement | null,
-  visibleText: string,
-  pending: string,
-  geometryRef: { current: PendingTextGeometry | null },
-): boolean {
-  if (pending === '') return false
-  if (/[\r\n]/u.test(pending)) return true
-  return [...pending].length >= PREDICTIVE_WRAP_FALLBACK_CHARS
-}
 
 function announcementChunkEnd(source: string, start: number): number {
   const hardEnd = Math.min(source.length, start + STREAM_ANNOUNCEMENT_MAX_CHARS)
@@ -264,8 +236,6 @@ function AnimatedMarkdownText({
   labels,
   fileMentions,
   streaming,
-  isHistorical = false,
-  hasToolCallBelow = false,
   isTurnOpen = false,
   turnKey,
   keepStreamOnToolCall = true,
@@ -293,9 +263,6 @@ function AnimatedMarkdownText({
   const [typing, setTyping] = useState(() => streaming)
   const localSpeedCpsRef = useRef(35)
   const followRootRef = useRef<HTMLDivElement>(null)
-  const predictionSourceRef = useRef<string | null>(null)
-  const predictionStateRef = useRef(false)
-  const predictionGeometryRef = useRef<PendingTextGeometry | null>(null)
   const speedCpsRef = followSpeedCpsRef ?? localSpeedCpsRef
 
   // 串行接力：只要前序思考块仍在活跃吐字，正文保持静止等待
@@ -328,7 +295,6 @@ function AnimatedMarkdownText({
   }, [shown.length])
 
   const live = canType && !reduced
-  const isRevealing = live && shown.length < text.length && !waitingForReasoning
 
   // 严格向 Relay 报告本正文块的吐字活跃状态（供后续工具调用排队使用）
   useEffect(() => {
@@ -349,23 +315,11 @@ function AnimatedMarkdownText({
 
   useLogarithmicFade(followRootRef, logarithmicFade && !reduced, live, speedCpsRef)
 
-  useEffect(() => {
-    const root = followRootRef.current
-    if (root === null || typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(() => {
-      if (predictionGeometryRef.current?.root === root) predictionGeometryRef.current = null
-    })
-    observer.observe(root)
-    return () => { observer.disconnect() }
-  }, [])
-
   useLayoutEffect(() => {
     if (onPredictiveChange === undefined) return
     // 流式生成期间保持预测跑道稳定开启，避免因分块到达间隙而发生上下剧烈抽搐
     const isStreamActive = live && effectiveStreaming && text.length > 0
     const next = isStreamActive
-    predictionSourceRef.current = text
-    predictionStateRef.current = next
     onPredictiveChange(next)
   }, [live, onPredictiveChange, effectiveStreaming, text])
 
@@ -405,20 +359,6 @@ function AnimatedMarkdownText({
       />
     </FollowHost>
   )
-}
-
-function imageLabels(t: AssistantProps['t']): MessageImageLabels {
-  return {
-    image: t('image.label'),
-    open: t('image.openOriginal'),
-    openNamed: label => t('image.openOriginalLabel', { label }),
-    loading: t('image.loading'),
-    loadFailed: t('image.loadFailed'),
-    lightbox: {
-      dialog: t('image.preview'),
-      close: t('image.closePreview'),
-    },
-  }
 }
 
 /**
@@ -492,9 +432,9 @@ function latestLine(text: string): string {
  * click stay on the disclosure chrome, which the plugin's AnimatedDisclosure
  * renders with a height-animated body (the harness primitive would mount and
  * unmount it, which cannot glide). The row opens only while this block is
- * the streaming tail and closes as soon as thinking ends — a later block,
- * or the assistant node settling — not when the rest of the reply is
- * still streaming.
+ * the streaming tail and closes after its remaining reveal queue drains,
+ * whether a later block arrives or the assistant node settles. Manual
+ * disclosure choices remain in effect across that handoff.
  */
 function AnimatedReasoning({
   text,
@@ -533,7 +473,6 @@ function AnimatedReasoning({
   const activeRunning = running || (stillDraining && text.length > 0)
   const [expanded, setExpanded] = useState(() => activeRunning && thinkAutoExpand)
   const [userToggled, setUserToggled] = useState(false)
-  const [autoClosed, setAutoClosed] = useState(false)
   const summaryRef = useRef<HTMLSpanElement>(null)
   const fadeRootRef = useRef<HTMLDivElement>(null)
   const localFadeSpeedRef = useRef(35)
@@ -571,10 +510,8 @@ function AnimatedReasoning({
     if (thinkAutoExpand && !userToggled) {
       if (activeRunning) {
         setExpanded(true)
-        setAutoClosed(false)
       } else {
         setExpanded(false)
-        setAutoClosed(true)
       }
     }
     notifyFollowCommit(commitAnchorRef.current)
@@ -597,14 +534,13 @@ function AnimatedReasoning({
           titleClassName={css.thinkTitle}
           chevronClassName={css.thinkChevron}
           icon={<IconThinkOutlineRegular size={14} />}
-          title="Think"
+          title={t('message.think')}
           open={expanded}
           onToggle={() => {
             setUserToggled(true)
-            setAutoClosed(false)
             setExpanded(value => !value)
           }}
-          bodyTransition={true}
+          bodyTransition={activeRunning || userToggled || !thinkAutoExpand}
           collapsedContent={(
             <>
               <span className={css.thinkSeparator} aria-hidden />
@@ -630,11 +566,7 @@ function AnimatedReasoning({
  * renders with the full Markdown pipeline.
  */
 export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNodeView({
-  mode: _mode = DEFAULT_STREAM_CONFIG.mode,
   preset = DEFAULT_STREAM_CONFIG.preset,
-  revealCharsPerSec: _revealCharsPerSec = DEFAULT_STREAM_CONFIG.revealCharsPerSec,
-  scrollSpeedPxPerSec: _scrollSpeedPxPerSec = DEFAULT_STREAM_CONFIG.scrollSpeedPxPerSec,
-  maxScrollSpeedPxPerSec: _maxScrollSpeedPxPerSec = DEFAULT_STREAM_CONFIG.maxScrollSpeedPxPerSec,
   thinkAutoExpand = DEFAULT_STREAM_SETTINGS.thinkAutoExpand,
   logarithmicFade = DEFAULT_STREAM_SETTINGS.logarithmicFade,
   keepStreamOnToolCall = DEFAULT_STREAM_SETTINGS.keepStreamOnToolCall,
@@ -646,10 +578,12 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   openFile,
   loadImage,
   fileMentions,
+  renderSlot,
+  renderFactorySlot,
   turnProcess,
   t,
 }: AssistantProps & {
-  groupPart?: 'reasoning' | 'response'
+  groupPart?: string
   mode?: StreamMode
   preset?: StreamSmoothingPreset
   revealCharsPerSec?: number
@@ -678,6 +612,11 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
     && !turnProcess.open
   const revealProcess = useCallback(() => { turnProcess?.setOpen(true) }, [turnProcess])
   const { ref: guardRef, shouldHoldBack } = useFpsGuard(streaming)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const setRootRef = useCallback((element: HTMLDivElement | null) => {
+    rootRef.current = element
+    guardRef(element)
+  }, [guardRef])
   const rootSpeedRef = useRef(35)
   const rootRevealedCharsRef = useRef(0)
   const rootRevealScaleRef = useRef(1)
@@ -735,15 +674,15 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
     return { turn, seq: data.finalNode.seq, openFile }
   }, [data.finalNode, openFile, tail, turn])
   const mentions = useMemo(
-    () => owner === undefined ? undefined : fileMentions(owner),
+    () => owner === undefined ? undefined : fileMentions?.(owner),
     [fileMentions, owner],
   )
   const markdownLabels = useMemo(() => ({
     code: { copyLabel: t('copy'), copiedLabel: t('copied') },
     footnotes: t('markdown.footnotes'),
   }), [t])
-  const imageLoader: ImageLoader = loadImage ?? (async () => {
-    throw new Error(t('image.serviceUnavailable'))
+  const imageLoader: MessageImageLoader = loadImage ?? (async () => {
+    throw new Error('Image service unavailable')
   })
   const hasVisible = streaming
     || data.status === 'interrupted'
@@ -753,10 +692,8 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
       if (groupPart === 'response' && block.kind === 'reasoning') return false
       return true
     })
-  if (!hasVisible) return null
   const announcementText = data.blocks
-    .filter(block => block.kind === 'text' && (groupPart === undefined || groupPart === 'response'))
-    .map(block => block.text)
+    .flatMap(block => block.kind === 'text' && (groupPart === undefined || groupPart === 'response') ? [block.text] : [])
     .join('\n')
 
   const [reasoningActive, setReasoningActive] = useState(false)
@@ -764,7 +701,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   const isTyping = streaming || reasoningActive || childBlockTyping
 
   useLayoutEffect(() => {
-    const el = guardRef.current
+    const el = rootRef.current
     if (!el) return
     const card = el.closest('[data-chat-flow-key]')
     if (card instanceof HTMLElement) {
@@ -774,10 +711,11 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
         card.removeAttribute('data-smooth-stream-settled')
       }
     }
-  }, [isHistorical, streaming, isTyping])
+  }, [hasVisible, isHistorical, streaming, isTyping])
+
+  if (!hasVisible) return null
 
   const rendered: ReactNode[] = []
-  const last = data.blocks.length - 1
   let lastFollow = -1
   for (let index = 0; index < data.blocks.length; index += 1) {
     const kind = data.blocks[index]?.kind
@@ -792,14 +730,9 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
     if (groupPart === 'response' && block.kind === 'reasoning') continue
     switch (block.kind) {
       case 'text': {
-        const hasPrecedingReasoning = data.blocks.slice(0, index).some(b => b.kind === 'reasoning')
-        const shouldWaitForReasoning = hasPrecedingReasoning && reasoningActive
-        const textContent = shouldWaitForReasoning ? '' : block.text
-        const hasToolCallBelow = data.blocks.slice(index + 1).some(b => b.kind === 'tool-call')
-          || data.blocks.some(b => b.kind === 'tool-call')
-        const turnKey = turn !== undefined && typeof turn === 'object' && 'turn' in turn && turn.turn !== undefined
-          ? String(turn.turn)
-          : 'active'
+        // Settled blank Markdown has no visible body. A follow wrapper here
+        // would still occupy a flex gap, so only live blocks reserve a host.
+        if (!streaming && block.text.trim() === '') break
         rendered.push(
           <AnimatedMarkdownText
             key={index}
@@ -807,8 +740,6 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
             labels={markdownLabels}
             fileMentions={mentions}
             streaming={streaming}
-            isHistorical={isHistorical}
-            hasToolCallBelow={hasToolCallBelow}
             isTurnOpen={isStepOpen}
             turnKey={turnKey}
             keepStreamOnToolCall={keepStreamOnToolCall}
@@ -828,9 +759,6 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
         break
       }
       case 'reasoning': {
-        const turnKey = turn !== undefined && typeof turn === 'object' && 'turn' in turn && turn.turn !== undefined
-          ? String(turn.turn)
-          : 'active'
         const isThinkingActive = streaming && !hasSubsequentContent(index)
         rendered.push(
           <FoldableReasoning key={index} hidden={reasoningHidden} reveal={revealProcess}>
@@ -862,7 +790,15 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
           index += 1
         }
         rendered.push(
-          <ImageGallery key={start} images={group} load={imageLoader} align="start" labels={imageLabels(t)} />,
+          <Fragment key={start}>
+            {renderSlot !== undefined
+              ? renderSlot('conversation.chat.message.images', {
+                images: group.map(({ attachment }) => ({ attachment })), loadImage: imageLoader, align: 'start',
+              })
+              : renderFactorySlot?.('conversation.images.content', {
+                images: group.map(({ attachment }) => ({ attachment })), loadImage: imageLoader, align: 'start',
+              })}
+          </Fragment>,
         )
         break
       }
@@ -883,7 +819,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
 
   return (
     <div
-      ref={guardRef}
+      ref={setRootRef}
       className={css.root}
       data-streaming={streaming || undefined}
       data-smooth-stream-typing={isTyping ? 'true' : undefined}

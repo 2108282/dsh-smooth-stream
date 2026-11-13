@@ -39,4 +39,6 @@ export function createSnapshotStore<T extends object>(init: T): SnapshotStoreLik
   }
 }
 
-export { SlotRegistry } from '../../../deepseek-harness/packages/client/ui-renderer/src/client/registry.ts'
+// Legacy test imports still ask runtime/client for the renderer-owned registry.
+// The package export stays portable across npm/pnpm and standalone checkouts.
+export { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/src/client/registry.ts'

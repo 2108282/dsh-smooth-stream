@@ -127,14 +127,18 @@ export function computeAdaptiveQueueStep(
     QUEUE_BASE_SPEED_CPS + Math.pow(backlog, QUEUE_ACCEL_EXPONENT) * tuning.queuePressure,
   )
   const effectiveScale = clamp(revealScale * tuning.revealScale, 0.05, 2)
-  const accumulated = Math.max(0, debt) + speedCps * effectiveScale * (dtMs / 1000)
-  const rawRevealChars = Math.min(backlog, Math.floor(accumulated))
-  // 单帧防爆微步长限制（Cadence Clamp）：
-  // 杜绝因上下文变长导致主线程掉帧时，一帧瞬时吐出几十个字的大块蹦字感，永远维持细腻流水步长
-  const maxClamp = Math.max(1, tuning.cadenceClamp ?? 4)
-  const frameLimit = Math.max(1, Math.min(maxClamp, Math.ceil(speedCps * effectiveScale * 0.025)))
-  const revealChars = Math.min(rawRevealChars, frameLimit)
-  return { revealChars, debt: revealChars >= backlog ? 0 : accumulated - revealChars, speedCps }
+  // Limit the budget BEFORE applying backpressure. Scaling an already
+  // saturated reveal after accumulating unlimited tokens makes a 0.55 scale
+  // run at the same cadence as 1, then leaves a burst waiting when it clears.
+  // Only sub-character credit carries to the next frame; discarded whole
+  // tokens cannot become delayed catch-up debt after a slow frame.
+  const maxClamp = Math.max(1, Math.floor(tuning.cadenceClamp ?? 4))
+  const fractionalDebt = Math.max(0, debt) % 1
+  const frameBudget = Math.min(maxClamp, speedCps * (dtMs / 1000)) * effectiveScale
+  const accumulated = fractionalDebt + frameBudget
+  const wholeBudget = Math.floor(accumulated)
+  const revealChars = Math.min(backlog, maxClamp, wholeBudget)
+  return { revealChars, debt: revealChars >= backlog ? 0 : accumulated - wholeBudget, speedCps }
 }
 
 /** Counts user-perceived characters (code points), not UTF-16 units. */

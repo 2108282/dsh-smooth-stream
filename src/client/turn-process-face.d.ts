@@ -1,12 +1,9 @@
 /**
- * Turn-process fold face for the DSH 0.1.2 completion-collapse contract.
+ * Minimal fold face accepted by the legacy standalone assistant renderer.
  *
- * The Host seat hands every keyed Chat renderer a `turnProcess` owner prop
- * when the node belongs to a projected Turn: the fold decision lives in the
- * conversation snapshot (turn closed + compact transcript), and the renderer
- * is expected to hide its answer-inline reasoning while folded. The pinned
- * type-only dependency predates the field, so the face is declared here and
- * merged into the owner-props interface; erases at compile time.
+ * DSH 0.2.2 owns the complete turnProcess contract in ui-chat. Standalone
+ * reproductions and legacy tests only provide these fold fields, so keep
+ * this local face separate from the official ChatNodeOwnerProps interface.
  */
 export interface TurnProcessOwnerFace {
   /** Answer anchor of the projection; null while the answer has not landed. */
@@ -17,11 +14,4 @@ export interface TurnProcessOwnerFace {
   readonly open: boolean
   /** Fold or unfold from the renderer side (summary click, find-in-page reveal). */
   setOpen(open: boolean): void
-}
-
-declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
-  interface ChatNodeOwnerProps {
-    /** Present only when the node belongs to a projected Turn (0.1.2+). */
-    turnProcess?: TurnProcessOwnerFace | undefined
-  }
 }

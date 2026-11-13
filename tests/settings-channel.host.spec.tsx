@@ -1,108 +1,77 @@
-/**
- * Host half mounts its settings channel even when the kernel's own
- * `connection.rpc.handle()` cannot resolve `webServer` from inside that
- * service. The browser then reaches the card instead of reporting the
- * connection as unable to read plugin settings.
- */
+/** The fallback channel preserves authenticated Host admission and RPC envelopes. */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
-import type { ConnectionRpcHandler, ConnectionRpcHandlerOptions } from '@deepseek-ai/dsh-client-connection'
+import type { ConnectionRpcHandler, PeerScope } from '@deepseek-ai/dsh-client-connection'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
-import * as DshSettings from '@deepseek-ai/dsh-settings'
-const { SettingsProvider } = DshSettings
-type SettingsNamespace = DshSettings.SettingsNamespace
 import { afterEach, describe, expect, it } from 'vitest'
-import { STREAM_PACKAGE_VERSION } from '../src/package-meta.ts'
-import { apply, Config } from '../src/plugin.ts'
-import { STREAM_SETTINGS_RPC, STREAM_SETTINGS_RPC_CHANNEL } from '../src/settings-api.ts'
-import { DEFAULT_STREAM_SETTINGS, STREAM_SETTINGS_NS } from '../src/settings.ts'
+import { STREAM_SETTINGS_RPC_CHANNEL } from '../src/settings-api.ts'
+import { registerSettingsChannel } from '../src/settings-channel.ts'
 
-/** In-memory settings provider -- same shape as the Harness's own specs. */
-class MemorySettings extends SettingsProvider {
-  readonly writable = true
-  protected load(): Promise<Record<string, unknown>> { return Promise.resolve({}) }
-  protected persist(_ns: SettingsNamespace, _section: Record<string, unknown>): Promise<void> {
-    return Promise.resolve()
-  }
-}
-
-/** One recorded reply, so a route can be driven without a real socket. */
 interface Exchange {
   status: number
   body: string
 }
 
-/** Web server stand-in that records routes and drops them on disposal. */
+const mounted: Array<() => Promise<void>> = []
+const peer = { principal: { kind: 'owner' } } as PeerScope
+
+afterEach(async () => {
+  for (const dispose of mounted.splice(0)) await dispose()
+})
+
 function fakeWebServer(routes: WebRoute[]): {
   register(route: WebRoute): () => void
-  tapIndex(): () => void
 } {
   return {
-    register(route: WebRoute): () => void {
+    register(route): () => void {
       routes.push(route)
       return () => {
         const index = routes.indexOf(route)
         if (index >= 0) routes.splice(index, 1)
       }
     },
-    tapIndex(): () => void { return () => {} },
   }
 }
 
-/**
- * Mount the Host half over a connection service whose `rpc.handle()` fails the
- * way the broken kernel generation does.
- * @param fenced - whether the fake connection also exposes its request fence.
- */
-async function mountHost(fenced: boolean): Promise<{ ctx: Context; routes: WebRoute[]; dispose: () => Promise<void> }> {
+async function mountHost(admitted: boolean): Promise<{ routes: WebRoute[]; dispose: () => Promise<void> }> {
   const ctx = new Context()
   ctx.baseUrl = `${pathToFileURL(process.cwd()).href}/`
   const routes: WebRoute[] = []
   ctx.provide('webServer', fakeWebServer(routes) as never)
+  let admissions = 0
   ctx.provide('connection', {
-    rpc: {
-      handle(_channel: string, _handler: ConnectionRpcHandler, _options: ConnectionRpcHandlerOptions): () => Promise<void> {
-        throw new Error('cannot get property "webServer" without inject')
-      },
+    rpc: { handle: () => { throw new Error('cannot get property "webServer" without inject') } },
+    admit: () => {
+      admissions += 1
+      return admitted ? { peer } : { rejection: 401 }
     },
-    ...fenced
-      ? {
-        requestRejection(request: unknown): 401 | undefined {
-          return (request as IncomingMessage).headers.cookie === undefined ? 401 : undefined
-        },
-      }
-      : {},
   } as never)
-  await ctx.plugin(MemorySettings).await()
-  const fiber = ctx.plugin({ apply, Config })
+  const handler: ConnectionRpcHandler = async (endpoint, payload, signal, rpcPeer) => ({
+    ok: true,
+    value: { endpoint, payload, aborted: signal.aborted, principal: rpcPeer.principal },
+  })
+  const fiber = ctx.plugin({
+    apply(pluginCtx) { registerSettingsChannel(pluginCtx, STREAM_SETTINGS_RPC_CHANNEL, handler) },
+  })
   await fiber.await()
-  return { ctx, routes, dispose: () => fiber.dispose() }
+  return { routes, dispose: () => fiber.dispose() }
 }
 
-const mounted: Array<() => Promise<void>> = []
-
-afterEach(async () => {
-  for (const dispose of mounted.splice(0)) await dispose()
-})
-
-/** Drive one route with a request envelope and capture the reply. */
 async function call(
   route: WebRoute,
   endpoint: string,
   payload: unknown,
   options: { method?: string; headers?: Record<string, string>; body?: string } = {},
 ): Promise<Exchange> {
-  const method = options.method ?? 'POST'
-  const headers = options.headers ?? { 'content-type': 'application/json', cookie: 'dsh=browser' }
-  const body = options.body
-    ?? JSON.stringify({ type: 'client-request', rpcId: 'probe-1', method: endpoint, payload })
-  const req = Readable.from([Buffer.from(body)]) as unknown as IncomingMessage
-  req.method = method
+  const req = Readable.from([Buffer.from(options.body ?? JSON.stringify({
+    type: 'client-request', rpcId: 'probe-1', method: endpoint, payload,
+  }))]) as unknown as IncomingMessage
+  req.method = options.method ?? 'POST'
   req.url = `${STREAM_SETTINGS_RPC_CHANNEL}/${endpoint}`
-  req.headers = headers
+  req.headers = options.headers ?? { 'content-type': 'application/json' }
   const state: Exchange = { status: 0, body: '' }
   const res = {
     writeHead(status: number) { state.status = status; return res },
@@ -114,87 +83,64 @@ async function call(
 }
 
 describe('smooth-stream settings channel fallback', () => {
-  it('mounts the channel directly when the connection service cannot, and serves the settings', async () => {
+  it('routes admitted calls to the four-argument handler and withdraws on disposal', async () => {
     const host = await mountHost(true)
     mounted.push(host.dispose)
-
-    const route = host.routes.find(candidate => candidate.path === STREAM_SETTINGS_RPC_CHANNEL)
-    expect(route).toMatchObject({ kind: 'prefix', path: STREAM_SETTINGS_RPC_CHANNEL })
-
-    const read = await call(route as WebRoute, STREAM_SETTINGS_RPC.read, {})
-    expect(read.status).toBe(200)
-    expect(JSON.parse(read.body)).toEqual({
+    const route = host.routes.find(candidate => candidate.path === STREAM_SETTINGS_RPC_CHANNEL) as WebRoute
+    const response = await call(route, 'settings.read', { sample: 1 })
+    expect(response.status).toBe(200)
+    expect(JSON.parse(response.body)).toMatchObject({
       type: 'server-response',
       rpcId: 'probe-1',
       result: {
         ok: true,
         value: {
-          version: STREAM_PACKAGE_VERSION,
-          installation: 'unmanaged',
-          writable: true,
-          enabled: DEFAULT_STREAM_SETTINGS.enabled,
-          controlScroll: DEFAULT_STREAM_SETTINGS.controlScroll,
-          motionPreference: DEFAULT_STREAM_SETTINGS.motionPreference,
-          thinkAutoExpand: DEFAULT_STREAM_SETTINGS.thinkAutoExpand,
-          logarithmicFade: DEFAULT_STREAM_SETTINGS.logarithmicFade,
-          canUpgrade: false,
+          endpoint: 'settings.read',
+          payload: { sample: 1 },
+          aborted: false,
+          principal: { kind: 'owner' },
         },
       },
     })
-
-    const write = await call(route as WebRoute, STREAM_SETTINGS_RPC.write, {
-      enabled: false,
-      controlScroll: true,
-      thinkAutoExpand: true,
-    })
-    expect(JSON.parse(write.body)).toMatchObject({
-      result: { ok: true, value: { enabled: false, controlScroll: true } },
-    })
-    expect(host.ctx.settings.get(STREAM_SETTINGS_NS as SettingsNamespace))
-      .toMatchObject({ enabled: false, controlScroll: true })
-
     await host.dispose()
     mounted.pop()
     expect(host.routes).toEqual([])
   })
 
-  it('keeps the connection request fence and the router rules on the direct route', async () => {
-    const host = await mountHost(true)
-    mounted.push(host.dispose)
-    const route = host.routes.find(candidate => candidate.path === STREAM_SETTINGS_RPC_CHANNEL) as WebRoute
+  it('refuses unadmitted calls and validates HTTP framing', async () => {
+    const denied = await mountHost(false)
+    mounted.push(denied.dispose)
+    const deniedRoute = denied.routes[0] as WebRoute
+    expect(await call(deniedRoute, 'settings.read', {}, { headers: {} }))
+      .toEqual({ status: 401, body: 'unauthorized' })
 
-    const anonymous = await call(route, STREAM_SETTINGS_RPC.read, {}, { headers: { 'content-type': 'application/json' } })
-    expect(anonymous).toEqual({ status: 401, body: 'unauthorized' })
-
-    const wrongMethod = await call(route, STREAM_SETTINGS_RPC.read, {}, { method: 'GET' })
-    expect(wrongMethod.status).toBe(404)
-
-    const wrongType = await call(route, STREAM_SETTINGS_RPC.read, {}, { headers: { 'content-type': 'text/plain', cookie: 'dsh=browser' } })
-    expect(wrongType.status).toBe(415)
-
-    const notJson = await call(route, STREAM_SETTINGS_RPC.read, {}, { body: 'not json' })
-    expect(notJson.status).toBe(400)
-
-    const mismatched = await call(route, STREAM_SETTINGS_RPC.read, {}, {
+    const admitted = await mountHost(true)
+    mounted.push(admitted.dispose)
+    const route = admitted.routes[0] as WebRoute
+    expect((await call(route, 'settings.read', {}, { method: 'GET' })).status).toBe(404)
+    expect((await call(route, 'settings.read', {}, { headers: { 'content-type': 'text/plain' } })).status).toBe(415)
+    expect((await call(route, 'settings.read', {}, { body: 'not json' })).status).toBe(400)
+    const mismatch = await call(route, 'settings.read', {}, {
       body: JSON.stringify({ type: 'client-request', rpcId: 'probe-2', method: 'settings.write', payload: {} }),
     })
-    expect(JSON.parse(mismatched.body)).toMatchObject({
-      rpcId: 'probe-2',
-      result: { ok: false, error: { code: 'gateway/bad-request' } },
+    expect(JSON.parse(mismatch.body)).toMatchObject({
+      rpcId: 'probe-2', result: { ok: false, error: { code: 'gateway/bad-request' } },
     })
-
-    const malformed = await call(route, STREAM_SETTINGS_RPC.read, {}, { body: JSON.stringify({ rpcId: 7 }) })
+    const malformed = await call(route, 'settings.read', {}, { body: JSON.stringify({ rpcId: 7 }) })
     expect(JSON.parse(malformed.body)).toMatchObject({
-      rpcId: 'invalid-request',
-      result: { ok: false, error: { code: 'gateway/bad-request' } },
+      rpcId: 'invalid-request', result: { ok: false, error: { code: 'gateway/bad-request' } },
     })
   })
 
-  it('fails closed instead of exposing the channel without the connection fence', async () => {
-    const host = await mountHost(false)
-    mounted.push(host.dispose)
-    expect(host.routes).toEqual([])
-    // The plugin still applies: only the card's read is unavailable.
-    expect(host.ctx.settings.get(STREAM_SETTINGS_NS as SettingsNamespace)).toEqual(DEFAULT_STREAM_SETTINGS)
+  it('fails closed when admission or the web server is unavailable', async () => {
+    const ctx = new Context()
+    ctx.provide('connection', { rpc: { handle: () => { throw new Error('offline') } } } as never)
+    const fiber = ctx.plugin({
+      apply(pluginCtx) {
+        const handler: ConnectionRpcHandler = async () => ({ ok: true, value: {} })
+        registerSettingsChannel(pluginCtx, STREAM_SETTINGS_RPC_CHANNEL, handler)
+      },
+    })
+    await expect(fiber.await()).rejects.toThrow('webServer is unavailable')
   })
 })

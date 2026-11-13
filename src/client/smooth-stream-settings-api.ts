@@ -1,7 +1,7 @@
 /** Browser adapter for the Host-owned smooth-stream settings RPC. */
 
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
-import type { StreamDebugTuning, StreamSettings } from '../settings.ts'
+import { DEFAULT_STREAM_DEBUG_TUNING, DEFAULT_STREAM_SETTINGS, type StreamDebugTuning, type StreamSettings } from '../settings.ts'
 import {
   STREAM_SETTINGS_RPC,
   STREAM_SETTINGS_RPC_CHANNEL,
@@ -33,8 +33,10 @@ function settingsView(value: unknown): StreamSettingsView {
   }
   return {
     ...data,
-    logarithmicFade: data.logarithmicFade ?? true,
-    keepStreamOnToolCall: data.keepStreamOnToolCall ?? true,
+    logarithmicFade: data.logarithmicFade ?? DEFAULT_STREAM_SETTINGS.logarithmicFade,
+    fastFold: data.fastFold ?? DEFAULT_STREAM_SETTINGS.fastFold,
+    fastPipeline: data.fastPipeline ?? DEFAULT_STREAM_SETTINGS.fastPipeline,
+    keepStreamOnToolCall: data.keepStreamOnToolCall ?? DEFAULT_STREAM_SETTINGS.keepStreamOnToolCall,
   } as unknown as StreamSettingsView
 }
 
@@ -65,8 +67,8 @@ function debugSettingsView(value: unknown): StreamDebugSettingsView {
   return {
     debugEnabled: data.debugEnabled,
     tuning: {
-      cadenceClamp: 4,
       ...(tuning as unknown as StreamDebugTuning),
+      cadenceClamp: tuning.cadenceClamp ?? DEFAULT_STREAM_DEBUG_TUNING.cadenceClamp,
     },
   }
 }
@@ -79,7 +81,7 @@ function accepted(result: Awaited<ReturnType<ConnectionHandle['rpc']['call']>>):
 /** Narrow client contract consumed by the staged settings-card controller. */
 export interface SmoothStreamSettingsApi {
   read(): Promise<StreamSettingsView>
-  write(settings: Pick<StreamSettings, 'enabled' | 'controlScroll' | 'motionPreference' | 'thinkAutoExpand' | 'logarithmicFade' | 'keepStreamOnToolCall'> & Partial<Pick<StreamSettings, 'debugEnabled' | 'debugTuning'>>): Promise<StreamSettingsView>
+  write(settings: Pick<StreamSettings, 'enabled' | 'controlScroll' | 'motionPreference' | 'thinkAutoExpand' | 'logarithmicFade' | 'fastFold' | 'fastPipeline' | 'keepStreamOnToolCall'> & Partial<Pick<StreamSettings, 'debugEnabled' | 'debugTuning'>>): Promise<StreamSettingsView>
   readDebug(): Promise<StreamDebugSettingsView>
   writeDebug(settings: Pick<StreamSettings, 'debugEnabled' | 'debugTuning'>): Promise<StreamDebugSettingsView>
   upgrade(): Promise<StreamUpgradeView>
@@ -91,7 +93,7 @@ export function createSmoothStreamSettingsApi(connection: ConnectionHandle): Smo
     async read(): Promise<StreamSettingsView> {
       return settingsView(accepted(await connection.rpc.call(STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.read, {})))
     },
-    async write(settings: Pick<StreamSettings, 'enabled' | 'controlScroll' | 'motionPreference' | 'thinkAutoExpand' | 'logarithmicFade' | 'keepStreamOnToolCall'> & Partial<Pick<StreamSettings, 'debugEnabled' | 'debugTuning'>>): Promise<StreamSettingsView> {
+    async write(settings: Pick<StreamSettings, 'enabled' | 'controlScroll' | 'motionPreference' | 'thinkAutoExpand' | 'logarithmicFade' | 'fastFold' | 'fastPipeline' | 'keepStreamOnToolCall'> & Partial<Pick<StreamSettings, 'debugEnabled' | 'debugTuning'>>): Promise<StreamSettingsView> {
       return settingsView(accepted(await connection.rpc.call(
         STREAM_SETTINGS_RPC_CHANNEL,
         STREAM_SETTINGS_RPC.write,
@@ -101,6 +103,8 @@ export function createSmoothStreamSettingsApi(connection: ConnectionHandle): Smo
           motionPreference: settings.motionPreference,
           thinkAutoExpand: settings.thinkAutoExpand,
           logarithmicFade: settings.logarithmicFade,
+          fastFold: settings.fastFold,
+          fastPipeline: settings.fastPipeline,
           keepStreamOnToolCall: settings.keepStreamOnToolCall,
           ...(settings.debugEnabled === undefined || settings.debugTuning === undefined
             ? {}

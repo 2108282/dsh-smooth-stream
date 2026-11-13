@@ -72,7 +72,7 @@ export type SmoothStreamLocaleKey =
   | 'debugRevealMultiplier' | 'debugQueuePressure' | 'debugMaxReveal' | 'debugCadenceClamp'
   | 'debugSpringStiffness' | 'debugSpringDamping' | 'debugSpringMass'
   | 'debugRunway' | 'debugReserveResponse' | 'debugBackpressureMin'
-  | 'debugTipRevealMultiplier' | 'debugTipQueuePressure' | 'debugTipMaxReveal'
+  | 'debugTipRevealMultiplier' | 'debugTipQueuePressure' | 'debugTipMaxReveal' | 'debugTipCadenceClamp'
   | 'debugTipSpringStiffness' | 'debugTipSpringDamping' | 'debugTipSpringMass'
   | 'debugTipRunway' | 'debugTipReserveResponse' | 'debugTipBackpressureMin'
   | 'readOnly' | 'loading' | 'unavailable' | 'retry'

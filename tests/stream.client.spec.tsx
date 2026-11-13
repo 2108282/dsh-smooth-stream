@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { Context } from '@deepseek-ai/cordis'
-import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
+import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   Suspense,
@@ -13,7 +13,7 @@ import {
   useState,
   type FunctionComponent,
 } from 'react'
-import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { MarkdownText, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { TypewriterAssistantNodeView } from '../src/client/TypewriterAssistantNodeView.tsx'
 import {
   computeFollowRevealScale,
@@ -145,7 +145,7 @@ function FollowProbe({
   return <div ref={rootRef} data-chat-transcript>Streaming response</div>
 }
 
-function FollowTooltipProbe() {
+function FollowTooltipProbe({ portal = false }: { portal?: boolean }) {
   const rootRef = useRef<HTMLDivElement>(null)
   const speedCpsRef = useRef(600)
   useConversationFollow(rootRef, true, speedCpsRef)
@@ -153,7 +153,7 @@ function FollowTooltipProbe() {
     <div ref={rootRef} data-tooltip-probe>
       <span>user message</span>
       <span>
-        <Tooltip label="Copy" side="bottom">
+        <Tooltip label="Copy" side="bottom" portal={portal}>
           <button type="button">copy</button>
         </Tooltip>
       </span>
@@ -535,8 +535,16 @@ describe('assistant renderer', () => {
     )
     const beforeHover = visualPosition()
     const button = view.getByRole('button', { name: 'copy' })
-    fireEvent.mouseEnter(button)
-    expect(view.container.querySelector('[role="tooltip"]')).not.toBeNull()
+    // The current primitive listens to pointer entry rather than mouse entry.
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        this.callback([{ target, borderBoxSize: [{ inlineSize: 48, blockSize: 24 }] } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver)
+      }
+      disconnect() {}
+    })
+    fireEvent.pointerEnter(button)
+    expect(view.getByRole('tooltip').textContent).toBe('Copy')
     await act(() => vi.advanceTimersByTimeAsync(0))
     expect(visualPosition()).toBeCloseTo(beforeHover, 5)
     expect(surface.style.transform).toBe('')
@@ -548,6 +556,42 @@ describe('assistant renderer', () => {
     expect(transcript.style.transform).toBe('')
     expect(view.container.querySelector('[role="tooltip"]')?.getAttribute('role')).toBe('tooltip')
     expect((view.container.querySelector('[role="tooltip"]') as HTMLElement).style.transform).toBe('')
+  })
+
+  it('preserves the follow surface when a real portaled Tooltip opens on keyboard focus', async () => {
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        // Tooltip stays hidden until its real primitive receives a laid-out
+        // border box; supply that browser measurement instead of querying hidden UI.
+        this.callback([{ target, borderBoxSize: [{ inlineSize: 48, blockSize: 24 }] } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver)
+      }
+      disconnect() {}
+    })
+    const view = render(
+      <div data-conversation-scroll>
+        <FollowTooltipProbe portal />
+      </div>,
+    )
+    const port = view.container.querySelector('[data-conversation-scroll]') as HTMLElement
+    const transcript = view.container.querySelector('[data-tooltip-probe]') as HTMLElement
+    Object.defineProperty(port, 'clientHeight', { configurable: true, value: 100 })
+    Object.defineProperty(port, 'scrollHeight', { configurable: true, value: 500 })
+    port.scrollTop = 400
+    await act(() => vi.advanceTimersByTimeAsync(80))
+    const before = -port.scrollTop + currentTranslate(transcript)
+    const button = view.getByRole('button', { name: 'copy' })
+    // Tooltip's modality gate accepts keyboard focus after a key event.
+    fireEvent.keyDown(document, { key: 'Tab' })
+    fireEvent.focus(button)
+    const tooltip = view.getByRole('tooltip')
+    expect(tooltip.closest('[data-conversation-scroll]')).toBeNull()
+    expect(tooltip.parentElement).toBe(document.body)
+    expect(tooltip.getAttribute('data-portal')).toBe('true')
+    await act(() => vi.advanceTimersByTimeAsync(16))
+    expect(-port.scrollTop + currentTranslate(transcript)).toBeCloseTo(before, 5)
+    fireEvent.blur(button)
+    expect(view.queryByRole('tooltip')).toBeNull()
   })
 
   for (const scenario of [
@@ -831,7 +875,7 @@ describe('assistant renderer', () => {
       removeEventListener: () => {},
     }))
     const block = { kind: 'text', text: LONG_STREAM_TEXT }
-    const view = render(<TypewriterAssistantNodeView {...assistantProps('running', [block])} />)
+    const view = render(<TypewriterAssistantNodeView {...assistantProps('running', [block])} motionPreference="auto" />)
     await act(() => vi.advanceTimersByTimeAsync(400))
     // Accessibility-first default: no reveal queue, the full text is present.
     expect(view.container.textContent).toContain(LONG_STREAM_TEXT)
@@ -968,16 +1012,36 @@ describe('assistant renderer', () => {
     expect(view.container.textContent).not.toContain('message.think')
   })
 
-  it('collapses the Think disclosure when the assistant node settles', () => {
+  it('drains the remaining Think text before collapsing when the assistant settles', async () => {
     const block = { kind: 'reasoning', text: 'first line\n\nsecond' }
     const view = render(<TypewriterAssistantNodeView {...assistantProps('running', [block])} />)
     expect(view.container.querySelector('[data-disclosure-row]')?.getAttribute('aria-expanded')).toBe('true')
+    const body = view.container.querySelector(`.${css.thinkBody}`) as HTMLElement
+    const beforeSettle = body.textContent
     view.rerender(<TypewriterAssistantNodeView {...assistantProps('settled', [block])} />)
+    expect(body.textContent).toBe(beforeSettle)
+    expect(view.container.querySelector('[data-disclosure-row]')?.getAttribute('aria-expanded')).toBe('true')
+    await act(() => vi.advanceTimersByTimeAsync(800))
+    expect(body.textContent).toBe(block.text)
     expect(view.getByText('first line')).toBeTruthy()
     expect(view.container.querySelector('[data-disclosure-row]')?.getAttribute('aria-expanded')).toBe('false')
     // The animated body stays mounted while collapsed (hidden by the 0fr
     // track), so collapse is an assertion on the wrapper state, not absence.
     expect(view.container.querySelector('[data-disclosure-content]')?.hasAttribute('data-collapsed')).toBe(true)
+  })
+
+  it('preserves a manual Think choice when the completion queue drains', async () => {
+    const block = { kind: 'reasoning', text: 'manual choice '.repeat(30) }
+    const view = render(<TypewriterAssistantNodeView {...assistantProps('running', [block])} />)
+    const row = view.container.querySelector('[data-disclosure-row]') as HTMLElement
+    fireEvent.click(row)
+    fireEvent.click(row)
+    expect(row.getAttribute('aria-expanded')).toBe('true')
+    view.rerender(<TypewriterAssistantNodeView {...assistantProps('settled', [block])} />)
+    await act(() => vi.advanceTimersByTimeAsync(800))
+    expect(view.container.querySelector(`.${css.thinkBody}`)?.textContent).toBe(block.text)
+    expect(row.getAttribute('aria-expanded')).toBe('true')
+    expect(view.container.querySelector('[data-disclosure-content]')?.hasAttribute('data-no-transition')).toBe(false)
   })
 
   /*
@@ -1050,7 +1114,7 @@ describe('assistant renderer', () => {
     })
   })
 
-  it('snaps only the auto-close body, gliding manual toggles while streaming', () => {
+  it('snaps only the drained auto-close body, gliding manual toggles', async () => {
     const block = { kind: 'reasoning', text: 'first line\n\nsecond' }
     const view = render(<TypewriterAssistantNodeView {...assistantProps('running', [block])} />)
     // While the stream owns the disclosure, the body keeps its grid-track
@@ -1059,12 +1123,14 @@ describe('assistant renderer', () => {
     // The settle auto-close snaps: the follower's spring absorbs the height
     // step, and a grid animation on top would double-animate it.
     view.rerender(<TypewriterAssistantNodeView {...assistantProps('settled', [block])} />)
+    expect(view.container.querySelector('[data-disclosure-content]')?.hasAttribute('data-no-transition')).toBe(false)
+    await act(() => vi.advanceTimersByTimeAsync(800))
     expect(view.container.querySelector('[data-disclosure-content]')?.hasAttribute('data-no-transition')).toBe(true)
     fireEvent.click(view.container.querySelector('[data-disclosure-row]') as HTMLElement)
     expect(view.container.querySelector('[data-disclosure-content]')?.hasAttribute('data-no-transition')).toBe(false)
   })
 
-  it('collapses the Think disclosure when a later block becomes the tail', () => {
+  it('drains Think before collapsing when a later block becomes the tail', async () => {
     const think = { kind: 'reasoning', text: 'first line\n\nsecond' }
     const view = render(<TypewriterAssistantNodeView {...assistantProps('running', [think])} />)
     expect(view.container.querySelector('[data-disclosure-row]')?.getAttribute('aria-expanded')).toBe('true')
@@ -1072,6 +1138,8 @@ describe('assistant renderer', () => {
       think,
       { kind: 'text', text: 'the answer' },
     ])} />)
+    expect(view.container.querySelector('[data-disclosure-row]')?.getAttribute('aria-expanded')).toBe('true')
+    await act(() => vi.advanceTimersByTimeAsync(800))
     expect(view.container.querySelector('[data-disclosure-row]')?.getAttribute('aria-expanded')).toBe('false')
     expect(view.getByText('first line')).toBeTruthy()
     expect(view.container.querySelector('[data-disclosure-content]')?.hasAttribute('data-collapsed')).toBe(true)
@@ -1826,26 +1894,43 @@ describe('assistant renderer', () => {
     expect(mutations.length).toBeGreaterThan(0)
   })
 
-  it('reuses visible-tail geometry across source chunks before the next reveal', () => {
+  it('paces multiple source chunks within a bounded geometry-read budget', async () => {
     const renderText = (text: string) => (
-      <TypewriterAssistantNodeView {...assistantProps('running', [{ kind: 'text', text }])} />
+      <div data-conversation-scroll>
+        <TypewriterAssistantNodeView {...assistantProps('running', [{ kind: 'text', text }])} />
+      </div>
     )
     const view = render(renderText(''))
-    const followHosts = view.container.querySelectorAll<HTMLElement>(`.${css.follow}`)
-    const textFollowHost = followHosts.item(followHosts.length - 1)
-    Object.defineProperty(textFollowHost, 'clientWidth', { configurable: true, value: 320 })
-    vi.spyOn(textFollowHost, 'getBoundingClientRect').mockReturnValue({
-      left: 0,
-      right: 320,
-      width: 320,
-    } as DOMRect)
-    const treeWalker = vi.spyOn(document, 'createTreeWalker')
+    const port = view.container.querySelector('[data-conversation-scroll]') as HTMLElement
+    Object.defineProperty(port, 'clientHeight', { configurable: true, value: 100 })
+    Object.defineProperty(port, 'scrollHeight', { configurable: true, value: 500 })
+    port.scrollTop = 400
+    const geometryReads = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+    const body = view.container.querySelector(`.${css.body}`) as HTMLElement
+    const text = 'x'.repeat(120)
 
-    view.rerender(renderText('one'))
-    view.rerender(renderText('one two'))
-    view.rerender(renderText('one two three'))
+    for (let chunk = 1; chunk <= 3; chunk += 1) {
+      view.rerender(renderText(text.slice(0, chunk * 40)))
+    }
+    // Source-only rerenders must not publish their unread tail or read layout.
+    expect(body.textContent).toBe('')
+    expect(geometryReads).not.toHaveBeenCalled()
 
-    expect(treeWalker).toHaveBeenCalledTimes(1)
+    let previous = 0
+    for (let frame = 0; frame < 20; frame += 1) {
+      await act(() => vi.advanceTimersByTimeAsync(16))
+      const revealed = body.textContent?.length ?? 0
+      expect(revealed).toBeGreaterThanOrEqual(previous)
+      expect(revealed - previous).toBeLessThanOrEqual(DEFAULT_STREAM_DEBUG_TUNING.cadenceClamp)
+      previous = revealed
+    }
+    expect(previous).toBeGreaterThan(0)
+    expect(previous).toBeLessThan(120)
+    // Budget layout reads per rendered frame, independently of DOM traversal.
+    expect(geometryReads.mock.calls.length).toBeLessThanOrEqual(20 * 8)
+    await act(() => vi.advanceTimersByTimeAsync(3000))
+    expect(body.textContent).toBe(text.slice(0, 120))
+    geometryReads.mockRestore()
   })
 
   it('pins the growing conversation port at the floor while streaming', async () => {
@@ -2493,6 +2578,7 @@ describe('assistant renderer', () => {
 
   it('retires the compositor layer only after a stable final paint', async () => {
     const block = { kind: 'reasoning', text: 'quietly finishing the analysis' }
+    let baseHeight = 500
     const view = render(
       <div data-conversation-scroll>
         <div data-chat-flow>
@@ -2515,7 +2601,7 @@ describe('assistant renderer', () => {
     Object.defineProperty(port, 'clientHeight', { configurable: true, value: 100 })
     Object.defineProperty(port, 'scrollHeight', {
       configurable: true,
-      get: () => 500
+      get: () => baseHeight
         + (status.isConnected ? Number.parseFloat(status.style.marginTop) || 0 : 0)
         + (Number.parseFloat(transcript.style.marginBottom) || 0),
     })
@@ -2530,6 +2616,10 @@ describe('assistant renderer', () => {
     vi.spyOn(composer, 'getBoundingClientRect').mockReturnValue({ top: 160, bottom: 240 } as DOMRect)
     port.scrollTop = 390
     await act(() => vi.advanceTimersByTimeAsync(80))
+    // A closed Think summary at constant height has no motion to promote.
+    // Trigger a real layout impulse before checking how its layer retires.
+    baseHeight += 28
+    await act(() => vi.advanceTimersByTimeAsync(16))
     expect(currentTranslate(transcript)).toBeGreaterThan(0)
 
     view.rerender(
@@ -2546,6 +2636,11 @@ describe('assistant renderer', () => {
       </div>,
     )
 
+    // Real growth leaves residual glide at completion. Observe its first
+    // stable final position before testing the compositor's two-paint release.
+    for (let frame = 0; frame < 125 && currentTranslate(transcript) > 0; frame += 1) {
+      await act(() => vi.advanceTimersByTimeAsync(16))
+    }
     expect(currentTranslate(transcript)).toBe(0)
     expect(flow.style.paddingBottom).toBe('')
     expect(transcript.style.transform).not.toBe('')
@@ -3139,7 +3234,21 @@ describe('assistant renderer', () => {
 })
 
 describe('client plugin lifecycle', () => {
-  it('shadows the built-in assistant cell and removes its entry on disposal', async () => {
+  const pendingDisposals: Array<() => Promise<unknown>> = []
+  afterEach(async () => {
+    for (const dispose of pendingDisposals.splice(0)) await dispose()
+  })
+
+  function registerOfficialAssistant(ctx: Context): void {
+    function OfficialAssistant({ node }: Parameters<typeof TypewriterAssistantNodeView>[0]) {
+      return <>{node.data.blocks.map((block, index) => block.kind === 'text'
+        ? <MarkdownText key={index} text={block.text} streaming={node.data.status === 'running'} labels={{ code: { copyLabel: 'Copy', copiedLabel: 'Copied' }, footnotes: 'Footnotes' }} />
+        : null)}</>
+    }
+    ctx.slots.register({ name: 'conversation.chat.node', key: 'assistant-step', priority: 20 } as never, OfficialAssistant as never)
+  }
+
+  it('wraps the official assistant entry in place and restores it on disposal', async () => {
     expect(inject).toEqual(['slots'])
     const ctx = new Context()
     await ctx.plugin(SlotRegistry).await()
@@ -3149,18 +3258,29 @@ describe('client plugin lifecycle', () => {
     } as never, (() => null) as never)
     ctx.slots.register({
       name: 'conversation.chat.node',
+      key: 'assistant-step',
+      priority: 20,
+      children: { 'assistant.child': { kind: 'list', scope: 'session' } },
+    } as never, (() => null) as never)
+    ctx.slots.register({
+      name: 'conversation.chat.node',
       key: 'tool-call',
     } as never, (() => null) as never)
+    const assistant = ctx.slots.entries('conversation.chat.node')
+      .find(entry => entry.options.key === 'assistant-step')!
+    const original = assistant.component
+    const originalOptions = { ...assistant.options }
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
 
-    const keys = ctx.slots.entries('conversation.chat.node').map(entry => entry.options.key)
-    expect(keys).toEqual(expect.arrayContaining(['assistant-step', 'tool-call']))
+    expect(ctx.slots.entries('conversation.chat.node')).toHaveLength(2)
+    expect(assistant.component).not.toBe(original)
+    expect(assistant.options).toEqual(originalOptions)
 
     await fiber.dispose()
-    const leftover = ctx.slots.entries('conversation.chat.node')
-    expect(leftover).toHaveLength(1)
-    expect(leftover[0]?.options.key).toBe('tool-call')
+    expect(ctx.slots.entries('conversation.chat.node')).toHaveLength(2)
+    expect(assistant.component).toBe(original)
+    expect(assistant.options).toEqual(originalOptions)
   })
 
   it('wraps a prior tool-call that already declared children without re-registering', async () => {
@@ -3178,6 +3298,7 @@ describe('client plugin lifecycle', () => {
       key: 'tool-call',
       children: { 'tool.call.toolview': { kind: 'keyed', scope: 'session' } },
     } as never, DummyTool as never)
+    registerOfficialAssistant(ctx)
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
 
@@ -3215,6 +3336,7 @@ describe('client plugin lifecycle', () => {
       key: 'user',
     } as never, UserRow as never)
 
+    registerOfficialAssistant(ctx)
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
 
@@ -3258,6 +3380,7 @@ describe('client plugin lifecycle', () => {
       key: 'context',
     } as never, ContextRow as never)
 
+    registerOfficialAssistant(ctx)
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
 
@@ -3288,12 +3411,15 @@ describe('client plugin lifecycle', () => {
       name: 'root',
       children: { 'conversation.chat.node': { kind: 'keyed', scope: 'session' } },
     } as never, (() => null) as never)
+    registerOfficialAssistant(ctx)
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
     ctx.slots.register({
       name: 'conversation.chat.node',
       key: 'tool-call',
     } as never, LateTool as never)
+    // Slot subscriptions publish registration changes in a microtask.
+    await Promise.resolve()
     const entry = ctx.slots.entries('conversation.chat.node').find(item => item.options.key === 'tool-call')
     expect(entry?.component).not.toBe(LateTool)
     const view = render(createElement(entry?.component as FunctionComponent<{ node: { data: { root: object } } }>, {
@@ -3311,12 +3437,15 @@ describe('client plugin lifecycle', () => {
       name: 'root',
       children: { 'conversation.chat.node': { kind: 'keyed', scope: 'session' } },
     } as never, (() => null) as never)
+    registerOfficialAssistant(ctx)
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
     const component = ctx.slots.entries('conversation.chat.node')[0]?.component
     expect(component).toBeTypeOf('function')
     const view = render(createElement(component as FunctionComponent<Parameters<typeof TypewriterAssistantNodeView>[0]>, props))
-    await fiber.dispose()
+    // Disposal now updates mounted adapter entries to the official component.
+    // Keep the overlay active until the caller has asserted its live behavior.
+    pendingDisposals.push(async () => { await fiber.dispose() })
     return view.container
   }
 
@@ -3340,7 +3469,7 @@ describe('client plugin lifecycle', () => {
     const container = await renderRegisteredView(assistantProps('running', [
       { kind: 'text', text: '**hello**' },
     ]))
-    // Default mode is typewriter: follow host + markdown parsed.
+    // The default adapter preserves the official Markdown renderer inside its follow host.
     expect(container.querySelector(`.${css.follow}`)).not.toBeNull()
     await vi.waitFor(() => expect(container.querySelector('strong')?.textContent).toBe('hello'))
   })
@@ -3412,25 +3541,58 @@ describe('computeQueueReveal', () => {
     expect(computeQueueReveal(0, 16)).toBe(0)
   })
 
+  it('keeps only fractional credit after long frames and a saturated cadence', () => {
+    for (const cadenceClamp of [1, 2, 4, 8]) {
+      let debt = 1000.25
+      for (let frame = 0; frame < 120; frame += 1) {
+        const step = computeAdaptiveQueueStep(6000, frame % 2 === 0 ? 500 : 16, debt, 2, {
+          ...DEFAULT_STREAM_DEBUG_TUNING,
+          cadenceClamp,
+        })
+        expect(step.revealChars).toBeLessThanOrEqual(cadenceClamp)
+        expect(step.debt).toBeGreaterThanOrEqual(0)
+        expect(step.debt).toBeLessThan(1)
+        debt = step.debt
+      }
+    }
+  })
+
+  it('scales sustained saturated reveal budgets without storing a catch-up burst', () => {
+    const integrate = (scale: number): number => {
+      let debt = 0
+      let total = 0
+      for (let frame = 0; frame < 120; frame += 1) {
+        const step = computeAdaptiveQueueStep(6000, 1000 / 60, debt, scale)
+        total += step.revealChars
+        debt = step.debt
+      }
+      return total
+    }
+    expect(integrate(0.55)).toBeCloseTo(integrate(1) * 0.55, 0)
+    expect(integrate(1)).toBe(120 * DEFAULT_STREAM_DEBUG_TUNING.cadenceClamp)
+    const slowed = computeAdaptiveQueueStep(6000, 1000, 0, 0.55)
+    const resumed = computeAdaptiveQueueStep(6000, 1000 / 60, slowed.debt)
+    expect(resumed.revealChars).toBe(DEFAULT_STREAM_DEBUG_TUNING.cadenceClamp)
+    expect(resumed.debt).toBeLessThan(1)
+  })
+
   it('applies live diagnostics tuning without changing the production default', () => {
     const baseline = computeAdaptiveQueueStep(80, 1000 / 60, 0)
-    const explicitDefault = computeAdaptiveQueueStep(
-      80,
-      1000 / 60,
-      0,
-      1,
-      DEFAULT_STREAM_DEBUG_TUNING,
-    )
+    expect(computeAdaptiveQueueStep(80, 1000 / 60, 0, 1, DEFAULT_STREAM_DEBUG_TUNING)).toEqual(baseline)
+    // Compare reveal speed below the configured cadence ceiling. At the
+    // production 4-char ceiling both rates correctly saturate at four.
+    const tuning = { ...DEFAULT_STREAM_DEBUG_TUNING, cadenceClamp: 20 }
+    const uncapped = computeAdaptiveQueueStep(80, 1000 / 60, 0, 1, tuning)
     const tuned = computeAdaptiveQueueStep(80, 1000 / 60, 0, 1, {
-      ...DEFAULT_STREAM_DEBUG_TUNING,
+      ...tuning,
       queuePressure: 1.6,
       revealScale: 1.4,
       maxRevealCps: 900,
     })
 
-    expect(explicitDefault).toEqual(baseline)
-    expect(tuned.speedCps).toBeGreaterThan(baseline.speedCps)
-    expect(tuned.revealChars).toBeGreaterThan(baseline.revealChars)
+    expect(tuned.speedCps).toBeGreaterThan(uncapped.speedCps)
+    expect(tuned.revealChars).toBeGreaterThan(uncapped.revealChars)
+    expect(tuned.revealChars).toBeLessThan(tuning.cadenceClamp)
   })
 })
 

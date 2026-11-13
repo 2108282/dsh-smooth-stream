@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DebugPanel, type DebugPanelProps } from '../src/client/DebugPanel.tsx'
 import { debugRuntime, type DebugPanelFace, type DebugRuntimeState } from '../src/client/debugRuntime.ts'
@@ -152,8 +152,7 @@ describe('render diagnostics panel', () => {
     const { face, setState } = setup()
     const info = screen.getAllByRole('button', { name: en.debugRevealMultiplier })[0]
     if (info === undefined) throw new Error('reveal multiplier info button was not rendered')
-    fireEvent.mouseEnter(info)
-    expect(screen.getByRole('tooltip').textContent).toContain(en.debugTipRevealMultiplier)
+    expect(info.getAttribute('title')).toContain(en.debugTipRevealMultiplier)
 
     fireEvent.click(screen.getByRole('button', { name: en.debugPanelClose }))
     expect(face.edit).toHaveBeenCalledWith({ debugEnabled: false })

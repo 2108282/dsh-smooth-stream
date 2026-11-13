@@ -204,10 +204,12 @@ export class SmoothStreamCardController {
         enabled: true,
         controlScroll: true,
         motionPreference: 'auto' as const,
-        thinkAutoExpand: true,
-        logarithmicFade: true,
-        keepStreamOnToolCall: true,
-        debugEnabled: false,
+        thinkAutoExpand: DEFAULT_STREAM_SETTINGS.thinkAutoExpand,
+        logarithmicFade: DEFAULT_STREAM_SETTINGS.logarithmicFade,
+        fastFold: DEFAULT_STREAM_SETTINGS.fastFold,
+        fastPipeline: DEFAULT_STREAM_SETTINGS.fastPipeline,
+        keepStreamOnToolCall: DEFAULT_STREAM_SETTINGS.keepStreamOnToolCall,
+        debugEnabled: DEFAULT_STREAM_SETTINGS.debugEnabled,
       }
       try {
         const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('dsh-smooth-stream:settings') : null
@@ -222,6 +224,8 @@ export class SmoothStreamCardController {
         motionPreference: fallback.motionPreference,
         thinkAutoExpand: fallback.thinkAutoExpand,
         logarithmicFade: fallback.logarithmicFade,
+        fastFold: fallback.fastFold,
+        fastPipeline: fallback.fastPipeline,
         keepStreamOnToolCall: fallback.keepStreamOnToolCall,
         canUpgrade: false,
       }

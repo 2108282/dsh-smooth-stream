@@ -4,8 +4,9 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { Context } from '@deepseek-ai/cordis'
-import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
+import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
+import { createElement } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apply, inject } from '../src/client/index.ts'
 import { SmoothStreamCard, type SmoothStreamCardProps } from '../src/client/SmoothStreamCard.tsx'
@@ -34,7 +35,10 @@ const developmentView: StreamSettingsView = {
     motionPreference: 'auto',
     thinkAutoExpand: true,
     logarithmicFade: true,
-  canUpgrade: false,
+    fastFold: true,
+    fastPipeline: true,
+    keepStreamOnToolCall: true,
+    canUpgrade: false,
 }
 
 const developmentDebugView: StreamDebugSettingsView = {
@@ -158,13 +162,16 @@ async function bench(options: BenchOptions = {}): Promise<{
 function declareCardSlot(slots: SlotRegistry): () => void {
   return slots.register({
     name: 'root',
-    children: { 'settings.plugin.item': { kind: 'list', scope: 'root' } },
+    children: {
+      'settings.section': { kind: 'list', scope: 'root' },
+      'settings.plugins.tab': { kind: 'list', scope: 'root' },
+    },
   } as never, () => null)
 }
 
 function cardFace(slots: SlotRegistry): SmoothStreamCardFace {
-  const entry = slots.entries('settings.plugin.item')[0]
-  if (entry === undefined) throw new Error('smooth-stream card was not registered')
+  const entry = slots.entries('settings.section').find(item => item.options.id === 'smooth-stream')
+  if (entry === undefined) throw new Error('smooth-stream settings section was not registered')
   return (entry.inject as unknown as () => SmoothStreamCardFace)()
 }
 
@@ -196,12 +203,19 @@ describe('smooth-stream settings card', () => {
     expect(call).toHaveBeenCalledWith(STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.write, expect.objectContaining({ logarithmicFade: false }))
   })
 
-  it('rejects a non-boolean fade response', async () => {
-    const { ctx, slots } = await bench({ readValue: { ...developmentView, logarithmicFade: 'false' } })
+  it('uses shared feature defaults when an older response omits newer settings', async () => {
+    const { ctx, slots } = await bench({ readValue: {
+      ...developmentView,
+      fastFold: undefined,
+      fastPipeline: undefined,
+      keepStreamOnToolCall: undefined,
+    } })
     declareCardSlot(slots)
     await ctx.plugin({ inject: [...inject], apply }).await()
     const face = cardFace(slots)
-    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().status).toBe('unavailable'))
+    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot()).toMatchObject({
+      status: 'ready', fastFold: true, fastPipeline: true, keepStreamOnToolCall: true,
+    }))
   })
   it('uses the standard theme-aware card surface tokens', () => {
     const styles = readFileSync(join(process.cwd(), 'src/client/SmoothStreamCard.module.css'), 'utf8')
@@ -216,27 +230,13 @@ describe('smooth-stream settings card', () => {
     expect(inject).toEqual(['slots'])
   })
 
-  it('registers the namespace as the keyed slot key for the configurable tab', async () => {
-    const { ctx, slots } = await bench()
-    slots.register({
-      name: 'root',
-      children: { 'settings.plugin.item': { kind: 'keyed', scope: 'root' } },
-    } as never, () => null)
-    await ctx.plugin({ inject: [...inject], apply }).await()
-
-    expect(slots.entries('settings.plugin.item').map(entry => entry.options.key))
-      .toEqual(['smooth-stream'])
-  })
-
-  it('registers the card once the plugin-item slot is declared', async () => {
+  it('registers settings section and Plugins tab entries in the native slots', async () => {
     const { ctx, slots } = await bench()
     declareCardSlot(slots)
     await ctx.plugin({ inject: [...inject], apply }).await()
 
-    expect(slots.entries('settings.plugin.item').map(entry => ({
-      id: entry.options.id,
-      key: entry.options.key,
-    }))).toEqual([{ id: 'smooth-stream', key: 'smooth-stream' }])
+    expect(slots.entries('settings.section').map(entry => entry.options.id)).toContain('smooth-stream')
+    expect(slots.entries('settings.plugins.tab').map(entry => entry.options.id)).toContain('smooth-stream-tab')
   })
 
   it('keeps the plugin entry visible when the core settings API filters third-party namespaces', async () => {
@@ -260,7 +260,7 @@ describe('smooth-stream settings card', () => {
     expect(coreDescribe).not.toHaveBeenCalled()
   })
 
-  it('rejects a settings response whose control-scroll flag is malformed', async () => {
+  it('falls back to shared defaults when a settings response is malformed', async () => {
     const { ctx, slots } = await bench({
       readValue: { ...developmentView, controlScroll: 'true' },
     })
@@ -268,7 +268,9 @@ describe('smooth-stream settings card', () => {
     await ctx.plugin({ inject: [...inject], apply }).await()
 
     const face = cardFace(slots)
-    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().status).toBe('unavailable'))
+    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot()).toMatchObject({
+      status: 'ready', fastFold: true, fastPipeline: true,
+    }))
   })
 
   it('labels a link installation as a development version and disables its update action', async () => {
@@ -300,13 +302,16 @@ describe('smooth-stream settings card', () => {
         thinkAutoExpand: false,
       })
     })
-    expect(call).toHaveBeenCalledWith(STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.write, {
+    expect(call.mock.calls.at(-1)).toEqual([STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.write, {
       enabled: true,
       controlScroll: true,
       motionPreference: 'auto',
       thinkAutoExpand: false,
       logarithmicFade: true,
-    })
+      fastFold: true,
+      fastPipeline: true,
+      keepStreamOnToolCall: true,
+    }])
   })
 
   it('stages a motion-preference pick from the radio group without nested labels', async () => {
@@ -377,15 +382,18 @@ describe('smooth-stream settings card', () => {
       debugTuning: { springDamping: 31 },
     }))
 
-    expect(call).toHaveBeenCalledWith(STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.write, {
+    expect(call.mock.calls.at(-1)).toEqual([STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.write, {
       enabled: false,
       controlScroll: true,
       motionPreference: 'auto',
       thinkAutoExpand: true,
       logarithmicFade: true,
+      fastFold: true,
+      fastPipeline: true,
+      keepStreamOnToolCall: true,
       debugEnabled: true,
       debugTuning: tuning,
-    })
+    }])
     expect(call).not.toHaveBeenCalledWith(STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.debugWrite, expect.anything())
   })
 
@@ -499,14 +507,16 @@ describe('smooth-stream settings card', () => {
       .toBeNull()
   })
 
-  it('returns conversation rendering to Harness while the master toggle is off', async () => {
-    function BuiltInAssistant() { return null }
+  it('keeps native entry identity and selects the official renderer while smooth streaming is disabled', async () => {
+    function BuiltInAssistant({ node }: { node: { data: { blocks: readonly { text: string }[] } } }) {
+      return createElement('span', null, node.data.blocks[0]?.text ?? '')
+    }
     function BuiltInTool() { return null }
     const { ctx, slots } = await bench({ view: { ...developmentView, enabled: false } })
     slots.register({
       name: 'root',
       children: {
-        'settings.plugin.item': { kind: 'list', scope: 'root' },
+        'settings.section': { kind: 'list', scope: 'root' },
         'conversation.chat.node': { kind: 'keyed', scope: 'session' },
       },
     } as never, () => null)
@@ -519,22 +529,22 @@ describe('smooth-stream settings card', () => {
       enabled: false,
     }))
 
-    expect(slots.entries('conversation.chat.node').filter(entry => entry.options.priority === -100))
-      .toHaveLength(0)
-    expect(slots.entries('conversation.chat.node').find(entry => entry.options.key === 'tool-call')?.component)
-      .toBe(BuiltInTool)
+    const assistant = slots.entries('conversation.chat.node').find(entry => entry.options.key === 'assistant-step')!
+    const tool = slots.entries('conversation.chat.node').find(entry => entry.options.key === 'tool-call')!
+    expect(assistant.component).not.toBe(BuiltInAssistant)
+    expect(assistant.options.priority).toBeUndefined()
+    expect(assistant.locale).toBeUndefined()
+    expect(tool.component).not.toBe(BuiltInTool)
 
     face.edit({ enabled: true })
-    expect(slots.entries('conversation.chat.node').some(entry => entry.options.priority === -100))
-      .toBe(true)
-    expect(slots.entries('conversation.chat.node').find(entry => entry.options.key === 'tool-call')?.component)
-      .not.toBe(BuiltInTool)
+    expect(assistant.component).not.toBe(BuiltInAssistant)
+    expect(assistant.options.priority).toBeUndefined()
+    expect(tool.component).not.toBe(BuiltInTool)
 
-    face.discard()
-    expect(slots.entries('conversation.chat.node').filter(entry => entry.options.priority === -100))
-      .toHaveLength(0)
-    expect(slots.entries('conversation.chat.node').find(entry => entry.options.key === 'tool-call')?.component)
-      .toBe(BuiltInTool)
+    face.edit({ enabled: false })
+    expect(assistant.component).not.toBe(BuiltInAssistant)
+    expect(assistant.options.priority).toBeUndefined()
+    expect(tool.component).not.toBe(BuiltInTool)
   })
 
   it('does not take over before a saved disabled setting resolves or after its service unloads', async () => {
@@ -548,7 +558,7 @@ describe('smooth-stream settings card', () => {
     slots.register({
       name: 'root',
       children: {
-        'settings.plugin.item': { kind: 'list', scope: 'root' },
+        'settings.section': { kind: 'list', scope: 'root' },
         'conversation.chat.node': { kind: 'keyed', scope: 'session' },
       },
     } as never, () => null)
@@ -556,22 +566,21 @@ describe('smooth-stream settings card', () => {
     slots.register({ name: 'conversation.chat.node', key: 'tool-call' } as never, BuiltInTool as never)
     await ctx.plugin({ inject: [...inject], apply }).await()
 
-    expect(slots.entries('conversation.chat.node').filter(entry => entry.options.priority === -100))
-      .toHaveLength(0)
-    expect(slots.entries('conversation.chat.node').find(entry => entry.options.key === 'tool-call')?.component)
-      .toBe(BuiltInTool)
+    const assistant = slots.entries('conversation.chat.node').find(entry => entry.options.key === 'assistant-step')!
+    const wrappedAssistant = assistant.component
+    expect(assistant.component).not.toBe(BuiltInAssistant)
+    expect(assistant.options.priority).toBeUndefined()
 
     read.resolve()
     await vi.waitFor(() => expect(cardFace(slots).hooks.smoothStreamCard.getSnapshot()).toMatchObject({
       status: 'ready',
       enabled: false,
     }))
+    expect(assistant.component).toBe(wrappedAssistant)
     await removeConnection()
 
-    expect(slots.entries('conversation.chat.node').filter(entry => entry.options.priority === -100))
-      .toHaveLength(0)
-    expect(slots.entries('conversation.chat.node').find(entry => entry.options.key === 'tool-call')?.component)
-      .toBe(BuiltInTool)
+    expect(assistant.component).toBe(wrappedAssistant)
+    expect(assistant.options.priority).toBeUndefined()
     expect(debugRuntime.getSnapshot()).toMatchObject({ enabled: false, dirty: false })
   })
 
@@ -599,27 +608,33 @@ describe('smooth-stream settings card', () => {
     await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot()).toMatchObject({ saving: false }))
   })
 
-  it('shows an unavailable card instead of removing it when its RPC cannot be reached', async () => {
+  it('uses safe defaults when its RPC cannot be reached', async () => {
     const { ctx, slots } = await bench({ failRead: true })
     declareCardSlot(slots)
     await ctx.plugin({ inject: [...inject], apply }).await()
     const face = cardFace(slots)
-    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().status).toBe('unavailable'))
+    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot()).toMatchObject({
+      status: 'ready', fastFold: true, fastPipeline: true,
+    }))
     render(<SmoothStreamCard {...cardProps(face)} />)
 
     expect(screen.getByText(en.title)).toBeTruthy()
   })
 
-  it('streams without the settings surface (no card slot declared)', async () => {
+  it('does not register a competing assistant renderer entry', async () => {
+    function BuiltInAssistant() { return null }
     const { ctx, slots } = await bench()
     slots.register({
       name: 'root',
       children: { 'conversation.chat.node': { kind: 'keyed', scope: 'session' } },
     } as never, () => null)
+    slots.register({ name: 'conversation.chat.node', key: 'assistant-step', locale: 'chat' } as never, BuiltInAssistant as never)
+    const original = slots.entries('conversation.chat.node')[0]!
     await ctx.plugin({ inject: [...inject], apply }).await()
 
-    expect(slots.entries('conversation.chat.node').some(entry => entry.options.key === 'assistant-step'))
-      .toBe(true)
+    expect(slots.entries('conversation.chat.node')).toHaveLength(1)
+    expect(original.options.priority).toBeUndefined()
+    expect(original.locale).toBe('chat')
   })
 
   it('registers the card when the optional settings services arrive after activation', async () => {
@@ -636,8 +651,8 @@ describe('smooth-stream settings card', () => {
     declareCardSlot(slots)
 
     await vi.waitFor(() => {
-      expect(slots.entries('settings.plugin.item').map(entry => entry.options.id))
-        .toEqual(['smooth-stream'])
+      expect(slots.entries('settings.section').map(entry => entry.options.id))
+        .toContain('smooth-stream')
     })
   })
 })
