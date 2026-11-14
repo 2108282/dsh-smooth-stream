@@ -10,6 +10,14 @@
 - 版本：`0.9.0`（适配 DSH `>=0.2.2-rc.2 <0.3.0`，验证目标 `0.2.2-rc.2`）
 - 不含 `node_modules`、用户设置或聊天数据；安装后由 DSH 自行解析 `peerDependencies`。
 
+## 直接从 Git 仓库安装（lib/ 已预编译）
+
+```sh
+pnpm dsh plugin --profile web add github:2108282/dsh-smooth-stream
+```
+
+`lib/client.js`、`lib/index.js` 已随源码提交，仓库不再声明 `prepare`，因此 pnpm 不需要执行任何构建脚本即可直接安装，无需 `onlyBuiltDependencies` 白名单。
+
 ## 用 npm 安装
 
 ```sh
@@ -41,7 +49,7 @@ pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.9.0.tgz
 
 ```sh
 sha256sum dsh-smooth-stream-0.9.0.tgz
-# 期望：6c41f32c3c6cc66ccf501d6a479aa61cf7979fcacc521f090fd217c8c82c751c
+# 期望：4d9da47bb2b8de862f5f4a451c00b2bf72ac69a5a9ebd633907cda28a14bad84
 ```
 
 ## 说明
