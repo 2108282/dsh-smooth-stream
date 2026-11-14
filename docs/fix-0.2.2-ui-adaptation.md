@@ -141,13 +141,25 @@ pnpm pack            # 生成安装包
 
 安装包为 `dsh-smooth-stream-0.9.0.tgz`，只包含 `lib/`、`src/`、`cordis.patch.yml`、README、LICENSE 与 manifest，不含 `node_modules`、用户设置或聊天数据。
 
-预编译包已随仓库提交到 [`dist/`](../dist/README.md)（附 `SHA256SUMS.txt`），可以直接用包管理器安装，不必在本地构建：
+预编译包已随仓库提交到 [`dist/`](../dist/README.md)（附 `SHA256SUMS.txt`），可直接用 npm 安装，不必在本地构建：
 
 ```sh
-pnpm dsh plugin --profile web add https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.9.0.tgz
+# npm（已验证：装出的包 version=0.9.0，含预编译 lib/）
+npm install https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.9.0.tgz
+
+# pnpm：请用 github.com/.../raw/... 形式，raw.githubusercontent 在 pnpm 10 下会报 integrity 缺失
+pnpm add "dsh-smooth-stream@https://github.com/2108282/dsh-smooth-stream/raw/main/dist/dsh-smooth-stream-0.9.0.tgz"
 ```
 
-该 tgz 与 Release 附件逐文件比对一致；Release 附件适合手动下载，仓库内的 `dist/` 才是可被 npm/pnpm 直接拉取的安装源。
+装进 DSH 插件 profile：
+
+```sh
+# 先把包下载到本地，再按路径安装（DSH 的 plugin add 会转发给 pnpm）
+curl -L -O https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.9.0.tgz
+pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.9.0.tgz
+```
+
+该 tgz 与 Release 附件逐文件比对一致；Release 附件适合手动下载，仓库内的 `dist/` 才是能被 npm/pnpm 直接拉取的安装源。
 
 ## 8. 维护约定（防止同类问题复发）
 

@@ -155,7 +155,14 @@ Host 日志中显示 `[dsh-smooth-stream] plugin loaded!` 即表示已成功加�
 不联网构建时，可直接安装仓库里已构建好的安装包（见 [`dist/`](dist/README.md)）：
 
 ```sh
-pnpm dsh plugin --profile web add https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.9.0.tgz
+npm install https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.9.0.tgz
+```
+
+装进 DSH profile 时先下载再用本地路径：
+
+```sh
+curl -L -O https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.9.0.tgz
+pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.9.0.tgz
 ```
 
 卸载命令：`pnpm dsh plugin --profile web remove dsh-smooth-stream`。

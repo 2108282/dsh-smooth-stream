@@ -10,31 +10,34 @@
 - 版本：`0.9.0`（适配 DSH `>=0.2.2-rc.2 <0.3.0`，验证目标 `0.2.2-rc.2`）
 - 不含 `node_modules`、用户设置或聊天数据；安装后由 DSH 自行解析 `peerDependencies`。
 
-## 安装
-
-### 1. 在线：直接装仓库里的包
+## 用 npm 安装
 
 ```sh
-pnpm dsh plugin --profile web add https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.9.0.tgz
+npm install https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.9.0.tgz
 ```
 
-`dsh` 已在 `PATH` 时：
+已验证：安装后 `node_modules/dsh-smooth-stream/package.json` 的 `version` 为 `0.9.0`，且 `lib/client.js`、`lib/index.js` 均已就位，不需要在本地跑构建。
+
+`peerDependencies`（`@deepseek-ai/*`、`react`）由宿主提供；单独装进空项目时 npm 会给出未满足 peer 的提示，属于正常现象。
+
+## 用 pnpm 安装
+
+pnpm 10 对 `raw.githubusercontent.com` 的 tarball 会报 `ERR_PNPM_MISSING_TARBALL_INTEGRITY`，请改用 `github.com/.../raw/...` 形式（已实测通过）：
 
 ```sh
-dsh plugin --profile web add https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.9.0.tgz
+pnpm add "dsh-smooth-stream@https://github.com/2108282/dsh-smooth-stream/raw/main/dist/dsh-smooth-stream-0.9.0.tgz"
 ```
 
-### 2. 离线：先下载再按本地路径安装
+## 装进 DSH 插件 profile
+
+先把包下载到手机/容器任意目录，再按本地路径安装（`dsh plugin add` 会转发给 pnpm）：
 
 ```sh
-# 任意目录
 curl -L -O https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.9.0.tgz
-
-# 安装本地 tarball
 pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.9.0.tgz
 ```
 
-### 3. 校验（可选）
+## 校验（可选）
 
 ```sh
 sha256sum dsh-smooth-stream-0.9.0.tgz
