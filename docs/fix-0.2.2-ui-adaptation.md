@@ -141,6 +141,14 @@ pnpm pack            # 生成安装包
 
 安装包为 `dsh-smooth-stream-0.9.0.tgz`，只包含 `lib/`、`src/`、`cordis.patch.yml`、README、LICENSE 与 manifest，不含 `node_modules`、用户设置或聊天数据。
 
+预编译包已随仓库提交到 [`dist/`](../dist/README.md)（附 `SHA256SUMS.txt`），可以直接用包管理器安装，不必在本地构建：
+
+```sh
+pnpm dsh plugin --profile web add https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.9.0.tgz
+```
+
+该 tgz 与 Release 附件逐文件比对一致；Release 附件适合手动下载，仓库内的 `dist/` 才是可被 npm/pnpm 直接拉取的安装源。
+
 ## 8. 维护约定（防止同类问题复发）
 
 1. **不要静态导入 `@deepseek-ai/*` 运行时符号**：宿主用 `node --import tsx/esm` 启动，tsx 会套用宿主 `tsconfig` 的 `paths`，外部插件的裸导入可能被重定向进宿主源码，一旦宿主改名就会以模块实例化错误炸启动。类型导入（`import type`）不受影响。
