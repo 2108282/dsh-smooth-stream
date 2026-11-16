@@ -8,7 +8,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { ConnectionRpcHandler, PeerScope } from '@deepseek-ai/dsh-client-connection'
 import { afterEach, describe, expect, it } from 'vitest'
 import { STREAM_PACKAGE_NAME, STREAM_PACKAGE_VERSION } from '../src/package-meta.ts'
-import { apply, Config } from '../src/plugin.ts'
+import { apply, Config, StreamSettingsSchema } from '../src/plugin.ts'
 import { STREAM_SETTINGS_RPC, STREAM_SETTINGS_RPC_CHANNEL } from '../src/settings-api.ts'
 import { DEFAULT_STREAM_SETTINGS } from '../src/settings.ts'
 
@@ -78,6 +78,68 @@ async function mountHost(baseUrl: string, sharedHome?: string): Promise<{
 }
 
 describe('smooth-stream host settings', () => {
+  it('persists each recovery mode, defaults missing fields and rejects unknown choices atomically', async () => {
+    expect(StreamSettingsSchema({} as typeof DEFAULT_STREAM_SETTINGS).backgroundRecovery).toBe('catch-up')
+    const host = await mountHost(profileBaseUrl(`link:${process.cwd()}`))
+    for (const mode of ['replay', 'catch-up', 'latest']) {
+      expect(await host.registration.handler(STREAM_SETTINGS_RPC.write, { backgroundRecovery: mode }, signal(), peer)).toMatchObject({ ok: true, value: { backgroundRecovery: mode } })
+      expect(JSON.parse(readFileSync(host.settingsFile, 'utf8')).backgroundRecovery).toBe(mode)
+      expect(await host.registration.handler(STREAM_SETTINGS_RPC.read, {}, signal(), peer)).toMatchObject({ ok: true, value: { backgroundRecovery: mode } })
+    }
+    const persisted = readFileSync(host.settingsFile, 'utf8')
+    expect(await host.registration.handler(STREAM_SETTINGS_RPC.write, { backgroundRecovery: 'unknown' }, signal(), peer)).toMatchObject({ ok: false })
+    expect(readFileSync(host.settingsFile, 'utf8')).toBe(persisted)
+    await host.fiber.dispose()
+  })
+
+  it('defaults physical tuning off and validates the independent flag and cadence', async () => {
+    expect(StreamSettingsSchema({} as typeof DEFAULT_STREAM_SETTINGS).debugTuningEnabled).toBe(false)
+    const host = await mountHost(profileBaseUrl(`link:${process.cwd()}`))
+    expect(await host.registration.handler(STREAM_SETTINGS_RPC.debugRead, {}, signal(), peer))
+      .toMatchObject({ ok: true, value: { debugEnabled: false, debugTuningEnabled: false } })
+    const tuning = { ...DEFAULT_STREAM_SETTINGS.debugTuning, cadenceClamp: 5 }
+    expect(await host.registration.handler(STREAM_SETTINGS_RPC.debugWrite, {
+      debugEnabled: false, debugTuningEnabled: true, tuning,
+    }, signal(), peer)).toMatchObject({ ok: true, value: { debugEnabled: false, debugTuningEnabled: true, tuning } })
+    const persisted = readFileSync(host.settingsFile, 'utf8')
+    for (const payload of [
+      { debugTuningEnabled: 'true' },
+      ...[0, 25, 1.5, '5'].map(cadenceClamp => ({ tuning: { ...tuning, cadenceClamp } })),
+    ]) {
+      expect(await host.registration.handler(STREAM_SETTINGS_RPC.debugWrite, payload, signal(), peer))
+        .toMatchObject({ ok: false, error: { code: 'settings-rejected' } })
+      expect(readFileSync(host.settingsFile, 'utf8')).toBe(persisted)
+    }
+    expect(await host.registration.handler(STREAM_SETTINGS_RPC.write, {
+      debugTuningEnabled: false,
+    }, signal(), peer)).toMatchObject({ ok: true })
+    expect(await host.registration.handler(STREAM_SETTINGS_RPC.debugRead, {}, signal(), peer))
+      .toMatchObject({ ok: true, value: { debugTuningEnabled: false, tuning } })
+    await host.fiber.dispose()
+  })
+
+  it.each([false, true])('preserves legacy effective tuning when debugEnabled=%s', async debugEnabled => {
+    const host = await mountHost(profileBaseUrl(`link:${process.cwd()}`))
+    await host.registration.handler(STREAM_SETTINGS_RPC.debugWrite, { debugEnabled }, signal(), peer)
+    const home = process.env.DSH_HOME as string
+    const saved = JSON.parse(readFileSync(host.settingsFile, 'utf8'))
+    delete saved.debugTuningEnabled
+    writeFileSync(host.settingsFile, JSON.stringify(saved), 'utf8')
+    await host.fiber.dispose()
+    const reloaded = await mountHost(profileBaseUrl(`link:${process.cwd()}`), home)
+    expect(await reloaded.registration.handler(STREAM_SETTINGS_RPC.debugRead, {}, signal(), peer))
+      .toMatchObject({ ok: true, value: { debugEnabled, debugTuningEnabled: debugEnabled } })
+    await reloaded.registration.handler(STREAM_SETTINGS_RPC.debugWrite, { debugEnabled: !debugEnabled }, signal(), peer)
+    expect(JSON.parse(readFileSync(reloaded.settingsFile, 'utf8'))).toMatchObject({
+      debugEnabled: !debugEnabled, debugTuningEnabled: debugEnabled,
+    })
+    await reloaded.fiber.dispose()
+    const explicit = await mountHost(profileBaseUrl(`link:${process.cwd()}`), home)
+    expect(await explicit.registration.handler(STREAM_SETTINGS_RPC.debugRead, {}, signal(), peer))
+      .toMatchObject({ ok: true, value: { debugEnabled: !debugEnabled, debugTuningEnabled: debugEnabled } })
+    await explicit.fiber.dispose()
+  })
+
   it('persists updates, preserves omitted values, and rejects invalid input atomically', async () => {
     const host = await mountHost(profileBaseUrl(`link:${process.cwd()}`))
     const { registration } = host

@@ -18,7 +18,7 @@ import { DebugPanel } from './DebugPanel.tsx'
 import { debugRuntime } from './debugRuntime.ts'
 import { NS as SETTINGS_NS, en, zh } from './locales.ts'
 import { DEFAULT_STREAM_CONFIG, STREAM_BOOT_GLOBAL, type StreamConfig } from '../config.ts'
-import { DEFAULT_STREAM_SETTINGS, type StreamSettings } from '../settings.ts'
+import { DEFAULT_STREAM_SETTINGS, type BackgroundRecovery, type StreamSettings } from '../settings.ts'
 
 /**
  * Cordis services required by the browser half. Only `slots` is load-bearing
@@ -122,12 +122,14 @@ class SettingsCell {
       && next.enabled === this.value.enabled
       && next.controlScroll === this.value.controlScroll
       && next.motionPreference === this.value.motionPreference
+      && next.backgroundRecovery === this.value.backgroundRecovery
       && next.thinkAutoExpand === this.value.thinkAutoExpand
       && next.logarithmicFade === this.value.logarithmicFade
       && next.fastFold === this.value.fastFold
       && next.fastPipeline === this.value.fastPipeline
       && next.keepStreamOnToolCall === this.value.keepStreamOnToolCall
       && next.debugEnabled === this.value.debugEnabled
+      && next.debugTuningEnabled === this.value.debugTuningEnabled
       && next.debugTuning === this.value.debugTuning
     ) return
     this.pending = pending
@@ -214,6 +216,11 @@ export function apply(ctx: ClientContext): void {
     () => settings.getSnapshot().controlScroll,
     () => settings.getSnapshot().controlScroll,
   )
+  const useBackgroundRecovery = (): BackgroundRecovery => useSyncExternalStore(
+    settings.subscribe,
+    () => settings.getSnapshot().backgroundRecovery,
+    () => settings.getSnapshot().backgroundRecovery,
+  )
   // The card talks to the plugin-owned loopback RPC, so the core settings
   // namespace allowlist cannot make it disappear. The stream still applies
   // with defaults when the optional Settings UI or Connection is absent.
@@ -230,6 +237,7 @@ export function apply(ctx: ClientContext): void {
       debugRuntime.syncSettings({
         available: snapshot.debugAvailable,
         enabled: snapshot.debugEnabled,
+        tuningEnabled: snapshot.debugTuningEnabled,
         writable: snapshot.writable && !snapshot.saving,
         dirty: snapshot.dirty,
         status: snapshot.status,
@@ -295,7 +303,7 @@ export function apply(ctx: ClientContext): void {
       const Inner = original
       // Stable across settings/parent updates: do not reset tool-local hooks.
       const Follow = key === 'assistant-step' ? undefined
-        : wrapFollowNodeView(Inner as ComponentType<FollowWrapProps>, useControlScroll)
+        : wrapFollowNodeView(Inner as ComponentType<FollowWrapProps>, useControlScroll, useBackgroundRecovery)
       return function SmoothStreamRendererAdapter(props: AssistantProps & FollowWrapProps) {
         const preferences = useSyncExternalStore(settings.subscribe, settings.getSnapshot, settings.getSnapshot)
         if (!preferences.enabled) return createElement(Inner, props)
@@ -306,6 +314,7 @@ export function apply(ctx: ClientContext): void {
             preferences: {
               controlScroll: preferences.controlScroll,
               motionPreference: preferences.motionPreference,
+              backgroundRecovery: preferences.backgroundRecovery,
               logarithmicFade: preferences.logarithmicFade,
               thinkAutoExpand: preferences.thinkAutoExpand,
               keepStreamOnToolCall: preferences.keepStreamOnToolCall,

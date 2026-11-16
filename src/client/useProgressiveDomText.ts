@@ -8,8 +8,10 @@
  * duplicate accessibility tree is introduced.
  */
 
-import { useLayoutEffect, type RefObject } from 'react'
+import { useLayoutEffect, useRef, type RefObject } from 'react'
 import { computeAdaptiveQueueStep } from './useSmoothStreamContent.ts'
+import type { BackgroundRecovery } from '../settings.ts'
+import { recoveryBudget, RECOVERY_COMMIT_MS, useBackgroundRecovery } from './backgroundRecovery.ts'
 import { debugRuntime } from './debugRuntime.ts'
 
 interface TextRevealRecord {
@@ -57,13 +59,29 @@ export function useProgressiveDomText(
   revealInitial: boolean,
   speedCpsRef: { current: number },
   onSettled?: (() => void) | undefined,
+  onPendingChange?: ((pending: boolean) => void) | undefined,
+  paused = false,
+  backgroundRecovery: BackgroundRecovery = 'catch-up',
 ): void {
+  const callbacks = useRef({ onSettled, onPendingChange })
+  callbacks.current = { onSettled, onPendingChange }
+  const pausedRef = useRef(paused)
+  pausedRef.current = paused
+  const resume = useRef<(() => void) | null>(null)
+  const suspend = useRef<(() => void) | null>(null)
+  const recovery = useBackgroundRecovery(backgroundRecovery, () => suspend.current?.(), () => resume.current?.())
+  const recoveryRef = useRef(recovery)
+  recoveryRef.current = recovery
+  useLayoutEffect(() => { if (!paused) resume.current?.() }, [paused])
   useLayoutEffect(() => {
     const root = rootRef.current
     if (root === null || typeof document === 'undefined') return
 
     let records = ledgerByRoot.get(root)
-    if (!enabled && records === undefined) return
+    if (!enabled && records === undefined) {
+      callbacks.current.onPendingChange?.(false)
+      return
+    }
     if (records === undefined) {
       records = new Map<Text, TextRevealRecord>()
       ledgerByRoot.set(root, records)
@@ -101,6 +119,7 @@ export function useProgressiveDomText(
     }
 
     if (!enabled) {
+      callbacks.current.onPendingChange?.(false)
       snapshotVisible()
       const observer = typeof MutationObserver === 'undefined'
         ? null
@@ -112,6 +131,34 @@ export function useProgressiveDomText(
     }
 
     const pending = new Set<Text>()
+    // Atomic Tool rows share this root's single budget. Keep later call chrome
+    // hidden as well, so icons/running effects cannot all appear before text.
+    const concealed = new Map<HTMLElement, { visibility: string; priority: string }>()
+    let calls: HTMLElement[] | null = null
+    const syncCallVisibility = (): void => {
+      calls ??= [...root.querySelectorAll<HTMLElement>('[data-chat-call-id]')]
+      if (calls.length === 0) return
+      const pendingCalls = new Set<Element>()
+      for (const text of pending) {
+        const call = text.parentElement?.closest('[data-chat-call-id]')
+        if (call) pendingCalls.add(call)
+      }
+      let waitingForEarlier = false
+      for (const call of calls) {
+        const hasPending = pendingCalls.has(call)
+        const hide = pausedRef.current || waitingForEarlier
+        if (hide && !concealed.has(call)) {
+          concealed.set(call, { visibility: call.style.getPropertyValue('visibility'), priority: call.style.getPropertyPriority('visibility') })
+          call.style.setProperty('visibility', 'hidden')
+        } else if (!hide && concealed.has(call)) {
+          const previous = concealed.get(call)!
+          if (previous.visibility) call.style.setProperty('visibility', previous.visibility, previous.priority)
+          else call.style.removeProperty('visibility')
+          concealed.delete(call)
+        }
+        if (hasPending) waitingForEarlier = true
+      }
+    }
     const internalWrites = new WeakMap<Text, string>()
     let rafId = 0
     let lastFrame: number | null = null
@@ -127,7 +174,9 @@ export function useProgressiveDomText(
       debugRuntime.reportStream(streamId, null)
       if (announcedSettled) return
       announcedSettled = true
-      onSettled?.()
+      callbacks.current.onPendingChange?.(false)
+      callbacks.current.onSettled?.()
+      recoveryRef.current.finish()
     }
 
     const write = (node: Text, value: string): void => {
@@ -137,7 +186,14 @@ export function useProgressiveDomText(
     }
 
     const enqueue = (node: Text, full: string, preserve: TextRevealRecord | undefined): void => {
-      if (!revealable(node, root)) return
+      if (!revealable(node, root)) {
+        // React can replace a paused source with whitespace or move it into a
+        // non-revealable surface. Never replay the previous registered value.
+        pending.delete(node)
+        records.delete(node)
+        internalWrites.delete(node)
+        return
+      }
       const chars = [...full]
       const preserved = preserve === undefined
         ? 0
@@ -147,6 +203,8 @@ export function useProgressiveDomText(
       if (preserved < chars.length) {
         pending.add(node)
         announcedSettled = false
+        recoveryRef.current.observeBacklog(true)
+        callbacks.current.onPendingChange?.(true)
       } else {
         pending.delete(node)
       }
@@ -173,13 +231,14 @@ export function useProgressiveDomText(
     }
 
     const scheduleFrame = (): void => {
-      if (stopped || pending.size === 0 || rafId !== 0) return
+      syncCallVisibility()
+      if (stopped || pausedRef.current || recoveryRef.current.hidden() || pending.size === 0 || rafId !== 0) return
       rafId = requestAnimationFrame(frame)
     }
 
     const frame = (now: number): void => {
       rafId = 0
-      if (stopped) return
+      if (stopped || pausedRef.current || recoveryRef.current.hidden()) { lastFrame = null; return }
       if (pending.size === 0) {
         announceSettled()
         return
@@ -191,16 +250,36 @@ export function useProgressiveDomText(
         return
       }
       const elapsed = Math.max(0, now - lastFrame)
+      const playback = recoveryRef.current
+      playback.detectGap(elapsed)
+      if (playback.recovering() && playback.mode() === 'latest') {
+        for (const text of pending) {
+          const record = records.get(text)
+          if (record && text.isConnected) {
+            write(text, record.full)
+            records.set(text, { ...record, shown: record.chars.length })
+          }
+        }
+        pending.clear()
+        syncCallVisibility()
+        announceSettled()
+        playback.finish()
+        return
+      }
+      const catchingUp = playback.recovering() && playback.mode() === 'catch-up'
+      if (catchingUp && elapsed < RECOVERY_COMMIT_MS) { scheduleFrame(); return }
       lastFrame = now
       let backlog = 0
       for (const node of pending) {
         const record = records.get(node)
         if (record !== undefined) backlog += record.chars.length - record.shown
       }
-      const step = computeAdaptiveQueueStep(backlog, elapsed, debt, 1, debugRuntime.activeTuning())
-      debt = step.debt
-      speedCpsRef.current = step.speedCps
-      let remaining = step.revealChars
+      const tuning = debugRuntime.activeTuning()
+      const step = computeAdaptiveQueueStep(backlog, Math.min(elapsed, 32), debt, 1, tuning)
+      const budget = catchingUp ? recoveryBudget(backlog, elapsed, debt, tuning) : { chars: step.revealChars, debt: step.debt }
+      debt = budget.debt
+      speedCpsRef.current = catchingUp ? budget.chars * 1000 / Math.max(1, elapsed) : step.speedCps
+      let remaining = budget.chars
       for (const node of [...pending]) {
         if (remaining <= 0) break
         const record = records.get(node)
@@ -237,10 +316,13 @@ export function useProgressiveDomText(
         displayedChars,
         active: pending.size > 0,
       })
+      syncCallVisibility()
       if (pending.size === 0) announceSettled()
       else scheduleFrame()
     }
 
+    resume.current = () => { lastFrame = null; debt = 0; scheduleFrame() }
+    suspend.current = () => { cancelAnimationFrame(rafId); rafId = 0; lastFrame = null; debt = 0 }
     visit(root, revealInitial)
 
     const observer = typeof MutationObserver === 'undefined'
@@ -257,9 +339,11 @@ export function useProgressiveDomText(
               enqueue(node, node.data, records.get(node))
               continue
             }
+            calls = null
             for (const removed of mutation.removedNodes) forget(removed)
             for (const added of mutation.addedNodes) visit(added, true)
           }
+          syncCallVisibility()
           if (pending.size === 0) announceSettled()
           else scheduleFrame()
         })
@@ -269,6 +353,9 @@ export function useProgressiveDomText(
 
     return () => {
       stopped = true
+      resume.current = null
+      suspend.current = null
+      callbacks.current.onPendingChange?.(false)
       cancelAnimationFrame(rafId)
       observer?.disconnect()
       for (const [node, record] of records) {
@@ -281,8 +368,13 @@ export function useProgressiveDomText(
         }
       }
       pending.clear()
+      for (const [call, previous] of concealed) {
+        if (previous.visibility) call.style.setProperty('visibility', previous.visibility, previous.priority)
+        else call.style.removeProperty('visibility')
+      }
+      concealed.clear()
       speedCpsRef.current = 35
       debugRuntime.reportStream(streamId, null)
     }
-  }, [enabled, onSettled, revealInitial, rootRef, speedCpsRef])
+  }, [enabled, revealInitial, rootRef, speedCpsRef])
 }

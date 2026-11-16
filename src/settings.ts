@@ -10,7 +10,9 @@
 /** Settings namespace registered by the Host and served through the plugin RPC. */
 export const STREAM_SETTINGS_NS = 'smooth-stream'
 
-/** Runtime knobs exposed only while the diagnostics switch is enabled. */
+export type BackgroundRecovery = 'replay' | 'catch-up' | 'latest'
+
+/** Runtime knobs selected by the independent physical-tuning switch. */
 export interface StreamDebugTuning {
   /** Multiplier applied to the reveal cadence (1 = preset default). */
   revealScale: number
@@ -83,6 +85,8 @@ export interface StreamSettings {
    * RDP sessions, forced browser flags) would otherwise bypass it silently.
    */
   motionPreference: StreamMotionPreference
+  /** How queued content resumes after the page returns to the foreground. */
+  backgroundRecovery: BackgroundRecovery
   /**
    * Whether a reasoning ("Think") block auto-expands while it is the
    * streaming tail. Off keeps the block collapsed — the user can still open
@@ -105,6 +109,8 @@ export interface StreamSettings {
   keepStreamOnToolCall: boolean
   /** Whether the live renderer diagnostics panel is enabled. */
   debugEnabled: boolean
+  /** Apply saved physical parameters independently of HUD diagnostics. */
+  debugTuningEnabled: boolean
   /** Values edited by the diagnostics panel. */
   debugTuning: StreamDebugTuning
 }
@@ -114,11 +120,13 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   enabled: true,
   controlScroll: true,
   motionPreference: 'force-smooth',
+  backgroundRecovery: 'catch-up',
   thinkAutoExpand: true,
   logarithmicFade: true,
   fastFold: true,
   fastPipeline: true,
   keepStreamOnToolCall: true,
   debugEnabled: false,
+  debugTuningEnabled: false,
   debugTuning: DEFAULT_STREAM_DEBUG_TUNING,
 }

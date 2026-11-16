@@ -33,6 +33,7 @@ const developmentView: StreamSettingsView = {
     enabled: true,
     controlScroll: true,
     motionPreference: 'auto',
+    backgroundRecovery: 'catch-up',
     thinkAutoExpand: true,
     logarithmicFade: true,
     fastFold: true,
@@ -43,6 +44,7 @@ const developmentView: StreamSettingsView = {
 
 const developmentDebugView: StreamDebugSettingsView = {
   debugEnabled: false,
+  debugTuningEnabled: false,
   tuning: DEFAULT_STREAM_DEBUG_TUNING,
 }
 
@@ -99,7 +101,9 @@ async function bench(options: BenchOptions = {}): Promise<{
         enabled?: unknown
         thinkAutoExpand?: unknown
         logarithmicFade?: boolean
+        backgroundRecovery?: StreamSettingsView['backgroundRecovery']
         debugEnabled?: unknown
+        debugTuningEnabled?: boolean
         debugTuning?: unknown
       }
       if (typeof settings.enabled !== 'boolean' || typeof settings.thinkAutoExpand !== 'boolean') {
@@ -114,9 +118,10 @@ async function bench(options: BenchOptions = {}): Promise<{
         enabled: settings.enabled,
         thinkAutoExpand: settings.thinkAutoExpand,
         logarithmicFade: settings.logarithmicFade ?? view.logarithmicFade,
+        backgroundRecovery: settings.backgroundRecovery ?? view.backgroundRecovery,
       }
       if (typeof settings.debugEnabled === 'boolean' && typeof settings.debugTuning === 'object' && settings.debugTuning !== null) {
-        debugView = { debugEnabled: settings.debugEnabled, tuning: settings.debugTuning as StreamDebugSettingsView['tuning'] }
+        debugView = { debugEnabled: settings.debugEnabled, debugTuningEnabled: settings.debugTuningEnabled ?? false, tuning: settings.debugTuning as StreamDebugSettingsView['tuning'] }
       }
       return { ok: true as const, value: view }
     }
@@ -127,7 +132,7 @@ async function bench(options: BenchOptions = {}): Promise<{
       return { ok: true as const, value: response }
     }
     if (endpoint === STREAM_SETTINGS_RPC.debugWrite) {
-      const settings = payload as { debugEnabled?: unknown; tuning?: unknown }
+      const settings = payload as { debugEnabled?: unknown; debugTuningEnabled?: boolean; tuning?: unknown }
       if (typeof settings.debugEnabled !== 'boolean'
         || typeof settings.tuning !== 'object' || settings.tuning === null) {
         return { ok: false as const, error: { code: 'internal', message: 'bad debug payload' } }
@@ -137,6 +142,7 @@ async function bench(options: BenchOptions = {}): Promise<{
       }
       debugView = {
         debugEnabled: settings.debugEnabled,
+        debugTuningEnabled: settings.debugTuningEnabled ?? false,
         tuning: settings.tuning as StreamDebugSettingsView['tuning'],
       }
       return { ok: true as const, value: debugView }
@@ -186,6 +192,50 @@ function cardProps(face: SmoothStreamCardFace): SmoothStreamCardProps {
 }
 
 describe('smooth-stream settings card', () => {
+  it('saves the physical tuning switch with HUD off, retains tuning, and supports discard', async () => {
+    const tuning = { ...DEFAULT_STREAM_DEBUG_TUNING, cadenceClamp: 5 }
+    const { ctx, slots, call } = await bench({ debugView: {
+      debugEnabled: false, debugTuningEnabled: false, tuning,
+    } })
+    declareCardSlot(slots)
+    await ctx.plugin({ inject: [...inject], apply }).await()
+    const face = cardFace(slots)
+    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().debugAvailable).toBe(true))
+    const card = render(<SmoothStreamCard {...cardProps(face)} />)
+    fireEvent.click(screen.getByRole('button', { name: /smooth stream/i }))
+    const toggle = screen.getByRole('checkbox', { name: new RegExp(`^${en.debugTuningEnabled}`) })
+    fireEvent.click(toggle)
+    expect(debugRuntime.activeTuning()).toEqual(tuning)
+    expect(debugRuntime.isEnabled()).toBe(false)
+    face.save()
+    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().dirty).toBe(false))
+    expect(call).toHaveBeenCalledWith(STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.debugWrite, {
+      debugEnabled: false, debugTuningEnabled: true, tuning,
+    })
+    face.edit({ debugEnabled: true })
+    face.edit({ debugEnabled: false })
+    expect(debugRuntime.activeTuning()).toEqual(tuning)
+    face.discard()
+    face.edit({ debugTuningEnabled: false })
+    expect(debugRuntime.activeTuning()).toEqual(DEFAULT_STREAM_DEBUG_TUNING)
+    face.discard()
+    expect(debugRuntime.activeTuning()).toEqual(tuning)
+    card.rerender(<SmoothStreamCard {...cardProps(face)} />)
+    expect((screen.getByRole('checkbox', { name: new RegExp(`^${en.debugTuningEnabled}`) }) as HTMLInputElement).checked).toBe(true)
+  })
+
+  it('normalizes a legacy debug response without re-coupling later HUD edits', async () => {
+    const legacy = { debugEnabled: true, tuning: { ...DEFAULT_STREAM_DEBUG_TUNING, cadenceClamp: 5 } }
+    const { ctx, slots } = await bench({ debugView: legacy as StreamDebugSettingsView })
+    declareCardSlot(slots)
+    await ctx.plugin({ inject: [...inject], apply }).await()
+    const face = cardFace(slots)
+    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().debugAvailable).toBe(true))
+    expect(face.hooks.smoothStreamCard.getSnapshot().debugTuningEnabled).toBe(true)
+    face.edit({ debugEnabled: false })
+    expect(debugRuntime.activeTuning().cadenceClamp).toBe(5)
+  })
+
   it('defaults old responses to fade enabled and saves the independent switch', async () => {
     const { logarithmicFade: _fade, ...oldView } = developmentView
     const { ctx, slots, call } = await bench({ readValue: oldView })
@@ -306,6 +356,7 @@ describe('smooth-stream settings card', () => {
       enabled: true,
       controlScroll: true,
       motionPreference: 'auto',
+      backgroundRecovery: 'catch-up',
       thinkAutoExpand: false,
       logarithmicFade: true,
       fastFold: true,
@@ -323,7 +374,7 @@ describe('smooth-stream settings card', () => {
     render(<SmoothStreamCard {...cardProps(face)} />)
 
     fireEvent.click(screen.getByRole('button', { name: /smooth stream/i }))
-    const radios = screen.getAllByRole('radio')
+    const radios = [...screen.getByRole('radiogroup', { name: en.motionPreference }).querySelectorAll('input[type=radio]')]
     expect(radios).toHaveLength(3)
     expect(radios.map(radio => (radio as HTMLInputElement).checked)).toEqual([true, false, false])
     fireEvent.click(radios[1]!)
@@ -337,6 +388,30 @@ describe('smooth-stream settings card', () => {
     const choiceLabel = radios[1]!.closest('label')
     expect(choiceLabel).not.toBeNull()
     expect(choiceLabel!.parentElement!.closest('label')).toBeNull()
+  })
+
+  it('selects, saves and reloads each background playback choice', async () => {
+    const { ctx, slots, call } = await bench()
+    declareCardSlot(slots)
+    await ctx.plugin({ inject: [...inject], apply }).await()
+    const face = cardFace(slots)
+    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().status).toBe('ready'))
+    const rendered = render(<SmoothStreamCard {...cardProps(face)} />)
+    fireEvent.click(screen.getByRole('button', { name: /smooth stream/i }))
+    const group = screen.getByRole('radiogroup', { name: en.backgroundRecovery })
+    const radios = [...group.querySelectorAll<HTMLInputElement>('input[type=radio]')]
+    expect(radios.map(input => input.checked)).toEqual([false, true, false])
+    for (const [index, mode] of ['replay', 'catch-up', 'latest'].entries()) {
+      const current = screen.getByRole('radiogroup', { name: en.backgroundRecovery }).querySelectorAll<HTMLInputElement>('input[type=radio]')
+      fireEvent.click(current[index]!)
+      expect(face.hooks.smoothStreamCard.getSnapshot().backgroundRecovery).toBe(mode)
+      face.save()
+      await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().dirty).toBe(false))
+      expect(call).toHaveBeenCalledWith(STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.write, expect.objectContaining({ backgroundRecovery: mode }))
+      face.reload()
+      await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot()).toMatchObject({ status: 'ready', backgroundRecovery: mode }))
+      rendered.rerender(<SmoothStreamCard {...cardProps(face)} />)
+    }
   })
 
   it('stages and persists the diagnostics switch through its compatible endpoint', async () => {
@@ -358,6 +433,7 @@ describe('smooth-stream settings card', () => {
     }))
     expect(call).toHaveBeenCalledWith(STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.debugWrite, {
       debugEnabled: true,
+      debugTuningEnabled: false,
       tuning: DEFAULT_STREAM_DEBUG_TUNING,
     })
   })
@@ -386,12 +462,14 @@ describe('smooth-stream settings card', () => {
       enabled: false,
       controlScroll: true,
       motionPreference: 'auto',
+      backgroundRecovery: 'catch-up',
       thinkAutoExpand: true,
       logarithmicFade: true,
       fastFold: true,
       fastPipeline: true,
       keepStreamOnToolCall: true,
       debugEnabled: true,
+      debugTuningEnabled: false,
       debugTuning: tuning,
     }])
     expect(call).not.toHaveBeenCalledWith(STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.debugWrite, expect.anything())
@@ -438,6 +516,7 @@ describe('smooth-stream settings card', () => {
 
     setDebugView({
       debugEnabled: true,
+      debugTuningEnabled: false,
       tuning: { ...DEFAULT_STREAM_DEBUG_TUNING, springDamping: 31 },
     })
     face.reload()

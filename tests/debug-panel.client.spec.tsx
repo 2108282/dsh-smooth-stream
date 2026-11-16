@@ -16,6 +16,7 @@ function state(overrides: Partial<DebugRuntimeState> = {}): DebugRuntimeState {
   return {
     available: true,
     enabled: true,
+    tuningEnabled: false,
     writable: true,
     dirty: false,
     status: 'ready',
@@ -72,6 +73,33 @@ function setup(overrides: Partial<DebugRuntimeState> = {}) {
 }
 
 describe('render diagnostics panel', () => {
+  it.each([false, true])('applies saved physical tuning independently of HUD=%s', hud => {
+    const tuning = { ...DEFAULT_STREAM_DEBUG_TUNING, cadenceClamp: 5, maxRevealCps: 220 }
+    debugRuntime.syncSettings({ available: true, enabled: hud, tuningEnabled: true,
+      writable: true, dirty: false, status: 'ready', tuning })
+    expect(debugRuntime.activeTuning()).toEqual(tuning)
+    expect(debugRuntime.isEnabled()).toBe(hud)
+    debugRuntime.edit({ debugEnabled: false })
+    expect(debugRuntime.activeTuning()).toEqual(tuning)
+    debugRuntime.edit({ debugTuningEnabled: false })
+    expect(debugRuntime.activeTuning()).toEqual(DEFAULT_STREAM_DEBUG_TUNING)
+    expect(debugRuntime.tuning()).toEqual(tuning)
+    debugRuntime.edit({ debugEnabled: true })
+    expect(debugRuntime.activeTuning()).toEqual(DEFAULT_STREAM_DEBUG_TUNING)
+  })
+
+  it('publishes a cadence-only settings update and keeps explicit tuning off', () => {
+    const input = { available: true, enabled: false, tuningEnabled: true,
+      writable: true, dirty: false, status: 'ready' as const }
+    debugRuntime.syncSettings({ ...input, tuning: DEFAULT_STREAM_DEBUG_TUNING })
+    debugRuntime.syncSettings({ ...input, tuning: { ...DEFAULT_STREAM_DEBUG_TUNING, cadenceClamp: 5 } })
+    expect(debugRuntime.activeTuning().cadenceClamp).toBe(5)
+    debugRuntime.syncSettings({ ...input, enabled: true, tuningEnabled: false })
+    expect(debugRuntime.activeTuning().cadenceClamp).toBe(4)
+    debugRuntime.syncSettings({ ...input, available: false })
+    expect(debugRuntime.activeTuning()).toEqual(DEFAULT_STREAM_DEBUG_TUNING)
+  })
+
   it('clears stale measurements whenever diagnostics are toggled or a source stops', () => {
     vi.spyOn(performance, 'now').mockReturnValue(1000)
     debugRuntime.syncSettings({

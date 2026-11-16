@@ -4,10 +4,10 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `dsh-smooth-stream-0.9.0.tgz` | 预编译安装包（含 `lib/`、`src/`、`cordis.patch.yml`、README、LICENSE、manifest） |
+| `dsh-smooth-stream-0.10.0.tgz` | 预编译安装包（含 `lib/`、`src/`、`cordis.patch.yml`、README、LICENSE、manifest） |
 | `SHA256SUMS.txt` | 校验值 |
 
-- 版本：`0.9.0`（适配 DSH `>=0.2.2-rc.2 <0.3.0`，验证目标 `0.2.2-rc.2`）
+- 版本：`0.10.0`（适配 DSH `>=0.2.2-rc.2 <0.3.0`；自动化测试依赖 `0.2.2-rc.2`，当前安装环境为 `0.2.2-rc.3`，尚未在真实 QuickChat 中验证）
 - 不含 `node_modules`、用户设置或聊天数据；安装后由 DSH 自行解析 `peerDependencies`。
 
 ## 直接从 Git 仓库安装（lib/ 已预编译）
@@ -21,10 +21,10 @@ pnpm dsh plugin --profile web add github:2108282/dsh-smooth-stream
 ## 用 npm 安装
 
 ```sh
-npm install https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.9.0.tgz
+npm install https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.0.tgz
 ```
 
-已验证：安装后 `node_modules/dsh-smooth-stream/package.json` 的 `version` 为 `0.9.0`，且 `lib/client.js`、`lib/index.js` 均已就位，不需要在本地跑构建。
+已验证：安装后 `node_modules/dsh-smooth-stream/package.json` 的 `version` 为 `0.10.0`，且 `lib/client.js`、`lib/index.js` 均已就位，不需要在本地跑构建。
 
 `peerDependencies`（`@deepseek-ai/*`、`react`）由宿主提供；单独装进空项目时 npm 会给出未满足 peer 的提示，属于正常现象。
 
@@ -33,7 +33,7 @@ npm install https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dis
 pnpm 10 对 `raw.githubusercontent.com` 的 tarball 会报 `ERR_PNPM_MISSING_TARBALL_INTEGRITY`，请改用 `github.com/.../raw/...` 形式（已实测通过）：
 
 ```sh
-pnpm add "dsh-smooth-stream@https://github.com/2108282/dsh-smooth-stream/raw/main/dist/dsh-smooth-stream-0.9.0.tgz"
+pnpm add "dsh-smooth-stream@https://github.com/2108282/dsh-smooth-stream/raw/main/dist/dsh-smooth-stream-0.10.0.tgz"
 ```
 
 ## 装进 DSH 插件 profile
@@ -41,15 +41,15 @@ pnpm add "dsh-smooth-stream@https://github.com/2108282/dsh-smooth-stream/raw/mai
 先把包下载到手机/容器任意目录，再按本地路径安装（`dsh plugin add` 会转发给 pnpm）：
 
 ```sh
-curl -L -O https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.9.0.tgz
-pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.9.0.tgz
+curl -L -O https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.0.tgz
+pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.10.0.tgz
 ```
 
 ## 校验（可选）
 
 ```sh
-sha256sum dsh-smooth-stream-0.9.0.tgz
-# 期望：4d9da47bb2b8de862f5f4a451c00b2bf72ac69a5a9ebd633907cda28a14bad84
+sha256sum dsh-smooth-stream-0.10.0.tgz
+# 期望：b18c8ecb45077ac04e0402615a947d579902e7d055f303c0fa20b5ebc749e4ed
 ```
 
 ## 说明
@@ -58,7 +58,7 @@ sha256sum dsh-smooth-stream-0.9.0.tgz
 
   ```sh
   pnpm dsh plugin --profile web remove dsh-smooth-stream
-  pnpm dsh plugin --profile web add https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.9.0.tgz
+  pnpm dsh plugin --profile web add https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.0.tgz
   ```
 
 - 安装后重启/刷新 DSH 页面，浏览器才会加载新的 `lib/client.js`。

@@ -61,17 +61,19 @@ export const StreamSettingsSchema: Schema<StreamSettings> = Schema.object({
     Schema.const('force-smooth'),
     Schema.const('force-reduced'),
   ] as const).default(DEFAULT_STREAM_SETTINGS.motionPreference),
+  backgroundRecovery: Schema.union(['replay', 'catch-up', 'latest'] as const).default(DEFAULT_STREAM_SETTINGS.backgroundRecovery),
   thinkAutoExpand: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.thinkAutoExpand),
   logarithmicFade: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.logarithmicFade),
   fastFold: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.fastFold),
   fastPipeline: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.fastPipeline),
   keepStreamOnToolCall: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.keepStreamOnToolCall),
   debugEnabled: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.debugEnabled),
+  debugTuningEnabled: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.debugTuningEnabled),
   debugTuning: Schema.object({
     revealScale: Schema.number().min(0.25).max(2).default(DEFAULT_STREAM_SETTINGS.debugTuning.revealScale),
     queuePressure: Schema.number().min(0).max(2).default(DEFAULT_STREAM_SETTINGS.debugTuning.queuePressure),
     maxRevealCps: Schema.number().min(120).max(1000).default(DEFAULT_STREAM_SETTINGS.debugTuning.maxRevealCps),
-    cadenceClamp: Schema.number().min(1).max(24).default(DEFAULT_STREAM_SETTINGS.debugTuning.cadenceClamp ?? 4),
+    cadenceClamp: Schema.number().step(1).min(1).max(24).default(DEFAULT_STREAM_SETTINGS.debugTuning.cadenceClamp ?? 4),
     springStiffness: Schema.number().min(40).max(320).default(DEFAULT_STREAM_SETTINGS.debugTuning.springStiffness),
     springDamping: Schema.number().min(8).max(80).default(DEFAULT_STREAM_SETTINGS.debugTuning.springDamping),
     springMass: Schema.number().min(0.5).max(3).default(DEFAULT_STREAM_SETTINGS.debugTuning.springMass),
@@ -102,7 +104,14 @@ export function apply(ctx: Context, config: Config): void {
     try {
       if (existsSync(SETTINGS_FILE)) {
         const saved = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
-        return StreamSettingsSchema(saved)
+        // Legacy files tied physical tuning to the HUD switch. Preserve that
+        // effective state once; subsequent saves persist the independent flag.
+        return StreamSettingsSchema({
+          ...saved,
+          debugTuningEnabled: saved.debugTuningEnabled === undefined
+            ? saved.debugEnabled === true
+            : saved.debugTuningEnabled,
+        })
       }
     } catch (e) {
       console.warn('[dsh-smooth-stream] loadSettings error:', e)
@@ -140,6 +149,7 @@ export function apply(ctx: Context, config: Config): void {
           enabled: currentSettings.enabled,
           controlScroll: currentSettings.controlScroll,
           motionPreference: currentSettings.motionPreference,
+          backgroundRecovery: currentSettings.backgroundRecovery,
           thinkAutoExpand: currentSettings.thinkAutoExpand,
           logarithmicFade: currentSettings.logarithmicFade,
           fastFold: currentSettings.fastFold ?? DEFAULT_STREAM_SETTINGS.fastFold,
@@ -151,6 +161,7 @@ export function apply(ctx: Context, config: Config): void {
 
       const debugView = (): StreamDebugSettingsView => ({
         debugEnabled: currentSettings.debugEnabled,
+        debugTuningEnabled: currentSettings.debugTuningEnabled,
         tuning: { ...currentSettings.debugTuning },
       })
 
@@ -163,6 +174,8 @@ export function apply(ctx: Context, config: Config): void {
           && tuning.queuePressure >= 0 && tuning.queuePressure <= 2
           && typeof tuning.maxRevealCps === 'number'
           && tuning.maxRevealCps >= 120 && tuning.maxRevealCps <= 1000
+          && (tuning.cadenceClamp === undefined || (typeof tuning.cadenceClamp === 'number'
+            && Number.isInteger(tuning.cadenceClamp) && tuning.cadenceClamp >= 1 && tuning.cadenceClamp <= 24))
           && typeof tuning.springStiffness === 'number'
           && tuning.springStiffness >= 40 && tuning.springStiffness <= 320
           && typeof tuning.springDamping === 'number'
@@ -199,15 +212,15 @@ export function apply(ctx: Context, config: Config): void {
         }
         const next = payload as Record<string, unknown>
         const allowedKeys = new Set([
-          'enabled', 'controlScroll', 'motionPreference', 'thinkAutoExpand', 'logarithmicFade',
-          'fastFold', 'fastPipeline', 'keepStreamOnToolCall', 'debugEnabled', 'debugTuning',
+          'enabled', 'controlScroll', 'motionPreference', 'backgroundRecovery', 'thinkAutoExpand', 'logarithmicFade',
+          'fastFold', 'fastPipeline', 'keepStreamOnToolCall', 'debugEnabled', 'debugTuningEnabled', 'debugTuning',
         ])
         if (Object.keys(next).some(key => !allowedKeys.has(key))) {
           return rejectedSettings('settings payload contains an unknown field')
         }
         const booleanKeys = [
           'enabled', 'controlScroll', 'thinkAutoExpand', 'logarithmicFade',
-          'fastFold', 'fastPipeline', 'keepStreamOnToolCall', 'debugEnabled',
+          'fastFold', 'fastPipeline', 'keepStreamOnToolCall', 'debugEnabled', 'debugTuningEnabled',
         ] as const
         if (booleanKeys.some(key => key in next && typeof next[key] !== 'boolean')) {
           return rejectedSettings('settings payload contains an invalid boolean')
@@ -217,6 +230,12 @@ export function apply(ctx: Context, config: Config): void {
           && next.motionPreference !== 'force-smooth'
           && next.motionPreference !== 'force-reduced') {
           return rejectedSettings('settings payload contains an invalid motionPreference')
+        }
+        if ('backgroundRecovery' in next
+          && next.backgroundRecovery !== 'replay'
+          && next.backgroundRecovery !== 'catch-up'
+          && next.backgroundRecovery !== 'latest') {
+          return rejectedSettings('settings payload contains an invalid backgroundRecovery')
         }
         if ('debugTuning' in next && !validDebugTuning(next.debugTuning)) {
           return rejectedSettings('settings payload contains invalid debugTuning')
@@ -244,12 +263,15 @@ export function apply(ctx: Context, config: Config): void {
             },
           }
         }
-        const next = payload as { debugEnabled?: unknown; tuning?: unknown }
-        if (Object.keys(next).some(key => key !== 'debugEnabled' && key !== 'tuning')) {
+        const next = payload as { debugEnabled?: unknown; debugTuningEnabled?: unknown; tuning?: unknown }
+        if (Object.keys(next).some(key => key !== 'debugEnabled' && key !== 'debugTuningEnabled' && key !== 'tuning')) {
           return rejectedSettings('debug settings contain an unknown field')
         }
         if (next.debugEnabled !== undefined && typeof next.debugEnabled !== 'boolean') {
           return rejectedSettings('debugEnabled must be a boolean')
+        }
+        if (next.debugTuningEnabled !== undefined && typeof next.debugTuningEnabled !== 'boolean') {
+          return rejectedSettings('debugTuningEnabled must be a boolean')
         }
         if (next.tuning !== undefined && !validDebugTuning(next.tuning)) {
           return rejectedSettings('debug tuning is invalid')
@@ -257,6 +279,7 @@ export function apply(ctx: Context, config: Config): void {
         currentSettings = StreamSettingsSchema({
           ...currentSettings,
           ...(next.debugEnabled === undefined ? {} : { debugEnabled: next.debugEnabled }),
+          ...(next.debugTuningEnabled === undefined ? {} : { debugTuningEnabled: next.debugTuningEnabled }),
           ...(next.tuning === undefined ? {} : {
             debugTuning: { ...currentSettings.debugTuning, ...(next.tuning as object) },
           }),

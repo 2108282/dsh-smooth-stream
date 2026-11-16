@@ -38,12 +38,14 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
       enabled: true,
       controlScroll: true,
       motionPreference: 'auto' as const,
+      backgroundRecovery: 'catch-up' as const,
       thinkAutoExpand: false,
       logarithmicFade: true,
       fastFold: true,
       fastPipeline: true,
       keepStreamOnToolCall: true,
       debugEnabled: false,
+      debugTuningEnabled: false,
       debugTuning: {
         revealScale: 1,
         queuePressure: 0.8,
@@ -169,6 +171,34 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                   </span>
                   <span className={css.hint}>{t('logarithmicFadeHint')}</span>
                 </label>
+                <div className={state.enabled ? css.field : `${css.field} ${css.fieldDisabled}`}>
+                  <span className={css.fieldHead}>
+                    <span className={css.label}>{t('backgroundRecovery')}</span>
+                  </span>
+                  <span className={css.hint}>{t('backgroundRecoveryHint')}</span>
+                  <div role="radiogroup" aria-label={t('backgroundRecovery')}>
+                    {([
+                      ['replay', 'backgroundReplay', 'backgroundReplayHint'],
+                      ['catch-up', 'backgroundCatchUp', 'backgroundCatchUpHint'],
+                      ['latest', 'backgroundLatest', 'backgroundLatestHint'],
+                    ] as const).map(([value, label, hint]) => (
+                      <div key={value}>
+                        <label className={css.choice}>
+                          <input
+                            type="radio"
+                            className={css.choiceInput}
+                            name="smooth-stream-background-recovery"
+                            checked={state.backgroundRecovery === value}
+                            disabled={!state.writable || state.saving || !state.enabled}
+                            onChange={() => { edit({ backgroundRecovery: value }) }}
+                          />
+                          {t(label)}
+                        </label>
+                        <p className={css.hint}>{t(hint)}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
                 {/* Motion preference is a radio group, so this row is a div:
                     nesting the choice labels inside a field <label> would be
                     illegal HTML (label within label) and browsers route the
@@ -223,6 +253,19 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                     />
                   </span>
                   <span className={css.hint}>{t('keepStreamOnToolCallHint')}</span>
+                </label>
+                <label className={state.debugAvailable ? css.field : `${css.field} ${css.fieldDisabled}`}>
+                  <span className={css.fieldHead}>
+                    <span className={css.label}>{t('debugTuningEnabled')}</span>
+                    <input
+                      type="checkbox"
+                      className={css.toggle}
+                      checked={state.debugTuningEnabled}
+                      disabled={!state.debugAvailable || !state.writable || state.saving}
+                      onChange={(event) => { edit({ debugTuningEnabled: event.target.checked }) }}
+                    />
+                  </span>
+                  <span className={css.hint}>{t('debugTuningEnabledHint')}</span>
                 </label>
                 <label className={state.debugAvailable ? css.field : `${css.field} ${css.fieldDisabled}`}>
                   <span className={css.fieldHead}>

@@ -1,4 +1,5 @@
-import { createElement, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentType } from 'react'
+import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentType } from 'react'
+import type { BackgroundRecovery } from '../settings.ts'
 import { FollowHost } from './FollowHost.tsx'
 import { useProgressiveDomText } from './useProgressiveDomText.ts'
 import { relayScope, streamRelay } from './streamRelay.ts'
@@ -51,6 +52,16 @@ export function isSettledChatNode(node: unknown): boolean {
     }
   }
   return false
+}
+
+function isInterruptedChatNode(node: unknown): boolean {
+  if (node === null || typeof node !== 'object' || !('data' in node)) return false
+  const data = node.data
+  if (data === null || typeof data !== 'object') return false
+  if ('status' in data && data.status === 'interrupted') return true
+  if ('state' in data && data.state === 'stopped') return true
+  return 'root' in data && data.root !== null && typeof data.root === 'object'
+    && 'state' in data.root && data.root.state === 'stopped'
 }
 
 function openAgentLocation(node: unknown): boolean {
@@ -159,14 +170,17 @@ function liveAgentTailMode(root: HTMLElement): 'turn' | 'handoff' | null {
 export function wrapFollowNodeView(
   Inner: ComponentType<FollowWrapProps>,
   useControlScroll?: () => boolean,
+  useRecoveryMode?: () => BackgroundRecovery,
 ) {
   return function TypewriterFollowNodeView(props: FollowWrapProps) {
     const controlScroll = useControlScroll?.() ?? true
+    const recoveryMode = useRecoveryMode?.() ?? 'catch-up'
     const speedCpsRef = useRef(35)
     const hostRef = useRef<HTMLDivElement>(null)
     const isSettled = isSettledChatNode(props.node)
     const growing = !isSettled && isGrowingChatNode(props.node)
-    const structurallyFollowable = !isSettled && isFollowableChatNode(props.node)
+    // A fast result mounted in the open Turn still needs a presentation seat.
+    const structurallyFollowable = isFollowableChatNode(props.node) || openAgentLocation(props.node)
     const structuralRef = useRef(structurallyFollowable)
     const [runtimeFollowable, setRuntimeFollowable] = useState(false)
     const runtimePersistentRef = useRef(false)
@@ -174,7 +188,9 @@ export function wrapFollowNodeView(
     const seenFollowable = useRef(structurallyFollowable)
     if (structurallyFollowable) seenFollowable.current = true
     const settledOpenGrowth = isSettled && seenFollowable.current && openAgentLocation(props.node)
-    const followable = (!isSettled && (structurallyFollowable || runtimeFollowable)) || settledOpenGrowth
+    const followable = !isInterruptedChatNode(props.node)
+      && (seenFollowable.current || (!isSettled && runtimeFollowable) || settledOpenGrowth)
+    const [revealPending, setRevealPending] = useState(followable)
     const revealInitialRef = useRef(true)
     const [entering, setEntering] = useState(structurallyFollowable)
     const [growthPulse, setGrowthPulse] = useState(false)
@@ -191,7 +207,7 @@ export function wrapFollowNodeView(
     entranceActiveRef.current = entering || growthPulse
 
     // 内存接力棒门禁：检查前序思考或正文是否仍在活跃输出中
-    const scope = relayScope(props.node, props.sessionId)
+    const scope = useMemo(() => relayScope(props.node, props.sessionId), [props.node, props.sessionId])
     const relayBlocked = useSyncExternalStore(
       streamRelay.subscribe,
       () => streamRelay.isBlocked(scope, 'tool'),
@@ -202,11 +218,24 @@ export function wrapFollowNodeView(
     const toolPresence = nodeKind === 'tool-call'
       || (props.node !== null && typeof props.node === 'object' && 'data' in props.node
         && props.node.data !== null && typeof props.node.data === 'object' && 'root' in props.node.data)
+    const part = toolPresence ? 'tool' : 'output'
+    const lease = useRef<symbol | null>(null)
+    const pendingRef = useRef(followable)
+    const updatePending = useCallback((pending: boolean) => {
+      pendingRef.current = pending
+      setRevealPending(pending)
+      if (lease.current !== null) streamRelay.update(lease.current, pending)
+    }, [])
     useLayoutEffect(() => {
-      if (!toolPresence) return
-      const token = streamRelay.acquire(scope, 'tool', false)
-      return () => { streamRelay.release(token) }
-    }, [scope.session, scope.turn, scope.step, scope.node, scope.order, toolPresence])
+      // Reserve in layout before any frame can reveal. Running backend work
+      // does not retain the baton once its currently available text is drained.
+      const token = streamRelay.acquire(scope, part, pendingRef.current)
+      lease.current = token
+      return () => {
+        streamRelay.release(token)
+        if (lease.current === token) lease.current = null
+      }
+    }, [scope.session, scope.turn, scope.step, scope.node, scope.order, part])
 
     // DOM 前驱时序门禁：仅检查并监听紧邻的前驱卡片，切断全容器广播风暴
     const [precedingTyping, setPrecedingTyping] = useState(false)
@@ -291,10 +320,13 @@ export function wrapFollowNodeView(
 
     useProgressiveDomText(
       hostRef,
-      !waiting && followable,
+      followable,
       revealInitialRef.current,
       speedCpsRef,
       runtimeFollowable ? finishRuntimeReveal : undefined,
+      updatePending,
+      waiting,
+      recoveryMode,
     )
 
     useLayoutEffect(() => {
@@ -355,7 +387,7 @@ export function wrapFollowNodeView(
       const el = hostRef.current
       if (!el) return
       const card = el.closest('[data-chat-flow-key]')
-      const settled = isSettled || (!growing && !entering && !growthPulse && !waiting)
+      const settled = !revealPending && !waiting && (isSettled || (!growing && !entering && !growthPulse))
       if (settled) {
         el.setAttribute('data-smooth-stream-settled', 'true')
         if (card instanceof HTMLElement) card.setAttribute('data-smooth-stream-settled', 'true')
@@ -363,10 +395,10 @@ export function wrapFollowNodeView(
         el.removeAttribute('data-smooth-stream-settled')
         if (card instanceof HTMLElement) card.removeAttribute('data-smooth-stream-settled')
       }
-    }, [isSettled, growing, entering, growthPulse, waiting])
+    }, [isSettled, growing, entering, growthPulse, waiting, revealPending])
 
     return (
-      <div style={waiting ? { opacity: 0, pointerEvents: 'none', height: 0, overflow: 'hidden' } : { transition: 'opacity 0.15s ease' }}>
+      <div data-smooth-stream-phase={waiting ? 'waiting' : revealPending ? 'typing' : 'settled'} data-smooth-stream-typing={revealPending ? 'true' : undefined} style={waiting ? { opacity: 0, pointerEvents: 'none', height: 0, overflow: 'hidden' } : { transition: 'opacity 0.15s ease' }}>
         <FollowHost
           active={!waiting && growing}
           entrance={!waiting && (entering || growthPulse)}

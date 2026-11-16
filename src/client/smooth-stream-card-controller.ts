@@ -4,6 +4,7 @@ import { createSnapshotStore, type SnapshotStore } from './clientStore.ts'
 import {
   DEFAULT_STREAM_DEBUG_TUNING,
   DEFAULT_STREAM_SETTINGS,
+  type BackgroundRecovery,
   type StreamDebugTuning,
   type StreamMotionPreference,
   type StreamSettings,
@@ -25,12 +26,14 @@ export interface SmoothStreamCardState {
   enabled: boolean
   controlScroll: boolean
   motionPreference: StreamMotionPreference
+  backgroundRecovery: BackgroundRecovery
   thinkAutoExpand: boolean
   logarithmicFade: boolean
   fastFold: boolean
   fastPipeline: boolean
   keepStreamOnToolCall: boolean
   debugEnabled: boolean
+  debugTuningEnabled: boolean
   debugTuning: StreamDebugTuning
   debugAvailable: boolean
   version: string | undefined
@@ -58,8 +61,8 @@ export class SmoothStreamCardController {
   private readonly store = createSnapshotStore<SmoothStreamCardState>(this.projection())
   private loaded: StreamSettingsView | undefined
   private loadedDebug: StreamDebugSettingsView | undefined
-  private stagedBase: Pick<StreamSettings, 'enabled' | 'controlScroll' | 'motionPreference' | 'thinkAutoExpand' | 'logarithmicFade' | 'fastFold' | 'fastPipeline' | 'keepStreamOnToolCall'> | undefined
-  private stagedDebug: Pick<StreamSettings, 'debugEnabled' | 'debugTuning'> | undefined
+  private stagedBase: Pick<StreamSettings, 'enabled' | 'controlScroll' | 'motionPreference' | 'backgroundRecovery' | 'thinkAutoExpand' | 'logarithmicFade' | 'fastFold' | 'fastPipeline' | 'keepStreamOnToolCall'> | undefined
+  private stagedDebug: Pick<StreamSettings, 'debugEnabled' | 'debugTuningEnabled' | 'debugTuning'> | undefined
   private saving = false
   private failed = false
   private upgrading = false
@@ -96,12 +99,13 @@ export class SmoothStreamCardController {
       hooks: { smoothStreamCard: this.store },
       edit: (patch) => {
         if (this.saving) return
-        if (patch.enabled !== undefined || patch.controlScroll !== undefined || patch.motionPreference !== undefined || patch.thinkAutoExpand !== undefined || patch.logarithmicFade !== undefined || patch.fastFold !== undefined || patch.fastPipeline !== undefined || patch.keepStreamOnToolCall !== undefined) {
+        if (patch.enabled !== undefined || patch.controlScroll !== undefined || patch.motionPreference !== undefined || patch.backgroundRecovery !== undefined || patch.thinkAutoExpand !== undefined || patch.logarithmicFade !== undefined || patch.fastFold !== undefined || patch.fastPipeline !== undefined || patch.keepStreamOnToolCall !== undefined) {
           this.stagedBase = {
             ...this.baseValues(),
             ...(patch.enabled === undefined ? {} : { enabled: patch.enabled }),
             ...(patch.controlScroll === undefined ? {} : { controlScroll: patch.controlScroll }),
             ...(patch.motionPreference === undefined ? {} : { motionPreference: patch.motionPreference }),
+            ...(patch.backgroundRecovery === undefined ? {} : { backgroundRecovery: patch.backgroundRecovery }),
             ...(patch.thinkAutoExpand === undefined ? {} : { thinkAutoExpand: patch.thinkAutoExpand }),
             ...(patch.logarithmicFade === undefined ? {} : { logarithmicFade: patch.logarithmicFade }),
             ...(patch.fastFold === undefined ? {} : { fastFold: patch.fastFold }),
@@ -109,10 +113,11 @@ export class SmoothStreamCardController {
             ...(patch.keepStreamOnToolCall === undefined ? {} : { keepStreamOnToolCall: patch.keepStreamOnToolCall }),
           }
         }
-        if (this.loadedDebug !== undefined && (patch.debugEnabled !== undefined || patch.debugTuning !== undefined)) {
+        if (this.loadedDebug !== undefined && (patch.debugEnabled !== undefined || patch.debugTuningEnabled !== undefined || patch.debugTuning !== undefined)) {
           this.stagedDebug = {
             ...this.debugValues(),
             ...(patch.debugEnabled === undefined ? {} : { debugEnabled: patch.debugEnabled }),
+            ...(patch.debugTuningEnabled === undefined ? {} : { debugTuningEnabled: patch.debugTuningEnabled }),
             ...(patch.debugTuning === undefined ? {} : { debugTuning: { ...this.debugValues().debugTuning, ...patch.debugTuning } }),
           }
         }
@@ -151,11 +156,12 @@ export class SmoothStreamCardController {
     }
   }
 
-  private baseValues(): Pick<StreamSettings, 'enabled' | 'controlScroll' | 'motionPreference' | 'thinkAutoExpand' | 'logarithmicFade' | 'fastFold' | 'fastPipeline' | 'keepStreamOnToolCall'> {
+  private baseValues(): Pick<StreamSettings, 'enabled' | 'controlScroll' | 'motionPreference' | 'backgroundRecovery' | 'thinkAutoExpand' | 'logarithmicFade' | 'fastFold' | 'fastPipeline' | 'keepStreamOnToolCall'> {
     return this.stagedBase ?? {
       enabled: this.loaded?.enabled ?? DEFAULT_STREAM_SETTINGS.enabled,
       controlScroll: this.loaded?.controlScroll ?? DEFAULT_STREAM_SETTINGS.controlScroll,
       motionPreference: this.loaded?.motionPreference ?? DEFAULT_STREAM_SETTINGS.motionPreference,
+      backgroundRecovery: this.loaded?.backgroundRecovery ?? DEFAULT_STREAM_SETTINGS.backgroundRecovery,
       thinkAutoExpand: this.loaded?.thinkAutoExpand ?? DEFAULT_STREAM_SETTINGS.thinkAutoExpand,
       logarithmicFade: this.loaded?.logarithmicFade ?? DEFAULT_STREAM_SETTINGS.logarithmicFade,
       fastFold: this.loaded?.fastFold ?? DEFAULT_STREAM_SETTINGS.fastFold,
@@ -164,9 +170,10 @@ export class SmoothStreamCardController {
     }
   }
 
-  private debugValues(): Pick<StreamSettings, 'debugEnabled' | 'debugTuning'> {
+  private debugValues(): Pick<StreamSettings, 'debugEnabled' | 'debugTuningEnabled' | 'debugTuning'> {
     return this.stagedDebug ?? {
       debugEnabled: this.loadedDebug?.debugEnabled ?? DEFAULT_STREAM_SETTINGS.debugEnabled,
+      debugTuningEnabled: this.loadedDebug?.debugTuningEnabled ?? DEFAULT_STREAM_SETTINGS.debugTuningEnabled,
       debugTuning: this.loadedDebug?.tuning ?? DEFAULT_STREAM_DEBUG_TUNING,
     }
   }
@@ -204,6 +211,7 @@ export class SmoothStreamCardController {
         enabled: true,
         controlScroll: true,
         motionPreference: 'auto' as const,
+        backgroundRecovery: DEFAULT_STREAM_SETTINGS.backgroundRecovery,
         thinkAutoExpand: DEFAULT_STREAM_SETTINGS.thinkAutoExpand,
         logarithmicFade: DEFAULT_STREAM_SETTINGS.logarithmicFade,
         fastFold: DEFAULT_STREAM_SETTINGS.fastFold,
@@ -216,12 +224,13 @@ export class SmoothStreamCardController {
         if (saved) Object.assign(fallback, JSON.parse(saved))
       } catch {}
       this.loaded = {
-        version: '0.9.0',
+        version: '0.10.0',
         installation: 'development',
         writable: true,
         enabled: fallback.enabled,
         controlScroll: fallback.controlScroll,
         motionPreference: fallback.motionPreference,
+        backgroundRecovery: fallback.backgroundRecovery,
         thinkAutoExpand: fallback.thinkAutoExpand,
         logarithmicFade: fallback.logarithmicFade,
         fastFold: fallback.fastFold,
@@ -250,6 +259,7 @@ export class SmoothStreamCardController {
         if (combined) {
           this.loadedDebug = {
             debugEnabled: debug.debugEnabled,
+            debugTuningEnabled: debug.debugTuningEnabled,
             tuning: { ...debug.debugTuning },
           }
           this.stagedDebug = undefined

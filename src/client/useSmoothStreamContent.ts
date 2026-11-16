@@ -14,8 +14,9 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { DEFAULT_STREAM_DEBUG_TUNING, type StreamDebugTuning } from '../settings.ts'
+import { DEFAULT_STREAM_DEBUG_TUNING, type StreamDebugTuning, type BackgroundRecovery } from '../settings.ts'
 import { debugRuntime } from './debugRuntime.ts'
+import { recoveryBudget, RECOVERY_COMMIT_MS, useBackgroundRecovery } from './backgroundRecovery.ts'
 
 export type StreamSmoothingPreset = 'realtime' | 'balanced' | 'silky'
 
@@ -263,6 +264,7 @@ export function computeRevealStep(config: StreamSmoothingPresetConfig, input: Re
 
 export interface UseSmoothStreamContentOptions {
   enabled?: boolean
+  backgroundRecovery?: BackgroundRecovery | undefined
   /** The producer has completed; drain queued text without live backpressure. */
   inputComplete?: boolean
   preset?: StreamSmoothingPreset
@@ -305,6 +307,7 @@ export function useSmoothStreamContent(
   content: string,
   {
     enabled = true,
+    backgroundRecovery = 'catch-up',
     inputComplete = false,
     preset = 'balanced',
     shouldHoldBack,
@@ -329,6 +332,7 @@ export function useSmoothStreamContent(
   const targetContentRef = useRef(initialContent)
   const targetCharsRef = useRef([...initialContent])
   const targetCountRef = useRef(countChars(initialContent))
+  const replacementPendingRef = useRef(false)
 
   const emaCpsRef = useRef(seedCps)
   const lastInputTsRef = useRef(0)
@@ -367,6 +371,17 @@ export function useSmoothStreamContent(
   }, [])
 
   const startFrameLoopRef = useRef<() => void>(() => {})
+  const recovery = useBackgroundRecovery(backgroundRecovery, () => {
+    stopFrameLoop()
+  }, () => {
+    queueDebtRef.current = 0
+    settleCpsRef.current = null
+    lastDrainCpsRef.current = 0
+    lastFrameTsRef.current = null
+    startFrameLoopRef.current()
+  })
+  const recoveryRef = useRef(recovery)
+  recoveryRef.current = recovery
 
   const syncImmediate = useCallback(
     (nextContent: string) => {
@@ -405,14 +420,23 @@ export function useSmoothStreamContent(
   // Non-append-only edits and disabled streams still sync immediately below.
 
   const startFrameLoop = useCallback(() => {
-    if (rafRef.current !== null) return
+    if (rafRef.current !== null || recoveryRef.current.hidden()) return
 
     const tick = (now: number) => {
+      if (recoveryRef.current.hidden()) { stopFrameLoop(); return }
+      if (replacementPendingRef.current) {
+        replacementPendingRef.current = false
+        displayedContentRef.current = ''
+        displayedCountRef.current = 0
+        setDisplayedContent('')
+      }
       const targetCount = targetCountRef.current
       const displayedCount = displayedCountRef.current
       const backlog = targetCount - displayedCount
+      recoveryRef.current.observeBacklog(backlog > 0)
 
       if (backlog <= 0) {
+        recoveryRef.current.finish()
         queueDebtRef.current = 0
         settleCpsRef.current = null
         const speedOut = speedOutRef.current
@@ -429,6 +453,21 @@ export function useSmoothStreamContent(
       }
 
       const frameIntervalMs = Math.max(0, now - lastFrameTsRef.current)
+      const playback = recoveryRef.current
+      playback.detectGap(frameIntervalMs)
+      const recovering = playback.recovering()
+      const recoveryMode = playback.mode()
+      // A latest snapshot is still ordered behind its predecessor; only its
+      // character animation is skipped, never the conversation relay.
+      if (recovering && recoveryMode === 'latest' && holdBackRef.current?.() !== true) {
+        syncImmediate(targetContentRef.current)
+        playback.finish()
+        return
+      }
+      if (recovering && recoveryMode === 'catch-up' && frameIntervalMs < RECOVERY_COMMIT_MS) {
+        rafRef.current = requestAnimationFrame(tick)
+        return
+      }
       const dtSeconds = Math.max(0.001, Math.min(frameIntervalMs / 1000, 0.12))
       lastFrameTsRef.current = now
 
@@ -442,7 +481,18 @@ export function useSmoothStreamContent(
       let revealChars: number
       let revealSpeedCps: number
       let nextQueueDebt = 0
-      if (producerComplete) {
+      if (recovering && recoveryMode === 'catch-up') {
+        const step = recoveryBudget(backlog, frameIntervalMs, queueDebtRef.current, debugTuning)
+        revealChars = step.chars
+        nextQueueDebt = step.debt
+        revealSpeedCps = revealChars * 1000 / Math.max(1, frameIntervalMs)
+      } else if (recovering) {
+        const step = computeAdaptiveQueueStep(backlog, Math.min(frameIntervalMs, 32), queueDebtRef.current,
+          revealScaleOutRef.current?.current ?? 1, debugTuning)
+        revealChars = step.revealChars
+        revealSpeedCps = step.speedCps
+        nextQueueDebt = step.debt
+      } else if (producerComplete) {
         // Backpressure protects live layout. Once input has ended, retaining
         // that scale only makes a completed response keep typing onscreen.
         // Keep one TARGET velocity for the whole completion tail — recomputing
@@ -542,7 +592,7 @@ export function useSmoothStreamContent(
     }
 
     rafRef.current = requestAnimationFrame(tick)
-  }, [config, seedCps, stopFrameLoop, steadyCps])
+  }, [config, seedCps, stopFrameLoop, steadyCps, syncImmediate])
 
   // Run AFTER the commit's DOM mutations, before paint: the follower's
   // same-task correction hook.
@@ -574,6 +624,13 @@ export function useSmoothStreamContent(
     const appendOnly = content.startsWith(prevTargetContent)
 
     if (!appendOnly) {
+      if (recoveryRef.current.hidden()) {
+        targetContentRef.current = content
+        targetCharsRef.current = [...content]
+        targetCountRef.current = targetCharsRef.current.length
+        replacementPendingRef.current = true
+        return
+      }
       syncImmediate(content)
       return
     }

@@ -39,6 +39,7 @@ export interface DebugMetrics {
 export interface DebugRuntimeState {
   available: boolean
   enabled: boolean
+  tuningEnabled: boolean
   writable: boolean
   dirty: boolean
   status: 'loading' | 'ready' | 'unavailable'
@@ -46,7 +47,7 @@ export interface DebugRuntimeState {
   metrics: DebugMetrics
 }
 
-export type DebugSettingsPatch = Partial<Pick<StreamSettings, 'debugEnabled' | 'debugTuning'>>
+export type DebugSettingsPatch = Partial<Pick<StreamSettings, 'debugEnabled' | 'debugTuningEnabled' | 'debugTuning'>>
 
 export interface DebugPanelFace {
   hooks: {
@@ -114,6 +115,7 @@ const EMPTY_METRICS: DebugMetrics = {
 const INITIAL_STATE: DebugRuntimeState = {
   available: false,
   enabled: false,
+  tuningEnabled: false,
   writable: false,
   dirty: false,
   status: 'loading',
@@ -147,6 +149,7 @@ function sameTuning(left: StreamDebugTuning, right: StreamDebugTuning): boolean 
   return left.revealScale === right.revealScale
     && left.queuePressure === right.queuePressure
     && left.maxRevealCps === right.maxRevealCps
+    && left.cadenceClamp === right.cadenceClamp
     && left.springStiffness === right.springStiffness
     && left.springDamping === right.springDamping
     && left.springMass === right.springMass
@@ -215,9 +218,9 @@ export const debugRuntime = {
     return store.getSnapshot().tuning
   },
 
-  /** Production values remain untouched until the user explicitly enables diagnostics. */
+  /** Saved physical parameters are independent of HUD instrumentation. */
   activeTuning(): StreamDebugTuning {
-    return store.getSnapshot().enabled ? store.getSnapshot().tuning : DEFAULT_STREAM_DEBUG_TUNING
+    return store.getSnapshot().tuningEnabled ? store.getSnapshot().tuning : DEFAULT_STREAM_DEBUG_TUNING
   },
 
   bindSettings(nextActions: DebugSettingsActions | undefined): () => void {
@@ -231,6 +234,7 @@ export const debugRuntime = {
   syncSettings(input: {
     available?: boolean
     enabled: boolean
+    tuningEnabled?: boolean
     writable: boolean
     dirty: boolean
     status: DebugRuntimeState['status']
@@ -242,6 +246,7 @@ export const debugRuntime = {
     // explicitly reports that the RPC is unavailable.
     const available = input.available ?? true
     const enabled = available && input.enabled
+    const tuningEnabled = available && (input.tuningEnabled ?? false)
     const availabilityChanged = current.available !== available
     const enabledChanged = current.enabled !== enabled
     if (availabilityChanged || enabledChanged) resetMetrics()
@@ -251,6 +256,7 @@ export const debugRuntime = {
     if (
       current.available === available
       && current.enabled === enabled
+      && current.tuningEnabled === tuningEnabled
       && current.writable === input.writable
       && current.dirty === input.dirty
       && current.status === input.status
@@ -260,6 +266,7 @@ export const debugRuntime = {
       ...current,
       available,
       enabled,
+      tuningEnabled,
       writable: input.writable,
       dirty: input.dirty,
       status: input.status,
@@ -271,6 +278,7 @@ export const debugRuntime = {
   edit(patch: DebugSettingsPatch): void {
     const current = store.getSnapshot()
     const enabled = patch.debugEnabled ?? current.enabled
+    const tuningEnabled = patch.debugTuningEnabled ?? current.tuningEnabled
     const enabledChanged = current.enabled !== enabled
     if (enabledChanged) resetMetrics()
     const tuning = patch.debugTuning === undefined
@@ -279,12 +287,14 @@ export const debugRuntime = {
     store.set({
       ...current,
       enabled,
+      tuningEnabled,
       dirty: true,
       tuning,
       metrics: enabledChanged || !enabled ? EMPTY_METRICS : current.metrics,
     })
     actions?.edit({
       ...(patch.debugEnabled === undefined ? {} : { debugEnabled: patch.debugEnabled }),
+      ...(patch.debugTuningEnabled === undefined ? {} : { debugTuningEnabled: patch.debugTuningEnabled }),
       ...(patch.debugTuning === undefined ? {} : { debugTuning: tuning }),
     })
   },

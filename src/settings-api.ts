@@ -29,6 +29,8 @@ export interface StreamSettingsView {
   controlScroll: boolean
   /** How the reveal honors the OS reduced-motion preference. */
   motionPreference: import('./settings.ts').StreamMotionPreference
+  /** Foreground recovery policy for content accumulated in the background. */
+  backgroundRecovery: import('./settings.ts').BackgroundRecovery
   /** Current resolved preference. */
   thinkAutoExpand: boolean
   /** Whether new answer/thinking text fades into its original color. */
@@ -46,6 +48,7 @@ export interface StreamSettingsView {
 /** Debug-only settings returned by the diagnostics RPC. */
 export interface StreamDebugSettingsView {
   debugEnabled: boolean
+  debugTuningEnabled: boolean
   tuning: import('./settings.ts').StreamDebugTuning
 }
 

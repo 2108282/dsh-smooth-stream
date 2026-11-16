@@ -7,13 +7,13 @@ export interface RelayScope {
   node: string
   order: number
 }
-export type RelayPart = 'reasoning' | 'response' | 'tool'
+export type RelayPart = 'reasoning' | 'response' | 'tool' | 'output'
 interface Lease {
   scope: RelayScope
   part: RelayPart
   active: boolean
 }
-const PART_ORDER: Record<RelayPart, number> = { reasoning: 0, response: 1, tool: 2 }
+const PART_ORDER: Record<RelayPart, number> = { reasoning: 0, response: 1, tool: 2, output: 2 }
 
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' ? value as Record<string, unknown> : {}
@@ -43,6 +43,7 @@ function precedes(a: Lease, scope: RelayScope, part: RelayPart): boolean {
   if (!sameTurn(a.scope, scope)) return false
   if (a.scope.step !== scope.step) return a.scope.step < scope.step
   if (a.scope.node === scope.node) return PART_ORDER[a.part] < PART_ORDER[part]
+  // Event order covers tools, context, commands and future keyed Agent rows.
   if (a.scope.order !== scope.order) return a.scope.order < scope.order
   return PART_ORDER[a.part] < PART_ORDER[part]
 }
@@ -73,7 +74,7 @@ export class StreamRelay {
 
   isBlocked(scope: RelayScope, part: RelayPart): boolean {
     for (const lease of this.leases.values()) {
-      if (lease.active && lease.part !== 'tool' && precedes(lease, scope, part)) return true
+      if (lease.active && precedes(lease, scope, part)) return true
     }
     return false
   }

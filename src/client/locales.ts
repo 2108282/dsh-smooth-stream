@@ -61,7 +61,10 @@ export type SmoothStreamLocaleKey =
   | 'fastFold' | 'fastFoldHint'
   | 'fastPipeline' | 'fastPipelineHint'
   | 'keepStreamOnToolCall' | 'keepStreamOnToolCallHint'
+  | 'backgroundRecovery' | 'backgroundRecoveryHint' | 'backgroundReplay' | 'backgroundReplayHint'
+  | 'backgroundCatchUp' | 'backgroundCatchUpHint' | 'backgroundLatest' | 'backgroundLatestHint'
   | 'debugEnabled' | 'debugEnabledHint' | 'debugUnavailable'
+  | 'debugTuningEnabled' | 'debugTuningEnabledHint'
   | 'debugPanelTitle' | 'debugPanelToggle' | 'debugPanelClose' | 'debugGuide'
   | 'debugLive' | 'debugIdle' | 'debugUnsaved'
   | 'debugSave' | 'debugDiscard' | 'debugReset' | 'debugCopy' | 'debugCopied'
@@ -89,6 +92,14 @@ export const en: Record<SmoothStreamLocaleKey, string> = {
   enabledHint: 'Let this plugin render and follow streaming replies. Turn off to use the built-in Harness renderer.',
   controlScroll: 'Take over scrolling',
   controlScrollHint: 'On by default; smooth-stream writes the conversation scroll position. Turn off to leave bottom-follow to Harness.',
+  backgroundRecovery: 'Background recovery',
+  backgroundRecoveryHint: 'Choose how queued text is displayed when returning to the page. Task execution is unchanged.',
+  backgroundReplay: 'Continue at normal speed',
+  backgroundReplayHint: 'Resume from the previous display position with small frame budgets, including completed replies.',
+  backgroundCatchUp: 'Bounded catch-up',
+  backgroundCatchUpHint: 'Catch up at a bounded rate, with at most 16 characters per commit and at least 40ms between commits.',
+  backgroundLatest: 'Show latest immediately',
+  backgroundLatestHint: 'Skip queued character animation on return, then reveal new text normally. Existing row order is preserved.',
   motionPreference: 'Motion',
   motionPreferenceHint: 'How streaming responds to the system reduce-motion setting.',
   motionAuto: 'Follow system',
@@ -107,13 +118,15 @@ export const en: Record<SmoothStreamLocaleKey, string> = {
   keepStreamOnToolCall: 'Keep streaming before tool calls',
   keepStreamOnToolCallHint: 'Do not end text streaming early when followed by a tool call; preserve fluid typewriter reveal.',
   thinkAutoExpandHint: 'Open the thinking block while it streams. Turn off to keep it collapsed.',
+  debugTuningEnabled: 'Apply saved physical parameters',
+  debugTuningEnabledHint: 'Use your saved reveal and scroll parameters even with diagnostics hidden. Turn off to use production defaults; saved values are retained.',
   debugEnabled: 'Show render diagnostics',
-  debugEnabledHint: 'Show live streaming and scroll metrics on the right side of the chat. Tune values there, then save them here.',
+  debugEnabledHint: 'Show live streaming and scroll metrics and edit parameters. This switch only controls diagnostics; applying parameters uses the independent switch above.',
   debugUnavailable: 'Live diagnostics require a newer plugin Host.',
   debugPanelTitle: 'Render diagnostics',
   debugPanelToggle: 'Toggle render diagnostics',
   debugPanelClose: 'Hide diagnostics panel',
-  debugGuide: 'Tune one value at a time while a reply streams. Keep FPS stable and backlog near zero. If text lags, raise the reveal multiplier, queue pressure, or maximum reveal; if a blank gap appears, reduce Predictive runway. Increase damping when the scroll feels springy. Save only after the behavior is stable; Reset restores the production defaults.',
+  debugGuide: 'Enable Apply saved physical parameters to use your tuning; hiding diagnostics does not disable it. Tune one value at a time while a reply streams. Keep FPS stable and backlog near zero. If text lags, raise the reveal multiplier, queue pressure, or maximum reveal; if a blank gap appears, reduce Predictive runway. Increase damping when the scroll feels springy. Save only after the behavior is stable; Reset restores the production defaults.',
   debugLive: 'Streaming',
   debugIdle: 'Idle',
   debugUnsaved: 'Unsaved tuning',
@@ -187,6 +200,14 @@ export const zh: Record<SmoothStreamLocaleKey, string> = {
   enabledHint: '由本插件渲染并跟随流式回复；关闭后使用 Harness 内置渲染。',
   controlScroll: '接管滚动',
   controlScrollHint: '默认开启，由丝滑流式写入会话滚动位置；关闭后贴底滚动交给 Harness。',
+  backgroundRecovery: '后台恢复方式',
+  backgroundRecoveryHint: '返回页面时如何显示后台积压的文字；不影响任务执行。',
+  backgroundReplay: '正常速度续播',
+  backgroundReplayHint: '从离开时的显示位置继续，小预算逐帧播放；已完成回复也不突然加速排空。',
+  backgroundCatchUp: '限速追赶',
+  backgroundCatchUpHint: '适度加速，单次最多提交 16 字、两次提交至少间隔 40ms，避免集中排空。',
+  backgroundLatest: '直接显示最新',
+  backgroundLatestHint: '返回后跳过积压文字动画，后续新文字正常吐字，保留各条记录的顺序。',
   motionPreference: '动效偏好',
   motionPreferenceHint: '流式渲染如何响应系统的「减少动态效果」设置。',
   motionAuto: '跟随系统',
@@ -205,13 +226,15 @@ export const zh: Record<SmoothStreamLocaleKey, string> = {
   keepStreamOnToolCall: '工具引导语保持流式',
   keepStreamOnToolCallHint: '文字后紧接工具调用时不提前宣告结束，让短引导语保持平滑打字。',
   thinkAutoExpandHint: '思考块在流式时自动展开；关闭后保持折叠，可手动展开。',
+  debugTuningEnabled: '启用已保存的物理参数',
+  debugTuningEnabledHint: '开启后使用已保存的吐字与滚动物理参数，关闭诊断面板仍然生效；关闭此开关使用默认参数，已保存数值会保留。',
   debugEnabled: '显示渲染调试面板',
-  debugEnabledHint: '在聊天右侧显示流式渲染和滚动的实时参数，可在面板中调节并在这里保存。',
+  debugEnabledHint: '显示流式渲染、滚动的实时指标并编辑参数；此开关仅控制诊断，参数是否生效由上方独立开关决定。',
   debugUnavailable: '当前 Host 版本不支持实时调试，请先更新插件 Host。',
   debugPanelTitle: '渲染诊断',
   debugPanelToggle: '显示或隐藏渲染诊断',
   debugPanelClose: '收起诊断面板',
-  debugGuide: '流式输出时一次只调一个参数，观察帧率、积压和视觉滞后。优先保持帧率稳定、积压接近 0；如果文字滞后，提高揭示倍率、队列压力或最大揭示速度；如果底部出现空白，降低“预测预留空间”。滚动有回弹或抖动时提高阻尼。确认表现稳定后再保存；“恢复默认参数”会回到生产默认值。',
+  debugGuide: '先开启“启用已保存的物理参数”使调参生效，收起诊断面板不会停用参数。流式输出时一次只调一个参数，观察帧率、积压和视觉滞后。优先保持帧率稳定、积压接近 0；如果文字滞后，提高揭示倍率、队列压力或最大揭示速度；如果底部出现空白，降低“预测预留空间”。滚动有回弹或抖动时提高阻尼。确认表现稳定后再保存；“恢复默认参数”会回到生产默认值。',
   debugLive: '正在流式输出',
   debugIdle: '空闲',
   debugUnsaved: '参数尚未保存',

@@ -10,6 +10,7 @@ import { relayScope, streamRelay } from './streamRelay.ts'
 export interface NativeAssistantPreferences extends Pick<StreamSettings,
   'controlScroll' | 'motionPreference' | 'logarithmicFade' | 'thinkAutoExpand' | 'keepStreamOnToolCall'> {
   preset: StreamSmoothingPreset
+  backgroundRecovery?: StreamSettings['backgroundRecovery']
 }
 
 type AssistantProps = ChatNodeViewProps<'assistant-step'>
@@ -40,6 +41,36 @@ export interface AssistantTextProjection {
   blockIndices: readonly number[]
 }
 
+interface ProjectedBlock {
+  readonly source: AssistantBlock
+  readonly end: number
+  readonly block: AssistantBlock
+}
+
+interface ProjectionCache {
+  readonly source: string
+  readonly offsets: readonly number[]
+  readonly partials: Map<number, ProjectedBlock>
+}
+
+// Keep the public projection shape compatible with callers constructing it by
+// hand. The cache lives only as long as that immutable source projection does.
+const projectionCaches = new WeakMap<AssistantTextProjection, ProjectionCache>()
+
+function projectionCache(projection: AssistantTextProjection): ProjectionCache {
+  const cached = projectionCaches.get(projection)
+  if (cached !== undefined) return cached
+  let offset = 0
+  const offsets = projection.segments.map(segment => {
+    const start = offset
+    offset += segment.length
+    return start
+  })
+  const cache = { source: projection.segments.join(''), offsets, partials: new Map<number, ProjectedBlock>() }
+  projectionCaches.set(projection, cache)
+  return cache
+}
+
 /** Only smooth text this grouped row actually owns; its other blocks retain their source data. */
 export function assistantTextSegments(blocks: readonly AssistantBlock[], groupPart?: string): AssistantTextProjection {
   const segments: string[] = []
@@ -56,25 +87,40 @@ export function assistantTextSegments(blocks: readonly AssistantBlock[], groupPa
   return { segments, blockIndices }
 }
 
+/** Avoid splitting a code point even if an external caller supplies a partial surrogate prefix. */
+function codePointEnd(source: string, end: number): number {
+  if (end <= 0 || end >= source.length) return end
+  const previous = source.charCodeAt(end - 1)
+  const next = source.charCodeAt(end)
+  return previous >= 0xD800 && previous <= 0xDBFF && next >= 0xDC00 && next <= 0xDFFF ? end - 1 : end
+}
+
 /** Distribute a committed prefix without changing block count, order, identity or opaque metadata. */
 export function revealAssistantBlocks(blocks: readonly AssistantBlock[], projection: AssistantTextProjection, shown: string): readonly AssistantBlock[] {
-  let remaining = [...shown].length
-  let changed = false
-  const next = [...blocks]
+  const cache = projectionCache(projection)
+  // The smoother returns a source prefix at code-point boundaries. Its UTF-16
+  // length is already the slicing budget; recounting every displayed/source
+  // character here made each reveal frame proportional to the full reply.
+  const end = codePointEnd(cache.source, Math.min(shown.length, cache.source.length))
+  if (end === cache.source.length) return blocks
+  let next: AssistantBlock[] | undefined
   projection.blockIndices.forEach((blockIndex, segmentIndex) => {
     const source = projection.segments[segmentIndex]
+    const start = cache.offsets[segmentIndex]
     const block = blocks[blockIndex]
-    if (source === undefined || block === undefined) return
-    const chars = [...source]
-    const count = Math.min(remaining, chars.length)
-    remaining -= count
-    if (count === chars.length) return
-    changed = true
-    if (block.kind === 'text' || block.kind === 'reasoning') {
-      next[blockIndex] = { ...block, text: chars.slice(0, count).join('') }
-    }
+    if (source === undefined || start === undefined || block === undefined
+      || (block.kind !== 'text' && block.kind !== 'reasoning')) return
+    const count = codePointEnd(source, Math.max(0, Math.min(end - start, source.length)))
+    if (count === source.length) return
+    const previous = cache.partials.get(blockIndex)
+    const partial = previous?.source === block && previous.end === count
+      ? previous.block
+      : { ...block, text: source.slice(0, count) }
+    if (partial !== previous?.block) cache.partials.set(blockIndex, { source: block, end: count, block: partial })
+    next ??= blocks.slice()
+    next[blockIndex] = partial
   })
-  return changed ? next : blocks
+  return next ?? blocks
 }
 
 type DisclosureHook = AssistantProps['useDisclosure']
@@ -140,7 +186,7 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   const seenLive = useRef(live)
   if (live) seenLive.current = true
   const segments = useMemo(() => assistantTextSegments(node.data.blocks, groupPart), [node.data.blocks, groupPart])
-  const source = segments.segments.join('')
+  const source = projectionCache(segments).source
   const root = useRef<HTMLDivElement>(null)
   const speed = useRef(35)
   const revealed = useRef(0)
@@ -159,6 +205,7 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   hold.current = blocked
   const smoothed = useSmoothStreamContent(source, {
     enabled: animate,
+    backgroundRecovery: preferences.backgroundRecovery,
     inputComplete: !live || toolPresent || node.data.blocks.some(block => block.kind === 'tool-call')
       || (groupPart === 'reasoning' && node.data.blocks.at(-1)?.kind !== 'reasoning'),
     shouldHoldBack: () => hold.current,
@@ -211,8 +258,11 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
     return () => { row.removeAttribute('data-smooth-stream-settled') }
   }, [typing])
   return (
-    <div ref={root} data-smooth-stream-phase={typing ? 'typing' : 'settled'} data-smooth-stream-typing={typing ? 'true' : undefined}>
-      <FollowHost active={typing && !reduced} speedCpsRef={speed} revealedCharsRef={revealed}
+    <div ref={root}
+      style={blocked ? { opacity: 0, pointerEvents: 'none', height: 0, overflow: 'hidden' } : undefined}
+      data-smooth-stream-phase={blocked ? 'waiting' : typing ? 'typing' : 'settled'}
+      data-smooth-stream-typing={!blocked && typing ? 'true' : undefined}>
+      <FollowHost active={!blocked && typing && !reduced} speedCpsRef={speed} revealedCharsRef={revealed}
         revealScaleRef={scale} controlScroll={controlScroll} predictive={ownsLiveTail}>
         {createElement(Inner, adapted)}
       </FollowHost>
