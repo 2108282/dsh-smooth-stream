@@ -643,6 +643,7 @@ describe('assistant renderer', () => {
     const baseHeight = 500
     debugRuntime.syncSettings({
       enabled: true,
+      tuningEnabled: true,
       writable: true,
       dirty: false,
       status: 'ready',
@@ -660,7 +661,7 @@ describe('assistant renderer', () => {
     Object.defineProperty(port, 'clientHeight', { configurable: true, value: 100 })
     Object.defineProperty(port, 'scrollHeight', {
       configurable: true,
-      get: () => baseHeight + (Number.parseFloat(status.style.marginTop) || 0),
+      get: () => baseHeight + (Number.parseFloat(status.style.marginTop) || 0) + (Number.parseFloat(transcript.style.paddingBottom) || 0),
     })
     vi.spyOn(transcript, 'getBoundingClientRect').mockImplementation(() => ({
       top: 0,
@@ -677,18 +678,26 @@ describe('assistant renderer', () => {
 
     debugRuntime.syncSettings({
       enabled: true,
+      tuningEnabled: true,
       writable: true,
       dirty: true,
       status: 'ready',
       tuning: { ...DEFAULT_STREAM_DEBUG_TUNING, runwayPx: 40 },
     })
     await act(() => vi.advanceTimersByTimeAsync(900))
-    // Zero-downward-rebound contract: the follower pins scrollTop to the
-    // floor and the floor rides the owned margin 1:1, so an owned margin is
-    // never shrunk mid-ownership — a lower tuning cap only bounds future
-    // growth. Retiring it here would clamp scrollTop downward and slide the
-    // whole transcript down.
-    expect(Number.parseFloat(status.style.marginTop)).toBeCloseTo(72, 0)
+    const ownedSpace = () => (Number.parseFloat(status.style.marginTop) || 0)
+      + (Number.parseFloat(transcript.style.paddingBottom) || 0)
+    expect(ownedSpace()).toBeLessThanOrEqual(40)
+    debugRuntime.syncSettings({
+      enabled: false,
+      tuningEnabled: true,
+      writable: true,
+      dirty: true,
+      status: 'ready',
+      tuning: { ...DEFAULT_STREAM_DEBUG_TUNING, runwayPx: 0 },
+    })
+    await act(() => vi.advanceTimersByTimeAsync(32))
+    expect(ownedSpace()).toBe(0)
   })
 
   it('restores the transcript min-height when the follow host unmounts', async () => {

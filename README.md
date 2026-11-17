@@ -155,14 +155,14 @@ Host 日志中显示 `[dsh-smooth-stream] plugin loaded!` 即表示已成功加�
 不联网构建时，可直接安装仓库里已构建好的安装包（见 [`dist/`](dist/README.md)）：
 
 ```sh
-npm install https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.0.tgz
+npm install https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.1.tgz
 ```
 
 装进 DSH profile 时先下载再用本地路径：
 
 ```sh
-curl -L -O https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.0.tgz
-pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.10.0.tgz
+curl -L -O https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.1.tgz
+pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.10.1.tgz
 ```
 
 卸载命令：`pnpm dsh plugin --profile web remove dsh-smooth-stream`。
@@ -200,7 +200,8 @@ pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.10.0.tgz
 - **启用丝滑流式渲染**（默认开启）：接管回复和工具行的渲染与跟随；关闭后即时恢复 Harness 内置渲染。
 - **自动展开思考**：使用官方 disclosure Hook，在推理流式生成时展开，排空后收起；保留用户手动选择及官方 Turn reset。
 - **工具引导语保持流式**：开启后等前置正文真正排空再呈现工具；关闭则即时交接。接力按 Session、Turn、Step 隔离，中断或卸载释放自己的队列。
-- **接管滚动**：在新版分组结构上平滑跟随，读者向上滚动后让出控制，完成时回收预留空间。
+- **接管滚动**：在新版分组结构上平滑跟随，读者向上滚动后让出控制。关闭时清除插件增加的预留和跟随样式，将滚动交回 Harness。
+- **预测预留空间**（调试参数）：仅控制插件额外增加的空间，只有开启“接管滚动”且启用已保存的物理参数时，自定义值才生效。数值是插件预留 margin 与 padding 的合计上限，设为 `0` 禁用额外 runway；调低会回收已有插件预留，同时补偿阅读位置以减少跳动。官方折叠占位、输入框避让和安全区间距不受此参数控制，因此 `0` 不等于聊天底部所有留白都消失。
 - **后台恢复方式**（三选一，默认“限速追赶”）：正常速度续播会保留显示进度，并在恢复积压排空前维持小预算，完成时不突然加速；限速追赶单次最多提交 16 字、提交间隔至少 40ms；直接显示最新会跳过当前积压动画，之后新文字正常吐字。三种方式都保留节点顺序。页面隐藏时停止插件的吐字帧循环，后端任务继续执行。当前通过页面生命周期事件及长帧间隔识别恢复，尚未修改 APK；实际 WebView 的事件交付仍需手机验证。
 - **对数淡入**（默认开启）：回答正文和展开的思考内容中，尾部范围随输出速度从 24 扩展到最多 160 个字素，从 0% 不透明度在 240ms 内按反向对数曲线变实（前段更通透，后段变实）。网络停顿时也会恢复清晰；关闭此项保留逐字输出与滚动。遵循动效偏好，跳过代码、公式和思考摘要，不支持文字范围着色的浏览器自动使用原有输出效果。
 - **完成后自动折叠**（默认开启）：回合处理完成后，将思考过程与工具调用折叠为摘要行。

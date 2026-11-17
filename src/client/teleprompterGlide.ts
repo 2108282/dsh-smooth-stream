@@ -472,22 +472,40 @@ function currentShiftOf(element: HTMLElement): number {
  * and matches the release 0.4.0 feel; the shift resumes on the next frame once
  * it closes. */
 
+interface FollowSurfaceStyle {
+  transform: string
+  willChange: string
+  clipPath: string
+}
+const followSurfaceStyles = new WeakMap<HTMLElement, FollowSurfaceStyle>()
+const followPortStyles = new WeakMap<HTMLElement, { overflowAnchor: string; scrollBehavior: string }>()
+
 function setDirectShift(element: HTMLElement, px: number): void {
   const current = currentShiftOf(element)
   if (Math.abs(px) > 0.01) {
+    if (!followSurfaceStyles.has(element)) followSurfaceStyles.set(element, {
+      transform: element.style.transform,
+      willChange: element.style.willChange,
+      clipPath: element.style.clipPath,
+    })
     if (
       Math.abs(current - px) <= 0.01
       && element.style.willChange === 'transform'
       && element.style.clipPath === ''
     ) return
     directShiftCache.set(element, px)
-    element.style.transform = `translate3d(0, ${px}px, 0)`
+    const original = followSurfaceStyles.get(element)!
+    element.style.transform = `translate3d(0, ${px}px, 0)${original.transform === '' ? '' : ` ${original.transform}`}`
     element.style.willChange = 'transform'
   } else {
     directShiftCache.set(element, 0)
-    if (element.style.transform === '' && element.style.willChange === '' && element.style.clipPath === '') return
-    element.style.transform = ''
-    element.style.willChange = ''
+    const original = followSurfaceStyles.get(element)
+    if (original === undefined) return
+    element.style.transform = original.transform
+    element.style.willChange = original.willChange
+    element.style.clipPath = original.clipPath
+    followSurfaceStyles.delete(element)
+    return
   }
   element.style.clipPath = ''
 }
@@ -1054,11 +1072,13 @@ function ensureRunway(
   const naturalHeight = Math.max(0, port.scrollHeight - runwayOffsetOf(port))
   const existing = followRunways.get(port)
   // 尊重用户在调试面板中自定义的预测预留空间数值，底边总预算（flowPad + runway）绝不叠加超标
-  const maxRunway = Math.max(
+  const budget = Math.max(0, debugRuntime.activeTuning().runwayPx)
+  const maxRunway = Math.min(budget, Math.max(
     0,
     runwayPx,
-    migratedLegacy || existing?.normalizedLegacy === true ? debugRuntime.activeTuning().runwayPx : 0,
-  )
+    migratedLegacy || existing?.normalizedLegacy === true ? budget : 0,
+  ))
+  if (flowPadOf(port) > budget) setFlowPad(port, budget)
   const currentPad = flowPadOf(port)
   const remainingAllowance = Math.max(0, maxRunway - currentPad)
   // Legacy residue is normalized to one owned runway even when the current
@@ -1254,6 +1274,82 @@ function readerScrolledUp(port: HTMLElement): boolean {
   return port.scrollTop < (followScrollLedgers.get(port) ?? 0) - FOLLOW_UNPIN_GESTURE_PX
 }
 
+interface FollowBudgetRelease {
+  shift: number
+  last: number
+  frame: number
+}
+const followBudgetReleases = new WeakMap<HTMLElement, FollowBudgetRelease>()
+const followSpaceEpochs = new WeakMap<HTMLElement, number>()
+const followSettleStops = new WeakMap<HTMLElement, Set<() => void>>()
+
+function cancelBudgetRelease(port: HTMLElement): void {
+  const release = followBudgetReleases.get(port)
+  if (release !== undefined) cancelAnimationFrame(release.frame)
+  followBudgetReleases.delete(port)
+}
+
+/** Layout budget is strict; only a temporary transform may outlive a reduction. */
+function reconcileFollowBudget(port: HTMLElement): void {
+  const cap = Math.max(0, debugRuntime.activeTuning().runwayPx)
+  const runway = followRunways.get(port)
+  const pad = flowPadOf(port)
+  if (pad + (runway?.requestedPx ?? 0) <= cap) return
+  const previousTop = port.scrollTop
+  setFlowPad(port, Math.min(pad, cap))
+  ensureRunway(port, shiftSurfacesOf(port), Math.min(runway?.requestedPx ?? 0, Math.max(0, cap - flowPadOf(port))))
+  const floor = Math.max(0, port.scrollHeight - port.clientHeight)
+  setFollowScrollTop(port, Math.min(previousTop, floor))
+  const adjustment = port.scrollTop - previousTop
+  if (adjustment >= -0.01) return
+  const existing = followBudgetReleases.get(port)
+  const release = existing ?? { shift: 0, last: performance.now(), frame: 0 }
+  release.shift += adjustment
+  followBudgetReleases.set(port, release)
+  for (const surface of shiftSurfacesOf(port)) setShift(surface, currentShiftOf(surface) + adjustment)
+  if (existing !== undefined) return
+  const tick = (now: number): void => {
+    if (followBudgetReleases.get(port) !== release) return
+    const elapsed = Math.min(64, Math.max(0, now - release.last))
+    release.last = now
+    const before = release.shift
+    const response = debugRuntime.activeTuning().reserveResponseMs
+    const magnitude = Math.abs(before)
+    const step = Math.min(magnitude, Math.max(0.25, magnitude * (1 - Math.exp(-elapsed / response))),
+      FOLLOW_PAINT_SHIFT_MAX_STEP_PX * elapsed / 16.67)
+    release.shift = before - Math.sign(before) * step
+    if (Math.abs(release.shift) < 0.01) release.shift = 0
+    for (const surface of shiftSurfacesOf(port)) setShift(surface, currentShiftOf(surface) + release.shift - before)
+    if (release.shift === 0 || !port.isConnected) followBudgetReleases.delete(port)
+    else release.frame = requestAnimationFrame(tick)
+  }
+  release.frame = requestAnimationFrame(tick)
+}
+
+/** Restore only styles owned by this plugin, leaving host spacer/chrome intact. */
+function releaseFollowSpace(port: HTMLElement): void {
+  followSpaceEpochs.set(port, (followSpaceEpochs.get(port) ?? 0) + 1)
+  for (const stop of followSettleStops.get(port) ?? []) stop()
+  followSettleStops.delete(port)
+  clearVisual(port)
+  setFlowPad(port, 0)
+  restoreFlowFill(port)
+  followCompletionSettle.delete(port)
+  followCompletionSettleRows.delete(port)
+  followGuardAnchors.delete(port)
+  followRunwayOffsetHistory.delete(port)
+  followFloorHistory.delete(port)
+  followActivePorts.delete(port)
+  followMotionStates.delete(port)
+  const floor = Math.max(0, port.scrollHeight - port.clientHeight)
+  if (port.scrollTop > floor) setFollowScrollTop(port, floor)
+  port.removeAttribute(FOLLOW_OWNED_ATTR)
+  followScrollLedgers.delete(port)
+  followHostScrollPorts.delete(port)
+  followReaderHolds.delete(port)
+  debugRuntime.reportFollow(port, null)
+}
+
 /**
  * Paint a bounded visual lag and return the effective logical extent.
  *
@@ -1276,7 +1372,10 @@ function applyVisual(
 ): number {
   const surfaces = shiftSurfacesOf(port)
   ensureFlowFillsPort(port)
-  void runwayPx
+  if (!followPortStyles.has(port)) followPortStyles.set(port, {
+    overflowAnchor: port.style.overflowAnchor,
+    scrollBehavior: port.style.scrollBehavior,
+  })
   // A runway added while the column still fit the viewport was absorbed by
   // the host's bottom slack: its measured offset was zero, but once real
   // overflow begins the same margin costs scroll length. Detect that
@@ -1352,7 +1451,7 @@ function applyVisual(
   if (writeScrollTop) setFollowScrollTop(port, floor)
   const limit = safeShiftLimit(port, surfaces)
   followSlackTransition.delete(port)
-  const visibleReserve = Math.min(runwayOffset, Math.max(0, reservePx))
+  const visibleReserve = Math.min(runwayOffset, Math.max(0, reservePx), Math.max(0, runwayPx))
   const baselineShift = runwayOffset - visibleReserve
   const requestedLag = Math.max(0, targetHeight - extent)
   // Steady-state tail pin: while the predictive reserve is held, paint the
@@ -1434,7 +1533,14 @@ function applyVisual(
     reservePx: visibleReserve,
     velocityPxPerSec,
   })
-  for (const surface of surfaces) setShift(surface, shift)
+  const release = followBudgetReleases.get(port)
+  if (release !== undefined) {
+    // The follower may change its logical lag while the layout budget shrinks.
+    // Preserve the last actual paint here; the one release RAF advances toward
+    // the new logical shift, rather than adding two independent animations.
+    release.shift = currentShiftOf(surfaces.at(-1) ?? port) - shift
+  }
+  for (const surface of surfaces) setShift(surface, shift + (release?.shift ?? 0))
   const status = turnStatusOf(port)
   if (status !== null) setShift(status, 0)
   return effectiveExtent
@@ -1442,14 +1548,19 @@ function applyVisual(
 
 function clearMotion(port: HTMLElement): void {
   port.removeAttribute(FOLLOW_OWNED_ATTR)
-  port.style.overflowAnchor = ''
-  port.style.scrollBehavior = ''
+  const original = followPortStyles.get(port)
+  if (original !== undefined) {
+    port.style.overflowAnchor = original.overflowAnchor
+    port.style.scrollBehavior = original.scrollBehavior
+    followPortStyles.delete(port)
+  }
   for (const surface of shiftSurfacesOf(port)) setShift(surface, 0)
   const status = turnStatusOf(port)
   if (status !== null) setShift(status, 0)
 }
 
 function clearVisual(port: HTMLElement): void {
+  cancelBudgetRelease(port)
   clearMotion(port)
   restoreRunway(port)
   followMotionStates.delete(port)
@@ -1461,7 +1572,8 @@ function clearVisual(port: HTMLElement): void {
 /** Keep an already-promoted surface at zero until one stable final paint lands. */
 function holdCompositorAtRest(element: HTMLElement): void {
   directShiftCache.set(element, 0)
-  element.style.transform = 'translate3d(0, 0px, 0)'
+  const original = followSurfaceStyles.get(element)
+  element.style.transform = `translate3d(0, 0px, 0)${original?.transform ? ` ${original.transform}` : ''}`
   element.style.willChange = 'transform'
   element.style.clipPath = ''
 }
@@ -1472,6 +1584,7 @@ function finishAtNaturalFloor(
   retainCompositor = true,
   writeScrollTop = true,
 ): void {
+  if (followBudgetReleases.has(port)) return
   followCompletionSettle.delete(port)
   followTraceUntilMs = Math.max(followTraceUntilMs, performance.now() + 10000)
   followTrace('finish-enter', { sh: hostShOf(port), st: Math.round(port.scrollTop), pad: Math.round(flowPadOf(port)), retain: retainCompositor })
@@ -1489,8 +1602,12 @@ function finishAtNaturalFloor(
   const promotedSet = new Set(promoted)
   if (writeScrollTop) settleAtFloor(port)
   port.removeAttribute(FOLLOW_OWNED_ATTR)
-  port.style.overflowAnchor = ''
-  port.style.scrollBehavior = ''
+  const original = followPortStyles.get(port)
+  if (original !== undefined) {
+    port.style.overflowAnchor = original.overflowAnchor
+    port.style.scrollBehavior = original.scrollBehavior
+    followPortStyles.delete(port)
+  }
   for (const surface of surfaces) {
     if (promotedSet.has(surface)) holdCompositorAtRest(surface)
     else setShift(surface, 0)
@@ -1583,6 +1700,7 @@ export function useConversationFollow(
     let touchStartY: number | null = null
     let interactTimer: ReturnType<typeof setTimeout> | null = null
     let port: HTMLElement | null = null
+    let spaceEpoch = 0
     let resize: ResizeObserver | null = null
     let mutations: MutationObserver | null = null
     let observedTail: HTMLElement | null = null
@@ -1876,7 +1994,7 @@ export function useConversationFollow(
     }
     /** Pre-paint correction (observers, commit subscription). */
     const restoreBeforePaint = (): void => {
-      if (!following || port === null) return
+      if (!controlScrollRef.current || !following || port === null || (followSpaceEpochs.get(port) ?? 0) !== spaceEpoch) return
       if (hostOwnsScroll || followHostScrollPorts.has(port)) {
         hostOwnsScroll = true
         followScrollLedgers.set(port, port.scrollTop)
@@ -2013,6 +2131,7 @@ export function useConversationFollow(
       }
       unsubscribeCommit?.()
       port = next
+      spaceEpoch = followSpaceEpochs.get(next) ?? 0
       invalidatePaintLimit(port)
       unsubscribeCommit = subscribeFollowCommit(port, () => { restoreBeforePaint() })
       for (const name of GESTURE_EVENTS) {
@@ -2278,18 +2397,12 @@ export function useConversationFollow(
       const pressureReserveTarget = predictGrowth && reserveEnabled
         ? computeFollowReserve(speedCpsRef.current, tuning.runwayPx)
         : 0
-      // ZERO-DOWNWARD-REBOUND (root cause): while this follower owns the port
-      // it pins scrollTop to the floor, and the floor rides the owned bottom
-      // margin 1:1. Shrinking that margin under the pin clamps scrollTop
-      // downward and slides the whole transcript down — the one motion this
-      // module must never paint; no shift remains to release it because the
-      // reservation already covers the margin (base = margin − reservation
-      // stays flat). An owned margin therefore only GROWS here: prediction
-      // shutdown and reveal-pressure drops freeze it at its current size, and
-      // retirement is deferred to reader handback (a user-driven scroll) or
-      // the next ownership. Growth stays invisible because the reservation
-      // grows in the same frame and the baseline difference never moves.
-      const effectiveReserveTarget = Math.max(reservePx, pressureReserveTarget)
+      // Keep pressure drops steady within the current budget to avoid a wrap
+      // rebound. A user lowering the budget is different: reconcileFollowBudget
+      // removes excess layout space immediately and retires its equal visual
+      // compensation separately, so old reserve can never override the setting.
+      reservePx = Math.min(Math.max(0, tuning.runwayPx), reservePx)
+      const effectiveReserveTarget = Math.min(Math.max(0, tuning.runwayPx), Math.max(reservePx, pressureReserveTarget))
       const reserveStep = 1 - Math.exp(-elapsedMs / tuning.reserveResponseMs)
       // The first confirmed wrap needs its room before this paint. Once open,
       // pressure changes can use the ordinary response ramp.
@@ -2476,7 +2589,7 @@ export function useConversationFollow(
         if (interactTimer !== null) clearTimeout(interactTimer)
         const disabledHost = rootRef.current?.closest<HTMLElement>('[data-conversation-scroll]') ?? port
         if (disabledHost !== null) {
-          clearVisual(disabledHost)
+          releaseFollowSpace(disabledHost)
           followLeaders.delete(disabledHost)
           debugRuntime.reportFollow(disabledHost, null)
         }
@@ -2535,7 +2648,7 @@ export function useConversationFollow(
       let settleQuietMs = 0
       let settleSig = ''
       const finalGrowthPx = Math.max(0, host.scrollHeight - animatedH - runwayOffsetOf(host))
-      if (!activeRef.current && finalGrowthPx <= FOLLOW_SETTLE_EPSILON_PX) {
+      if (!activeRef.current && finalGrowthPx <= FOLLOW_SETTLE_EPSILON_PX && !followBudgetReleases.has(host)) {
         followTraceUntilMs = Math.max(followTraceUntilMs, performance.now() + 10000)
         followTrace('fast-gate', { sh: host.scrollHeight, st: Math.round(host.scrollTop), pad: Math.round(flowPadOf(host)) })
         restoreRunway(host)
@@ -2581,6 +2694,7 @@ export function useConversationFollow(
       // space collapses to the paint limit), the exact teleport this drain
       // exists to prevent. The draining arm ramps its reserve from here.
       const completionTuning = debugRuntime.activeTuning()
+      reservePx = Math.min(reservePx, Math.max(0, completionTuning.runwayPx))
       const previousCompletionRunway = runwayOffsetOf(host)
       // The completion pad already holds retired extent below the fold; the
       // handoff only opens the runway room the pad does not cover, or the
@@ -2621,6 +2735,7 @@ export function useConversationFollow(
         remainingLag <= FOLLOW_SETTLE_EPSILON_PX
         && runwayOffset <= FOLLOW_SETTLE_EPSILON_PX
         && reservePx <= FOLLOW_SETTLE_EPSILON_PX
+        && !followBudgetReleases.has(host)
       ) {
         finishAtNaturalFloor(host, !startedAsEntrance, !hostOwnsScroll)
         followLeaders.delete(host)
@@ -2633,6 +2748,7 @@ export function useConversationFollow(
         host.addEventListener(name, markGesture, { passive: true })
       }
       const stopSettleListeners = (): void => {
+        followSettleStops.get(host)?.delete(stopSettleListeners)
         for (const name of GESTURE_EVENTS) host.removeEventListener(name, markGesture)
         resize?.disconnect()
         mutations?.disconnect()
@@ -2662,6 +2778,9 @@ export function useConversationFollow(
       // it finishes.
       followCompletionSettle.add(host)
       followCompletionSettleRows.set(host, countUserRows(host))
+      const stops = followSettleStops.get(host) ?? new Set<() => void>()
+      stops.add(stopSettleListeners)
+      followSettleStops.set(host, stops)
       handedOff = true
       let settleLast = performance.now()
       // Settle-pad transfer state lives above the completion handoff; the
@@ -2671,14 +2790,14 @@ export function useConversationFollow(
       // settle rate and the pinned viewport glides down to the natural
       // resting position against the composer.
       const settleFrame = (now: number): void => {
+        if (!controlScrollRef.current || (followSpaceEpochs.get(host) ?? 0) !== spaceEpoch) {
+          stopSettleListeners()
+          return
+        }
         if (!host.isConnected) {
-          clearVisual(host)
-          setFlowPad(host, 0)
-          restoreFlowFill(host)
-          followCompletionSettle.delete(host)
-          if (isLeader(host)) followLeaders.delete(host)
+          releaseFollowSpace(host)
+          followLeaders.delete(host)
           releaseRevealScale()
-          debugRuntime.reportFollow(host, null)
           stopSettleListeners()
           return
         }
@@ -2699,6 +2818,7 @@ export function useConversationFollow(
         }
         const dt = Math.min(FOLLOW_MAX_FRAME_MS, Math.max(0, now - settleLast))
         const tuning = debugRuntime.activeTuning()
+        reservePx = Math.min(reservePx, Math.max(0, tuning.runwayPx))
         settleLast = now
         detectHostScroll(host, Math.max(0, host.scrollHeight - host.clientHeight))
         if (hostOwnsScroll) {
@@ -2748,7 +2868,7 @@ export function useConversationFollow(
             ? ownedRunwayPx
             : Math.min(
                 reservePx,
-                ((tuning.runwayPx || FOLLOW_STATUS_RUNWAY_PX) / FOLLOW_RUNWAY_RETIRE_MS) * dt,
+                (Math.max(0, tuning.runwayPx) / FOLLOW_RUNWAY_RETIRE_MS) * dt,
               )
           const transferredPx = transferRunwayToFlowPad(host, requestedTransferPx)
           reservePx = Math.max(0, reservePx - transferredPx)
@@ -2766,6 +2886,7 @@ export function useConversationFollow(
         if (
           lag <= FOLLOW_SETTLE_EPSILON_PX
           && (reservePx <= FOLLOW_SETTLE_EPSILON_PX || settleStatus === null)
+          && !followBudgetReleases.has(host)
           && settleQuietMs >= FOLLOW_SETTLE_QUIET_MS
         ) {
           followTrace('finish', { st: Math.round(host.scrollTop), sh: host.scrollHeight, pad: Math.round(flowPadOf(host)) })
@@ -2820,6 +2941,18 @@ export function useConversationFollow(
       requestAnimationFrame(settleFrame)
     }
   }, [active, rootRef, speedCpsRef, revealScaleRef, predictive, predictiveRef, controlScroll])
+
+  useLayoutEffect(() => {
+    const host = rootRef.current?.closest<HTMLElement>('[data-conversation-scroll]') ?? null
+    if (host === null) return
+    if (!controlScroll) {
+      releaseFollowSpace(host)
+      return
+    }
+    const reconcile = (): void => reconcileFollowBudget(host)
+    reconcile()
+    return debugRuntime.subscribe(reconcile)
+  }, [rootRef, controlScroll])
 
   useLayoutEffect(() => {
     const host = rootRef.current?.closest<HTMLElement>('[data-conversation-scroll]') ?? null
