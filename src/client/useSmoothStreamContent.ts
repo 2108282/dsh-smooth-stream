@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { DEFAULT_STREAM_DEBUG_TUNING, type StreamDebugTuning, type BackgroundRecovery } from '../settings.ts'
 import { debugRuntime } from './debugRuntime.ts'
-import { recoveryBudget, RECOVERY_COMMIT_MS, useBackgroundRecovery } from './backgroundRecovery.ts'
+import { recoveryBudget, RECOVERY_COMMIT_MS, useBackgroundRecovery, type RecoveryPosition } from './backgroundRecovery.ts'
 
 export type StreamSmoothingPreset = 'realtime' | 'balanced' | 'silky'
 
@@ -161,6 +161,8 @@ export const countChars = (text: string): number => {
  */
 export const BACKLOG_CHAR_CEILING = 300
 export const BACKLOG_SECOND_CEILING = 2
+/** Recovery-only threshold for suppressing automatic reasoning disclosure. */
+export const LARGE_RECOVERY_BACKLOG_CHARS = 1200
 
 export interface SettleDrainInput {
   readonly backlog: number
@@ -264,7 +266,15 @@ export function computeRevealStep(config: StreamSmoothingPresetConfig, input: Re
 
 export interface UseSmoothStreamContentOptions {
   enabled?: boolean
+  /** Requeue the current snapshot when smoothing transitions from disabled to enabled. */
+  replayOnEnable?: boolean
   backgroundRecovery?: BackgroundRecovery | undefined
+  /** Conversation relay scope for recovery inheritance. */
+  recoveryKey?: string | undefined
+  /** Position within the recovery scope's ordered output. */
+  recoveryPosition?: RecoveryPosition | undefined
+  /** Latches large recovery backlogs until their pending text has drained. */
+  onRecoveryBacklogChange?: ((pending: boolean) => void) | undefined
   /** The producer has completed; drain queued text without live backpressure. */
   inputComplete?: boolean
   preset?: StreamSmoothingPreset
@@ -307,7 +317,11 @@ export function useSmoothStreamContent(
   content: string,
   {
     enabled = true,
+    replayOnEnable = false,
     backgroundRecovery = 'catch-up',
+    recoveryKey,
+    recoveryPosition,
+    onRecoveryBacklogChange,
     inputComplete = false,
     preset = 'balanced',
     shouldHoldBack,
@@ -333,6 +347,7 @@ export function useSmoothStreamContent(
   const targetCharsRef = useRef([...initialContent])
   const targetCountRef = useRef(countChars(initialContent))
   const replacementPendingRef = useRef(false)
+  const previousEnabledRef = useRef(enabled)
 
   const emaCpsRef = useRef(seedCps)
   const lastInputTsRef = useRef(0)
@@ -346,6 +361,9 @@ export function useSmoothStreamContent(
   const settleCpsRef = useRef<number | null>(null)
   const lastDrainCpsRef = useRef(0)
   const holdBackRef = useRef(shouldHoldBack)
+  const recoveryBacklogRef = useRef(false)
+  const onRecoveryBacklogChangeRef = useRef(onRecoveryBacklogChange)
+  onRecoveryBacklogChangeRef.current = onRecoveryBacklogChange
   const speedOutRef = useRef(speedCpsRef)
   speedOutRef.current = speedCpsRef
   const revealedCharsOutRef = useRef(revealedCharsRef)
@@ -370,6 +388,17 @@ export function useSmoothStreamContent(
     lastFrameTsRef.current = null
   }, [])
 
+  const reportRecoveryBacklog = useCallback((pending: boolean) => {
+    if (recoveryBacklogRef.current === pending) return
+    recoveryBacklogRef.current = pending
+    onRecoveryBacklogChangeRef.current?.(pending)
+  }, [])
+
+  const observeRecoveryBacklog = useCallback((backlog: number) => {
+    if (backlog > LARGE_RECOVERY_BACKLOG_CHARS) reportRecoveryBacklog(true)
+    else if (backlog <= 0) reportRecoveryBacklog(false)
+  }, [reportRecoveryBacklog])
+
   const startFrameLoopRef = useRef<() => void>(() => {})
   const recovery = useBackgroundRecovery(backgroundRecovery, () => {
     stopFrameLoop()
@@ -378,14 +407,18 @@ export function useSmoothStreamContent(
     settleCpsRef.current = null
     lastDrainCpsRef.current = 0
     lastFrameTsRef.current = null
+    observeRecoveryBacklog(replacementPendingRef.current
+      ? targetCountRef.current
+      : targetCountRef.current - displayedCountRef.current)
     startFrameLoopRef.current()
-  })
+  }, enabled && (!inputComplete || content !== displayedContent) ? recoveryKey : undefined, recoveryPosition)
   const recoveryRef = useRef(recovery)
   recoveryRef.current = recovery
 
   const syncImmediate = useCallback(
     (nextContent: string) => {
       stopFrameLoop()
+      replacementPendingRef.current = false
       const chars = [...nextContent]
       const now = performance.now()
       targetContentRef.current = nextContent
@@ -404,8 +437,9 @@ export function useSmoothStreamContent(
       arrivalCpsEmaRef.current = seedCps
       lastInputTsRef.current = now
       lastInputCountRef.current = chars.length
+      reportRecoveryBacklog(false)
     },
-    [seedCps, stopFrameLoop],
+    [reportRecoveryBacklog, seedCps, stopFrameLoop],
   )
 
   // Producer completion used to publish the accumulated source in one commit
@@ -417,7 +451,7 @@ export function useSmoothStreamContent(
   // configured deadline and glides every px through the spring. Nothing is left
   // "typing" after the Agent stops; the tail just closes at drain speed.
   //
-  // Non-append-only edits and disabled streams still sync immediately below.
+  // Unguarded non-append edits and disabled streams can still sync immediately below.
 
   const startFrameLoop = useCallback(() => {
     if (rafRef.current !== null || recoveryRef.current.hidden()) return
@@ -425,6 +459,11 @@ export function useSmoothStreamContent(
     const tick = (now: number) => {
       if (recoveryRef.current.hidden()) { stopFrameLoop(); return }
       if (replacementPendingRef.current) {
+        if (holdBackRef.current?.() === true) {
+          lastFrameTsRef.current = null
+          rafRef.current = requestAnimationFrame(tick)
+          return
+        }
         replacementPendingRef.current = false
         displayedContentRef.current = ''
         displayedCountRef.current = 0
@@ -436,6 +475,7 @@ export function useSmoothStreamContent(
       recoveryRef.current.observeBacklog(backlog > 0)
 
       if (backlog <= 0) {
+        reportRecoveryBacklog(false)
         recoveryRef.current.finish()
         queueDebtRef.current = 0
         settleCpsRef.current = null
@@ -456,6 +496,7 @@ export function useSmoothStreamContent(
       const playback = recoveryRef.current
       playback.detectGap(frameIntervalMs)
       const recovering = playback.recovering()
+      if (playback.resumed()) observeRecoveryBacklog(backlog)
       const recoveryMode = playback.mode()
       // A latest snapshot is still ordered behind its predecessor; only its
       // character animation is skipped, never the conversation relay.
@@ -587,12 +628,13 @@ export function useSmoothStreamContent(
         displayedCountRef.current = targetCount
         setDisplayedContent(targetContentRef.current)
       }
+      if (displayedCountRef.current === targetCount) reportRecoveryBacklog(false)
 
       rafRef.current = requestAnimationFrame(tick)
     }
 
     rafRef.current = requestAnimationFrame(tick)
-  }, [config, seedCps, stopFrameLoop, steadyCps, syncImmediate])
+  }, [config, observeRecoveryBacklog, reportRecoveryBacklog, seedCps, stopFrameLoop, steadyCps, syncImmediate])
 
   // Run AFTER the commit's DOM mutations, before paint: the follower's
   // same-task correction hook.
@@ -608,8 +650,12 @@ export function useSmoothStreamContent(
   }, [startFrameLoop])
 
   useEffect(() => {
+    const replay = enabled && !previousEnabledRef.current && replayOnEnable
+    previousEnabledRef.current = enabled
     if (!enabled) {
-      if (displayedCountRef.current < targetCountRef.current && content.startsWith(targetContentRef.current)) {
+      recoveryRef.current.cancel()
+      // Only an unchanged target can finish draining an existing queue.
+      if (content === targetContentRef.current && displayedCountRef.current < targetCountRef.current) {
         startFrameLoop()
         return
       }
@@ -617,6 +663,7 @@ export function useSmoothStreamContent(
       return
     }
 
+    if (replay) syncImmediate('')
     const prevTargetContent = targetContentRef.current
     if (content === prevTargetContent) return
 
@@ -624,11 +671,13 @@ export function useSmoothStreamContent(
     const appendOnly = content.startsWith(prevTargetContent)
 
     if (!appendOnly) {
-      if (recoveryRef.current.hidden()) {
+      if (recoveryRef.current.hidden() || holdBackRef.current?.() === true) {
         targetContentRef.current = content
         targetCharsRef.current = [...content]
         targetCountRef.current = targetCharsRef.current.length
         replacementPendingRef.current = true
+        if (recoveryRef.current.resumed()) observeRecoveryBacklog(targetCountRef.current)
+        startFrameLoop()
         return
       }
       syncImmediate(content)
@@ -662,8 +711,11 @@ export function useSmoothStreamContent(
     lastInputTsRef.current = now
     lastInputCountRef.current = targetCountRef.current
 
+    if (recoveryRef.current.resumed()) observeRecoveryBacklog(replacementPendingRef.current
+      ? targetCountRef.current
+      : targetCountRef.current - displayedCountRef.current)
     startFrameLoop()
-  }, [content, enabled, config, startFrameLoop, syncImmediate])
+  }, [content, enabled, replayOnEnable, config, observeRecoveryBacklog, startFrameLoop, syncImmediate])
 
   useEffect(() => {
     return () => {

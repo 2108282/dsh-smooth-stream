@@ -8,6 +8,7 @@ import { NativeAssistantNodeView } from '../src/client/NativeAssistantNodeView.t
 import { relayScope, streamRelay } from '../src/client/streamRelay.ts'
 import { wrapFollowNodeView } from '../src/client/TypewriterToolNodeView.tsx'
 import { DEFAULT_STREAM_SETTINGS } from '../src/settings.ts'
+import { isBackgroundRecoveryScope } from '../src/client/backgroundRecovery.ts'
 
 type Owner = ChatNodeViewProps<'assistant-step'>
 type OfficialProps = Owner & PropsRenderSlots<'conversation.chat.reasoning.body' | 'conversation.chat.message.images'> & {
@@ -131,6 +132,179 @@ describe('native assistant wrapper', () => {
     expect(streamRelay.isBlocked(relayScope(props.node, props.sessionId), 'tool')).toBe(false)
   })
 
+  it.each(['replay', 'catch-up', 'latest'] as const)('orders a first settled reply behind recovering reasoning in %s mode', async mode => {
+    const initial = { ...owner('running', 'r'.repeat(200), true), groupPart: 'reasoning' }
+    const settings = { ...preferences, backgroundRecovery: mode }
+    const tree = (settled: boolean) => {
+      const snapshot: OfficialProps = settled ? { ...initial, node: { ...initial.node, data: { ...initial.node.data,
+        status: 'settled', blocks: [{ kind: 'reasoning', text: 'r'.repeat(400) }, { kind: 'text', text: 'final answer' }] } } } : initial
+      return createElement('main', null,
+        createElement('section', { key: 'reasoning', 'data-testid': 'reasoning-seat' }, native(snapshot, settings)),
+        settled ? createElement('section', { key: 'response', 'data-testid': 'response-seat' }, native({ ...snapshot, groupPart: 'response' }, settings)) : null)
+    }
+    const view = render(tree(false))
+    await paint(3)
+    const before = view.getByTestId('reasoning-seat').textContent!.length
+    await act(() => { window.dispatchEvent(new Event('pagehide')) })
+    await act(() => { window.dispatchEvent(new Event('pageshow')) })
+    // A slow reconnect must not lose the policy after the old one-second window.
+    timestamp += 3000
+    view.rerender(tree(true))
+    expect(view.getByTestId('reasoning-seat').textContent).toHaveLength(before)
+    expect(view.getByTestId('response-seat').querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('waiting')
+    expect(view.getByTestId('response-seat').textContent).toBe('')
+    for (let index = 0; index < 500; index++) {
+      await paint()
+      if (view.getByTestId('response-seat').textContent !== '') {
+        expect(view.getByTestId('reasoning-seat').textContent).toBe('r'.repeat(400))
+      }
+    }
+    expect(view.getByTestId('response-seat').textContent).toBe('final answer')
+  })
+
+  it('paces a first closed tool result from the recovering turn behind reasoning', async () => {
+    const props = { ...owner('running', 'r'.repeat(400), true), groupPart: 'reasoning' }
+    const Tool = wrapFollowNodeView(() => createElement('aside', null, 'tool result '.repeat(30)), () => false)
+    const tree = (result: boolean) => createElement('main', null,
+      native(result ? { ...props, node: { ...props.node, data: { ...props.node.data, status: 'settled' } } } : props),
+      result ? createElement('section', { 'data-testid': 'closed-tool' }, createElement(Tool, {
+        sessionId: props.sessionId, node: { key: 'tool:1', kind: 'tool-call', anchorSeq: 2,
+          data: { turn: 1, step: 1, root: { kind: 'tool-result' } },
+          location: { kind: 'step', turn: { turn: 1, status: 'closed' }, step: { step: 1, status: 'closed' } } },
+      })) : null)
+    const view = render(tree(false))
+    await paint(3)
+    await act(() => { window.dispatchEvent(new Event('dsha:background')) })
+    await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
+    timestamp += 3000
+    view.rerender(tree(true))
+    expect(view.getByTestId('closed-tool').textContent).toBe('')
+    expect(view.getByTestId('closed-tool').querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('waiting')
+    await paint(400)
+    expect(view.getByTestId('closed-tool').textContent).toBe('tool result '.repeat(30))
+  })
+
+  it('serializes several first-settled seats behind their common live predecessor', async () => {
+    const first = owner('running', 'a'.repeat(100))
+    const item = (step: number, text: string) => ({ ...owner('settled', text), node: { ...first.node,
+      key: `assistant:${step}`, anchorSeq: step, data: { ...first.node.data, status: 'settled' as const,
+        step, blocks: [{ kind: 'text' as const, text }] } } })
+    const second = item(2, 'b'.repeat(100))
+    const third = item(3, 'c'.repeat(100))
+    const tree = (done: boolean) => createElement('main', null,
+      createElement('section', { 'data-testid': 'a' }, native(done ? { ...first, node: { ...first.node,
+        data: { ...first.node.data, status: 'settled' } } } : first)),
+      createElement('section', { 'data-testid': 'b' }, native(second)),
+      createElement('section', { 'data-testid': 'c' }, native(third)))
+    const view = render(tree(false))
+    await paint(3)
+    view.rerender(tree(true))
+    for (let index = 0; index < 200; index++) {
+      await paint()
+      if (view.getByTestId('b').textContent !== '') expect(view.getByTestId('a').textContent).toBe('a'.repeat(100))
+      if (view.getByTestId('c').textContent !== '') expect(view.getByTestId('b').textContent).toBe('b'.repeat(100))
+    }
+    expect(view.getByTestId('c').textContent).toBe('c'.repeat(100))
+  })
+
+  it('retires a recovery scope when a drained live seat settles without new text', async () => {
+    const props = owner('running', 'short')
+    const view = render(native(props))
+    await paint(30)
+    await act(() => { window.dispatchEvent(new Event('dsha:background')) })
+    await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
+    expect(isBackgroundRecoveryScope(JSON.stringify([props.sessionId, '1']))).toBe(true)
+    view.rerender(native({ ...props, node: { ...props.node, data: { ...props.node.data, status: 'settled' } } }))
+    expect(isBackgroundRecoveryScope(JSON.stringify([props.sessionId, '1']))).toBe(false)
+  })
+
+  it('does not replay an earlier settled step remounted during recovery of a later step', async () => {
+    const later = owner('running', 'x'.repeat(200))
+    later.node = { ...later.node, key: 'assistant:2', anchorSeq: 5, data: { ...later.node.data, step: 2 } }
+    const earlier = owner('settled', 'historical text')
+    const tree = (history: boolean) => createElement('main', null,
+      history ? createElement('section', { key: 'old', 'data-testid': 'old' }, native(earlier)) : null,
+      createElement('section', { key: 'new' }, native(later)))
+    const view = render(tree(false))
+    await paint(3)
+    await act(() => { window.dispatchEvent(new Event('dsha:background')) })
+    await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
+    view.rerender(tree(true))
+    expect(view.getByTestId('old').textContent).toBe('historical text')
+    expect(view.getByTestId('old').querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('settled')
+  })
+
+  it('serializes first closed tool results even without background lifecycle events', async () => {
+    const props = owner('running', 'r'.repeat(100))
+    const Tool = wrapFollowNodeView(p => createElement('aside', { 'data-testid': p.id }, String(p.id).repeat(100)), () => false)
+    const tools = ['b', 'c'].map((id, index) => createElement(Tool, {
+      key: id, id, sessionId: props.sessionId, node: { key: id, kind: 'tool-call', anchorSeq: index + 2,
+        data: { turn: 1, step: 1, root: { kind: 'tool-result' } },
+        location: { kind: 'step', turn: { turn: 1, status: 'closed' }, step: { step: 1, status: 'closed' } } },
+    }))
+    const tree = (done: boolean) => createElement('main', null,
+      createElement('section', { 'data-testid': 'r' }, native(done ? { ...props, node: { ...props.node, data: { ...props.node.data,
+        status: 'settled', blocks: [...props.node.data.blocks, { kind: 'tool-call', callId: 'b', name: 'test', argsRaw: '{}' }] } } } : props)), ...tools)
+    const view = render(tree(false))
+    await paint(3)
+    view.rerender(tree(true))
+    for (let index = 0; index < 300; index++) {
+      await paint()
+      if (view.getByTestId('b').textContent !== '') expect(view.getByTestId('r').textContent).toBe('r'.repeat(100))
+      if (view.getByTestId('c').textContent !== '') expect(view.getByTestId('b').textContent).toBe('b'.repeat(100))
+    }
+    expect(view.getByTestId('c').textContent).toBe('c'.repeat(100))
+  })
+
+  it('holds a static settled reply behind a live predecessor without replaying unrelated history', async () => {
+    const first = owner('running', 'r'.repeat(200), true)
+    const settled = { ...owner('settled', 'final answer'), groupPart: 'response' }
+    const view = render(createElement('main', null,
+      native({ ...first, groupPart: 'reasoning' }),
+      createElement('section', { 'data-testid': 'settled' }, native(settled))))
+    expect(view.getByTestId('settled').querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('waiting')
+    await paint(150)
+    // The live reasoning still owns the producer tail, so the reply cannot pass it.
+    expect(view.getByTestId('settled').querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('waiting')
+  })
+
+  it('keeps automatic reasoning closed only while foreground recovery has a large backlog', async () => {
+    const props = owner('running', 'reasoning '.repeat(160), true)
+    const view = render(native(props, preferences, Official))
+    await paint(3)
+    expect(view.queryByTestId('reasoning-body')).not.toBeNull()
+    await act(() => { window.dispatchEvent(new Event('dsha:background')) })
+    view.rerender(native({ ...props, node: { ...props.node, data: { ...props.node.data,
+      blocks: [{ kind: 'reasoning', text: 'reasoning '.repeat(180) }] } } }, preferences, Official))
+    await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
+    expect(view.queryByTestId('reasoning-body')).toBeNull()
+    await paint(4)
+    expect(view.queryByTestId('reasoning-body')).toBeNull()
+    await paint(700)
+    expect(view.queryByTestId('reasoning-body')).not.toBeNull()
+  })
+
+  it('leaves automatic reasoning expanded for a small recovery backlog', async () => {
+    const props = owner('running', 'reasoning '.repeat(20), true)
+    const view = render(native(props, preferences, Official))
+    await paint(3)
+    await act(() => { window.dispatchEvent(new Event('dsha:background')) })
+    await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
+    await paint(4)
+    expect(view.queryByTestId('reasoning-body')).not.toBeNull()
+  })
+
+  it('does not collapse a manually opened reasoning panel during large recovery', async () => {
+    const props = owner('running', 'reasoning '.repeat(180), true)
+    const view = render(native(props, preferences, Official))
+    await paint(3)
+    fireEvent.click(view.getByText('Official thinking'))
+    fireEvent.click(view.getByText('Official thinking'))
+    await act(() => { window.dispatchEvent(new Event('dsha:background')) })
+    await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
+    expect(view.queryByTestId('reasoning-body')).not.toBeNull()
+  })
+
   it('uses real official renderer/hooks to auto-open and close only after completion drains', async () => {
     const props = owner('running', 'reasoning '.repeat(20), true)
     const view = render(native(props, preferences, Official))
@@ -224,8 +398,8 @@ describe('native assistant wrapper', () => {
       createElement('section', { 'data-chat-flow-key': 'assistant' }, native(props, settings, Official)),
       createElement('section', { 'data-chat-flow-key': 'tool' }, createElement(Tool, { node: toolNode, sessionId: props.sessionId }))))
     await act(async () => {})
-    const aside = view.getByText('tool done')
-    const shell = aside.closest('div[style]') as HTMLElement
+    const aside = view.container.querySelector('aside')!
+    const shell = aside.closest('[data-smooth-stream-phase]') as HTMLElement
     if (keep) {
       expect(shell.style.opacity).toBe('0')
       await act(() => vi.advanceTimersByTimeAsync(7000))
@@ -234,6 +408,8 @@ describe('native assistant wrapper', () => {
       await paint(100)
     }
     expect(shell.style.opacity).not.toBe('0')
+    await paint(30)
+    expect(aside.textContent).toBe('tool done')
     expect(view.container.querySelector('[data-chat-flow-key="assistant"]')?.textContent?.trim()).toBe('lead-in '.repeat(20).trim())
   })
 
@@ -260,10 +436,14 @@ describe('native assistant wrapper', () => {
       createElement('section', { key: 'a', 'data-chat-flow-key': 'assistant' }, assistant ? native(props) : null),
       createElement('section', { key: 'b', 'data-chat-flow-key': 'tool' }, tool))
     const view = render(tree(true))
-    expect((view.getByText('finished tool').closest('div[style]') as HTMLElement).style.opacity).toBe('0')
+    const shell = view.container.querySelector('[data-chat-flow-key="tool"] [data-smooth-stream-phase]') as HTMLElement
+    expect(shell.style.opacity).toBe('0')
+    expect(shell.textContent).toBe('')
     view.rerender(tree(false))
     await act(async () => {})
-    expect((view.getByText('finished tool').closest('div[style]') as HTMLElement).style.opacity).not.toBe('0')
+    expect(shell.style.opacity).not.toBe('0')
+    await paint(30)
+    expect(shell.textContent).toBe('finished tool')
   })
 
   it('updates official reasoning disclosure when auto-expand changes without a new text chunk', async () => {

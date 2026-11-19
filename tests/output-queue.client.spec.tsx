@@ -134,6 +134,67 @@ describe('ordered Agent output presentation', () => {
     expect(b.style.visibility).toBe('visible')
   })
 
+  it('finishes appended text in an earlier atomic subcall before resuming the next one', async () => {
+    const long = 'b'.repeat(120)
+    const Nested = wrapFollowNodeView((props) => createElement('article', null,
+      createElement('div', { 'data-chat-call-id': 'a' }, props.text as string),
+      createElement('div', { 'data-chat-call-id': 'b', style: { visibility: 'visible' } }, long)), () => false)
+    const node = { key: 'tree', kind: 'tool-call', anchorSeq: 1, data: { root: {}, turn: 1, step: 1 } }
+    const tree = (text: string) => createElement(Nested, { node, sessionId: 's', text })
+    const view = render(tree('a'))
+    await paint(5)
+    const a = view.container.querySelector<HTMLElement>('[data-chat-call-id="a"]')!
+    const b = view.container.querySelector<HTMLElement>('[data-chat-call-id="b"]')!
+    const before = b.textContent!
+    expect(a.textContent).toBe('a')
+    expect(before.length).toBeGreaterThan(0)
+    expect(before.length).toBeLessThan(long.length)
+
+    const appended = 'a'.repeat(24)
+    await act(async () => { view.rerender(tree(appended)) })
+    expect(a.textContent).toBe('a')
+    expect(b.style.visibility).toBe('hidden')
+    for (let frame = 0; frame < 60 && a.textContent !== appended; frame++) {
+      await paint()
+      if (a.textContent !== appended) expect(b.textContent).toBe(before)
+    }
+    expect(a.textContent).toBe(appended)
+    expect(b.style.visibility).toBe('visible')
+    await paint(120)
+    expect(b.textContent).toBe(long)
+  })
+
+  it('paces moved text in its new DOM order without losing its hidden suffix', async () => {
+    const first = 'a'.repeat(40)
+    const second = 'b'.repeat(24)
+    const Nested = wrapFollowNodeView(() => createElement('article', null,
+      createElement('div', { 'data-chat-call-id': 'a' }, first),
+      createElement('div', { 'data-chat-call-id': 'b' }, second)), () => false)
+    const view = render(createElement(Nested, { sessionId: 's', node: { key: 'tree', kind: 'tool-call', anchorSeq: 1,
+      data: { root: {}, turn: 1, step: 1 } } }))
+    await paint(3)
+    const a = view.container.querySelector<HTMLElement>('[data-chat-call-id="a"]')!
+    const b = view.container.querySelector<HTMLElement>('[data-chat-call-id="b"]')!
+    const before = a.textContent!
+    expect(before.length).toBeGreaterThan(0)
+    expect(before.length).toBeLessThan(first.length)
+    expect(b.textContent).toBe('')
+
+    a.style.setProperty('visibility', 'visible', 'important')
+    await act(async () => { a.parentElement!.append(a) })
+    expect(a.style.visibility).toBe('hidden')
+    expect(b.style.visibility).toBe('')
+    for (let frame = 0; frame < 60 && b.textContent !== second; frame++) {
+      await paint()
+      if (b.textContent !== second) expect(a.textContent).toBe(before)
+    }
+    expect(b.textContent).toBe(second)
+    expect(a.style.visibility).toBe('visible')
+    expect(a.style.getPropertyPriority('visibility')).toBe('important')
+    await paint(60)
+    expect(a.textContent).toBe(first)
+  })
+
   it('drops a paused source replaced by whitespace instead of replaying stale text', async () => {
     const text = 'a'.repeat(80)
     const tree = (value: string) => createElement('main', null,

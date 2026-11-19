@@ -155,14 +155,14 @@ Host 日志中显示 `[dsh-smooth-stream] plugin loaded!` 即表示已成功加�
 不联网构建时，可直接安装仓库里已构建好的安装包（见 [`dist/`](dist/README.md)）：
 
 ```sh
-npm install https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.1.tgz
+npm install https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.2.tgz
 ```
 
 装进 DSH profile 时先下载再用本地路径：
 
 ```sh
-curl -L -O https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.1.tgz
-pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.10.1.tgz
+curl -L -O https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.2.tgz
+pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.10.2.tgz
 ```
 
 卸载命令：`pnpm dsh plugin --profile web remove dsh-smooth-stream`。
@@ -198,7 +198,7 @@ pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.10.1.tgz
 在 Web 界面打开 **设置 → 插件 → 插件配置**，可对 **丝滑流式（Smooth stream）** 卡片进行个性化调节：
 
 - **启用丝滑流式渲染**（默认开启）：接管回复和工具行的渲染与跟随；关闭后即时恢复 Harness 内置渲染。
-- **自动展开思考**：使用官方 disclosure Hook，在推理流式生成时展开，排空后收起；保留用户手动选择及官方 Turn reset。
+- **自动展开思考**：使用官方 disclosure Hook，在推理流式生成时展开，排空后收起；保留用户手动选择及官方 Turn reset。仅在后台恢复且未显示内容超过 1200 个 Unicode 码点时暂停自动展开，直到本次积压排空；少量积压及普通前台输出不受影响，手动展开仍然有效。
 - **工具引导语保持流式**：开启后等前置正文真正排空再呈现工具；关闭则即时交接。接力按 Session、Turn、Step 隔离，中断或卸载释放自己的队列。
 - **接管滚动**：在新版分组结构上平滑跟随，读者向上滚动后让出控制。关闭时清除插件增加的预留和跟随样式，将滚动交回 Harness。
 - **预测预留空间**（调试参数）：仅控制插件额外增加的空间，只有开启“接管滚动”且启用已保存的物理参数时，自定义值才生效。数值是插件预留 margin 与 padding 的合计上限，设为 `0` 禁用额外 runway；调低会回收已有插件预留，同时补偿阅读位置以减少跳动。官方折叠占位、输入框避让和安全区间距不受此参数控制，因此 `0` 不等于聊天底部所有留白都消失。
@@ -208,7 +208,7 @@ pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.10.1.tgz
 - **启用已保存的物理参数**（默认关闭）：独立控制是否使用调试页保存的字符速率、每帧字数和弹簧参数。开启后关闭 HUD 仍然生效；关闭时恢复内置默认值，但保留保存的参数。旧配置迁移时保留原先实际生效状态。
 - **显示渲染调试面板**（默认关闭）：在界面右侧开启实时 HUD，观测字符积压与跟随状态并编辑物理参数。此开关只控制诊断显示与采集，不再决定保存的物理参数是否生效。
 
-当前回合的工具、上下文注入、命令和其他 Agent 输出按节点顺序逐条呈现，等待前方文字实际排空后再播放。工具树内的子调用共享文字预算并依次显现；后端任务仍可并行执行。已经加载的已关闭历史回合直接显示，不重播动画。
+当前回合中受 `conversation.chat.node` 包装的助手、工具、上下文注入、命令和其他 Agent 输出按节点顺序逐条呈现，等待前方文字实际排空后再播放。恢复时首次到达的已结算正文及工具结果也遵守这一门禁，恢复策略按 Session/Turn 的积压延续，不依赖固定时间窗口。工具树内的子调用共享文字预算，并按当前 DOM 顺序消费待显示文本；后端任务仍可并行执行。已经加载的已关闭历史回合直接显示，不重播动画。过程组标题、底部运行状态和输入区独立 Todo 面板属于宿主界面，不纳入聊天节点队列。工具行只等待当前已到达文字排空，后续源文本更新会再次排队。
 
 本地淡入预览：执行 `pnpm build:repro`，在仓库根目录启动 `python3 -m http.server 8765 --bind 127.0.0.1`，打开 `http://127.0.0.1:8765/repro/index.html?demo=fade`。预览包含暂停、停止、深浅主题、高速分片和代码/公式保护样例，复用真实输出引擎，富文本为测试样例。
 

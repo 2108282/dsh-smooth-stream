@@ -11,7 +11,7 @@
 import { useLayoutEffect, useRef, type RefObject } from 'react'
 import { computeAdaptiveQueueStep } from './useSmoothStreamContent.ts'
 import type { BackgroundRecovery } from '../settings.ts'
-import { recoveryBudget, RECOVERY_COMMIT_MS, useBackgroundRecovery } from './backgroundRecovery.ts'
+import { recoveryBudget, RECOVERY_COMMIT_MS, useBackgroundRecovery, type RecoveryPosition } from './backgroundRecovery.ts'
 import { debugRuntime } from './debugRuntime.ts'
 
 interface TextRevealRecord {
@@ -62,6 +62,8 @@ export function useProgressiveDomText(
   onPendingChange?: ((pending: boolean) => void) | undefined,
   paused = false,
   backgroundRecovery: BackgroundRecovery = 'catch-up',
+  recoveryKey?: string,
+  recoveryPosition?: RecoveryPosition,
 ): void {
   const callbacks = useRef({ onSettled, onPendingChange })
   callbacks.current = { onSettled, onPendingChange }
@@ -69,7 +71,7 @@ export function useProgressiveDomText(
   pausedRef.current = paused
   const resume = useRef<(() => void) | null>(null)
   const suspend = useRef<(() => void) | null>(null)
-  const recovery = useBackgroundRecovery(backgroundRecovery, () => suspend.current?.(), () => resume.current?.())
+  const recovery = useBackgroundRecovery(backgroundRecovery, () => suspend.current?.(), () => resume.current?.(), recoveryKey, recoveryPosition)
   const recoveryRef = useRef(recovery)
   recoveryRef.current = recovery
   useLayoutEffect(() => { if (!paused) resume.current?.() }, [paused])
@@ -215,7 +217,10 @@ export function useProgressiveDomText(
       forEachText(from, (text) => {
         if (!revealable(text, root)) return
         if (reveal) {
-          enqueue(text, text.data, records.get(text))
+          const record = records.get(text)
+          // A moved Text node can still hold our revealed prefix, not new source.
+          if (record !== undefined && text.data === record.chars.slice(0, record.shown).join('')) return
+          enqueue(text, text.data, record)
           return
         }
         settle(text)
@@ -252,13 +257,29 @@ export function useProgressiveDomText(
       const elapsed = Math.max(0, now - lastFrame)
       const playback = recoveryRef.current
       playback.detectGap(elapsed)
+      const catchingUp = playback.recovering() && playback.mode() === 'catch-up'
+      if (catchingUp && elapsed < RECOVERY_COMMIT_MS) { scheduleFrame(); return }
+
+      const orderedPending: Array<{ node: Text; record: TextRevealRecord }> = []
+      let backlog = 0
+      for (const node of pending) {
+        const record = records.get(node)
+        if (record === undefined || !node.isConnected || !root.contains(node)) {
+          pending.delete(node)
+          records.delete(node)
+          continue
+        }
+        orderedPending.push({ node, record })
+        backlog += record.chars.length - record.shown
+      }
+      // Earlier nodes can re-enter the queue, and nodes can move while queued.
+      orderedPending.sort((left, right) => (
+        (left.node.compareDocumentPosition(right.node) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 ? -1 : 1
+      ))
       if (playback.recovering() && playback.mode() === 'latest') {
-        for (const text of pending) {
-          const record = records.get(text)
-          if (record && text.isConnected) {
-            write(text, record.full)
-            records.set(text, { ...record, shown: record.chars.length })
-          }
+        for (const { node, record } of orderedPending) {
+          write(node, record.full)
+          records.set(node, { ...record, shown: record.chars.length })
         }
         pending.clear()
         syncCallVisibility()
@@ -266,28 +287,15 @@ export function useProgressiveDomText(
         playback.finish()
         return
       }
-      const catchingUp = playback.recovering() && playback.mode() === 'catch-up'
-      if (catchingUp && elapsed < RECOVERY_COMMIT_MS) { scheduleFrame(); return }
       lastFrame = now
-      let backlog = 0
-      for (const node of pending) {
-        const record = records.get(node)
-        if (record !== undefined) backlog += record.chars.length - record.shown
-      }
       const tuning = debugRuntime.activeTuning()
       const step = computeAdaptiveQueueStep(backlog, Math.min(elapsed, 32), debt, 1, tuning)
       const budget = catchingUp ? recoveryBudget(backlog, elapsed, debt, tuning) : { chars: step.revealChars, debt: step.debt }
       debt = budget.debt
       speedCpsRef.current = catchingUp ? budget.chars * 1000 / Math.max(1, elapsed) : step.speedCps
       let remaining = budget.chars
-      for (const node of [...pending]) {
+      for (const { node, record } of orderedPending) {
         if (remaining <= 0) break
-        const record = records.get(node)
-        if (record === undefined || !node.isConnected) {
-          pending.delete(node)
-          records.delete(node)
-          continue
-        }
         const amount = Math.min(remaining, record.chars.length - record.shown)
         const shown = record.shown + amount
         const next = { ...record, shown }

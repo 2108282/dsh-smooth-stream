@@ -36,6 +36,11 @@ export function relayScope(node: unknown, sessionId?: unknown): RelayScope {
   }
 }
 
+/** Shared recovery identity, isolated from other sessions and historical turns. */
+export function relayTurnKey(scope: RelayScope): string {
+  return JSON.stringify([scope.session, scope.turn])
+}
+
 function sameTurn(a: RelayScope, b: RelayScope): boolean {
   return a.session === b.session && a.turn === b.turn
 }

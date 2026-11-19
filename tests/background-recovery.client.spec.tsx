@@ -1,7 +1,7 @@
 import { act, cleanup, render } from '@testing-library/react'
 import { createElement } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { useSmoothStreamContent } from '../src/client/useSmoothStreamContent.ts'
+import { LARGE_RECOVERY_BACKLOG_CHARS, useSmoothStreamContent } from '../src/client/useSmoothStreamContent.ts'
 import { wrapFollowNodeView } from '../src/client/TypewriterToolNodeView.tsx'
 import { streamRelay } from '../src/client/streamRelay.ts'
 import { recoveryBudget, RECOVERY_MAX_CHARS } from '../src/client/backgroundRecovery.ts'
@@ -26,8 +26,18 @@ beforeEach(() => {
   vi.stubGlobal('performance', { now: () => time })
 })
 afterEach(() => { cleanup(); streamRelay.clearAll(); vi.unstubAllGlobals() })
-function Probe({ text, mode, complete = false }: { text: string; mode: BackgroundRecovery; complete?: boolean }) {
-  return createElement('output', null, useSmoothStreamContent(text, { backgroundRecovery: mode, inputComplete: complete }))
+function Probe({ text, mode, complete = false, enabled = true, replayOnEnable = false, shouldHoldBack, onRecoveryBacklogChange }: {
+  text: string
+  mode: BackgroundRecovery
+  complete?: boolean
+  enabled?: boolean
+  replayOnEnable?: boolean
+  shouldHoldBack?: () => boolean
+  onRecoveryBacklogChange?: (pending: boolean) => void
+}) {
+  return createElement('output', null, useSmoothStreamContent(text, {
+    backgroundRecovery: mode, inputComplete: complete, enabled, replayOnEnable, shouldHoldBack, onRecoveryBacklogChange,
+  }))
 }
 
 describe('background playback choices', () => {
@@ -80,6 +90,117 @@ describe('background playback choices', () => {
     await paint(3)
     expect(view.container.textContent!.length).toBeGreaterThan(1000)
     expect(view.container.textContent!.length).toBeLessThan(1100)
+  })
+
+  it.each(['replay', 'catch-up', 'latest'] as const)('does not replay a superseded replacement in %s mode', async mode => {
+    const view = render(createElement(Probe, { text: 'first', mode }))
+    await paint(10)
+    await background(true)
+    view.rerender(createElement(Probe, { text: 'second', mode }))
+    expect(view.container.textContent).toBe('first')
+    await background(false)
+    view.rerender(createElement(Probe, { text: 'third', mode }))
+    expect(view.container.textContent).toBe('third')
+
+    view.rerender(createElement(Probe, { text: 'third!', mode }))
+    await paint()
+    expect(view.container.textContent).toBe('third')
+    await paint(5)
+    expect(view.container.textContent).toBe('third!')
+  })
+
+  it.each(['replay', 'catch-up', 'latest'] as const)('synchronizes disabled snapshots and resumes ordinary pacing in %s mode', async mode => {
+    const view = render(createElement(Probe, { text: 'first', mode }))
+    await paint(10)
+    await background(true)
+    view.rerender(createElement(Probe, { text: 'second', mode }))
+    await background(false)
+    view.rerender(createElement(Probe, { text: 'second!', mode, enabled: false }))
+    expect(view.container.textContent).toBe('second!')
+
+    const nextText = 'second!' + 'x'.repeat(100)
+    view.rerender(createElement(Probe, { text: nextText, mode }))
+    await paint()
+    expect(view.container.textContent).toBe('second!')
+    await paint(2)
+    expect(view.container.textContent!.length).toBeGreaterThan('second!'.length)
+    expect(view.container.textContent!.length).toBeLessThanOrEqual('second!'.length + 2 * DEFAULT_STREAM_DEBUG_TUNING.cadenceClamp)
+    await paint(100)
+    expect(view.container.textContent).toBe(nextText)
+  })
+
+  it.each([true, false])('replays a disabled snapshot on enable only when requested (%s)', async replayOnEnable => {
+    const mode = 'replay'
+    const text = 'queued '.repeat(30)
+    let hold = true
+    const shouldHoldBack = () => hold
+    const view = render(createElement(Probe, { text, mode, enabled: false, replayOnEnable, shouldHoldBack }))
+    expect(view.container.textContent).toBe(text)
+
+    view.rerender(createElement(Probe, { text, mode, replayOnEnable, shouldHoldBack }))
+    await paint(5)
+    expect(view.container.textContent).toBe(replayOnEnable ? '' : text)
+    hold = false
+    await paint(3)
+    if (replayOnEnable) {
+      expect(view.container.textContent!.length).toBeGreaterThan(0)
+      expect(view.container.textContent!.length).toBeLessThan(text.length)
+    }
+    await paint(200)
+    expect(view.container.textContent).toBe(text)
+    view.rerender(createElement(Probe, { text, mode, replayOnEnable, shouldHoldBack }))
+    expect(view.container.textContent).toBe(text)
+  })
+
+  it.each([true, false])('holds a replacement behind its predecessor (background: %s)', async hidden => {
+    const mode = 'latest'
+    let hold = false
+    const shouldHoldBack = () => hold
+    const view = render(createElement(Probe, { text: 'first', mode, shouldHoldBack }))
+    await paint(10)
+    hold = true
+    if (hidden) await background(true)
+    view.rerender(createElement(Probe, { text: 'second', mode, shouldHoldBack }))
+    if (hidden) await background(false)
+    await paint(5)
+    expect(view.container.textContent).toBe('first')
+
+    hold = false
+    await paint(10)
+    expect(view.container.textContent).toBe('second')
+  })
+
+  it.each([LARGE_RECOVERY_BACKLOG_CHARS, LARGE_RECOVERY_BACKLOG_CHARS + 1])('reports only large recovery backlogs and holds the latch until drained (%s chars)', async backlog => {
+    const mode = 'catch-up'
+    const firstCallback = vi.fn()
+    const latestCallback = vi.fn()
+    const text = 'first' + 'x'.repeat(backlog)
+    const view = render(createElement(Probe, { text: 'first', mode, onRecoveryBacklogChange: firstCallback }))
+    await paint(10)
+    await background(true)
+    view.rerender(createElement(Probe, { text, mode, onRecoveryBacklogChange: firstCallback }))
+    await background(false)
+    expect(firstCallback.mock.calls).toEqual(backlog > LARGE_RECOVERY_BACKLOG_CHARS ? [[true]] : [])
+
+    view.rerender(createElement(Probe, { text, mode, onRecoveryBacklogChange: latestCallback }))
+    await paint(5)
+    expect(view.container.textContent!.length).toBeGreaterThan('first'.length)
+    expect(view.container.textContent!.length).toBeLessThan(text.length)
+    expect(latestCallback).not.toHaveBeenCalled()
+    await paint(400)
+    expect(view.container.textContent).toBe(text)
+    expect(latestCallback.mock.calls).toEqual(backlog > LARGE_RECOVERY_BACKLOG_CHARS ? [[false]] : [])
+  })
+
+  it.each([16, 60000])('does not report ordinary foreground backlog as a WebView resume (%sms frame)', async interval => {
+    const onRecoveryBacklogChange = vi.fn()
+    const view = render(createElement(Probe, {
+      text: 'x'.repeat(LARGE_RECOVERY_BACKLOG_CHARS + 500), mode: 'replay', onRecoveryBacklogChange,
+    }))
+    await paint(3)
+    await paint(1, interval)
+    expect(onRecoveryBacklogChange).not.toHaveBeenCalled()
+    expect(view.container.textContent!.length).toBeLessThan(LARGE_RECOVERY_BACKLOG_CHARS)
   })
 
   it.each(['replay', 'catch-up', 'latest'] as const)('retains %s when data arrives after the foreground callback', async mode => {

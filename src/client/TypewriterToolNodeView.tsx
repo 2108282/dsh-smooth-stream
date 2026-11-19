@@ -2,7 +2,8 @@ import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef
 import type { BackgroundRecovery } from '../settings.ts'
 import { FollowHost } from './FollowHost.tsx'
 import { useProgressiveDomText } from './useProgressiveDomText.ts'
-import { relayScope, streamRelay } from './streamRelay.ts'
+import { relayScope, relayTurnKey, streamRelay } from './streamRelay.ts'
+import { isBackgroundRecoveryScope } from './backgroundRecovery.ts'
 import { hasRecentConversationFollow } from './teleprompterGlide.ts'
 import entranceCss from './AgentRowEntrance.module.css'
 
@@ -179,8 +180,18 @@ export function wrapFollowNodeView(
     const hostRef = useRef<HTMLDivElement>(null)
     const isSettled = isSettledChatNode(props.node)
     const growing = !isSettled && isGrowingChatNode(props.node)
-    // A fast result mounted in the open Turn still needs a presentation seat.
+    const scope = useMemo(() => relayScope(props.node, props.sessionId), [props.node, props.sessionId])
+    const recoveryKey = relayTurnKey(scope)
+    const recoveryPosition = [scope.step, scope.order, 2] as const
+    const relayBlocked = useSyncExternalStore(
+      streamRelay.subscribe,
+      () => streamRelay.isBlocked(scope, 'tool'),
+      () => false,
+    )
+    // A fast result in the active recovery turn still owns a presentation seat,
+    // including a final snapshot whose Turn/Step has already closed.
     const structurallyFollowable = isFollowableChatNode(props.node) || openAgentLocation(props.node)
+      || relayBlocked || isBackgroundRecoveryScope(recoveryKey, recoveryPosition)
     const structuralRef = useRef(structurallyFollowable)
     const [runtimeFollowable, setRuntimeFollowable] = useState(false)
     const runtimePersistentRef = useRef(false)
@@ -207,12 +218,6 @@ export function wrapFollowNodeView(
     entranceActiveRef.current = entering || growthPulse
 
     // 内存接力棒门禁：检查前序思考或正文是否仍在活跃输出中
-    const scope = useMemo(() => relayScope(props.node, props.sessionId), [props.node, props.sessionId])
-    const relayBlocked = useSyncExternalStore(
-      streamRelay.subscribe,
-      () => streamRelay.isBlocked(scope, 'tool'),
-      () => false,
-    )
     const nodeKind = props.node !== null && typeof props.node === 'object' && 'kind' in props.node
       ? props.node.kind : undefined
     const toolPresence = nodeKind === 'tool-call'
@@ -327,6 +332,8 @@ export function wrapFollowNodeView(
       updatePending,
       waiting,
       recoveryMode,
+      followable && (growing || revealPending) ? recoveryKey : undefined,
+      recoveryPosition,
     )
 
     useLayoutEffect(() => {
