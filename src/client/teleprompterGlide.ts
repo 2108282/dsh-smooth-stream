@@ -1877,6 +1877,25 @@ export function useConversationFollow(
       debugRuntime.reportFollow(next, null)
     }
 
+    const hostInputFoldActive = (next: HTMLElement): boolean => {
+      const flow = flowElementOf(next)
+      return flow?.hasAttribute('data-input-fold') === true
+        || next.querySelector('[data-chat-transcript][data-input-fold], [data-chat-flow][data-input-fold]') !== null
+    }
+
+    const yieldToInputFold = (next: HTMLElement): void => {
+      if (followHostScrollPorts.has(next)) { hostOwnsScroll = true; return }
+      const readerHold = followReaderHolds.get(next)
+      // Native fold owns both its spacer and scroll clock. Release only our
+      // styles; pinning to the floor here would override its measured landing.
+      releaseFollowSpace(next)
+      followLeaders.delete(next)
+      followHostScrollPorts.set(next, { userRows: countUserRows(next) })
+      if (readerHold !== undefined) followReaderHolds.set(next, readerHold)
+      hostOwnsScroll = true
+      releaseRevealScale()
+    }
+
     const detectHostScroll = (next: HTMLElement, floor: number): void => {
       if (followHostScrollPorts.has(next)) {
         hostOwnsScroll = true
@@ -2060,6 +2079,7 @@ export function useConversationFollow(
     /** Pre-paint correction (observers, commit subscription). */
     const restoreBeforePaint = (): void => {
       if (lifecycleRef.current.hidden()) return
+      if (port !== null && hostInputFoldActive(port)) { yieldToInputFold(port); return }
       if (port !== null && followSuspensions.get(port)?.pending) return
       if (!controlScrollRef.current || !following || port === null || (followSpaceEpochs.get(port) ?? 0) !== spaceEpoch) return
       if (hostOwnsScroll || followHostScrollPorts.has(port)) {
@@ -2219,7 +2239,7 @@ export function useConversationFollow(
         const flow = flowElementOf(port)
         if (flow !== null) {
           mutations = new MutationObserver(() => { restoreBeforePaint() })
-          mutations.observe(flow, { childList: true, subtree: true })
+          mutations.observe(flow, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-input-fold'] })
         }
       }
     }
@@ -2257,6 +2277,7 @@ export function useConversationFollow(
       observeTailSurface()
       resetHostScrollOwnershipForNewTurn(nextPort)
       hostOwnsScroll = followHostScrollPorts.has(nextPort)
+      if (hostInputFoldActive(nextPort)) { yieldToInputFold(nextPort); return }
       if (activeRef.current) followActivePorts.add(nextPort)
       else followActivePorts.delete(nextPort)
       // A hidden/unmeasured port has no meaningful floor yet. Keep this owner
@@ -2904,7 +2925,7 @@ export function useConversationFollow(
         const flow = flowElementOf(host)
         if (flow !== null) {
           mutations = new MutationObserver(() => { restoreBeforePaint() })
-          mutations.observe(flow, { childList: true, subtree: true })
+          mutations.observe(flow, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-input-fold'] })
         }
       }
       // From here this closure's observers are the completion guard of last

@@ -247,6 +247,53 @@ describe('conversation follow across WebView recovery', () => {
     expect(model.status.textContent).toBe('Working')
   })
 
+  it('yields to a native input fold without pinning or changing its spacer and stays passive after remount', async () => {
+    const { model, remount } = mount()
+    await paint(20)
+    expect(pixels(model.status.style.marginTop)).toBeGreaterThan(pixels(ORIGINAL.margin))
+    await act(async () => {
+      model.spacer.style.height = '240px'
+      model.transcript.setAttribute('data-input-fold', '')
+      // The native fold owns an intermediate scroll position while its rows
+      // and spacer animate together. It must not be pulled to the new floor.
+      model.port.scrollTop = 420
+    })
+    expect(model.status.style.marginTop).toBe(ORIGINAL.margin)
+    expect(model.transcript.style.paddingBottom).toBe(ORIGINAL.padding)
+    expect(shift(model.transcript)).toBe(0)
+    expect(model.spacer.style.height).toBe('240px')
+    expect(model.port.scrollTop).toBe(420)
+    expect(model.port.hasAttribute('data-follow-owned')).toBe(false)
+    await paint(3)
+    expect(model.port.scrollTop).toBe(420)
+    await act(async () => model.transcript.removeAttribute('data-input-fold'))
+    remount()
+    await paint(3)
+    expect(model.status.style.marginTop).toBe(ORIGINAL.margin)
+    expect(model.transcript.style.paddingBottom).toBe(ORIGINAL.padding)
+    expect(shift(model.transcript)).toBe(0)
+    expect(model.spacer.style.height).toBe('240px')
+    expect(model.port.scrollTop).toBe(420)
+    expect(model.port.hasAttribute('data-follow-owned')).toBe(false)
+  })
+
+  it('does not claim the first frame when the native input fold is already active', async () => {
+    const { model } = mount()
+    await act(async () => {
+      model.spacer.style.height = '240px'
+      model.transcript.setAttribute('data-input-fold', '')
+      model.port.scrollTop = 420
+    })
+    await paint()
+    expect(model.status.style.marginTop).toBe(ORIGINAL.margin)
+    expect(model.transcript.style.paddingBottom).toBe(ORIGINAL.padding)
+    expect(model.transcript.style.minHeight).toBe(ORIGINAL.minHeight)
+    expect(shift(model.transcript)).toBe(0)
+    expect(model.spacer.style.height).toBe('240px')
+    expect(model.port.scrollTop).toBe(420)
+    expect(model.port.hasAttribute('data-follow-owned')).toBe(false)
+  })
+
   it.each(['lifecycle', 'long-frame'] as const)('keeps a reader who scrolled up released after %s geometry recovery', async mode => {
     const { model } = mount()
     await paint(20)

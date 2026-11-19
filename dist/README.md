@@ -49,7 +49,7 @@ pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.10.3.tgz
 
 ```sh
 sha256sum dsh-smooth-stream-0.10.3.tgz
-# 期望：51d0dc5f7b872cfd599bffab08df4e461f31e1c60baac4b02d28a5590ebd6754
+# 期望：24157a95137c54e0fdd9cb8308d4048788a6fdab1b827ab6b761d63024975a87
 ```
 
 ## 说明
