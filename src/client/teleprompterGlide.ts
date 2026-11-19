@@ -26,7 +26,8 @@
  * reader release re-acquires only after returning to the real floor.
  */
 
-import { useLayoutEffect, useRef, type RefObject } from 'react'
+import { useLayoutEffect, useRef, useState, type RefObject } from 'react'
+import { BACKGROUND_GAP_MS, useBackgroundRecovery } from './backgroundRecovery.ts'
 import { DEFAULT_STREAM_DEBUG_TUNING, type StreamDebugTuning } from '../settings.ts'
 import { debugRuntime } from './debugRuntime.ts'
 
@@ -1326,6 +1327,53 @@ function reconcileFollowBudget(port: HTMLElement): void {
   release.frame = requestAnimationFrame(tick)
 }
 
+interface FollowSuspension {
+  sequence: number
+  hidden: boolean
+  pending: boolean
+  following: boolean
+  readerTop: number
+  userRows: number
+}
+const followSuspensions = new WeakMap<HTMLElement, FollowSuspension>()
+const followRecoveryTimes = new WeakMap<HTMLElement, number>()
+
+/** Drop stale paint geometry while retaining the reader and Host ownership. */
+function suspendFollowPort(port: HTMLElement): void {
+  const previous = followSuspensions.get(port)
+  if (previous?.hidden) return
+  const hostOwner = followHostScrollPorts.get(port)
+  const readerHold = followReaderHolds.get(port)
+  const shift = currentShiftOf(shiftSurfacesOf(port).at(-1) ?? port)
+  const measurable = port.clientHeight > 0
+  const floor = Math.max(0, port.scrollHeight - port.clientHeight)
+  const following = previous?.pending
+    ? previous.following && readerHold === undefined
+    : readerHold === undefined && (!measurable
+      ? followLeaders.has(port) || hostOwner !== undefined
+      : !readerScrolledUp(port)
+        && (followLeaders.has(port) || hostOwner !== undefined || floor - port.scrollTop <= FOLLOW_REPIN_PX))
+  const readerTop = previous?.pending && readerHold === undefined
+    ? previous.readerTop
+    : Math.max(0, (measurable ? port.scrollTop : followScrollLedgers.get(port) ?? port.scrollTop) - shift)
+  // This also stops detached completion guards and budget-release frames.
+  releaseFollowSpace(port)
+  followLeaders.delete(port)
+  if (hostOwner !== undefined) followHostScrollPorts.set(port, hostOwner)
+  if (!following) followReaderHolds.set(port, readerHold ?? { atMs: performance.now() })
+  if (!following) setFollowScrollTop(port, Math.min(readerTop, Math.max(0, port.scrollHeight - port.clientHeight)))
+  port.removeAttribute(FOLLOW_OWNED_ATTR)
+  followSuspensions.set(port, { sequence: (previous?.sequence ?? 0) + 1,
+    hidden: true, pending: true, following, readerTop, userRows: countUserRows(port) })
+}
+
+function resumeFollowPort(port: HTMLElement): void {
+  const state = followSuspensions.get(port)
+  if (state !== undefined) state.hidden = false
+  followRecoveryTimes.set(port, performance.now())
+  invalidatePaintLimit(port)
+}
+
 /** Restore only styles owned by this plugin, leaving host spacer/chrome intact. */
 function releaseFollowSpace(port: HTMLElement): void {
   followSpaceEpochs.set(port, (followSpaceEpochs.get(port) ?? 0) + 1)
@@ -1680,9 +1728,23 @@ export function useConversationFollow(
   activeRef.current = active
   const controlScrollRef = useRef(controlScroll)
   controlScrollRef.current = controlScroll
+  const [lifecycleVersion, setLifecycleVersion] = useState(0)
+  const lifecycle = useBackgroundRecovery('replay', () => {
+    if (!controlScrollRef.current) return
+    const port = rootRef.current?.closest<HTMLElement>('[data-conversation-scroll]')
+    if (port !== undefined && port !== null) suspendFollowPort(port)
+    setLifecycleVersion(version => version + 1)
+  }, () => {
+    if (!controlScrollRef.current) return
+    const port = rootRef.current?.closest<HTMLElement>('[data-conversation-scroll]')
+    if (port !== undefined && port !== null) resumeFollowPort(port)
+    setLifecycleVersion(version => version + 1)
+  })
+  const lifecycleRef = useRef(lifecycle)
+  lifecycleRef.current = lifecycle
 
   useLayoutEffect(() => {
-    if (!controlScroll) return
+    if (!controlScroll || lifecycleRef.current.hidden()) return
     if (!active) return
     const startedAsEntrance = entrance
     const owner = {}
@@ -1701,6 +1763,9 @@ export function useConversationFollow(
     let interactTimer: ReturnType<typeof setTimeout> | null = null
     let port: HTMLElement | null = null
     let spaceEpoch = 0
+    const initialPort = rootRef.current?.closest<HTMLElement>('[data-conversation-scroll]')
+    const initialSuspension = initialPort ? followSuspensions.get(initialPort) : undefined
+    let resumeSequence = initialSuspension?.pending ? 0 : initialSuspension?.sequence ?? 0
     let resize: ResizeObserver | null = null
     let mutations: MutationObserver | null = null
     let observedTail: HTMLElement | null = null
@@ -1714,7 +1779,7 @@ export function useConversationFollow(
     let trajectoryAccumulatedGrowthMs = 0
     let trajectoryGrowthSamples = 0
     let trajectoryWasActive = false
-    const revealPhase = new FollowRevealPhaseTracker()
+    let revealPhase = new FollowRevealPhaseTracker()
     let holding: HTMLElement | null = null
     let entrancePending = entranceRef.current
     let predictionNaturalHeight: number | null = null
@@ -1994,6 +2059,8 @@ export function useConversationFollow(
     }
     /** Pre-paint correction (observers, commit subscription). */
     const restoreBeforePaint = (): void => {
+      if (lifecycleRef.current.hidden()) return
+      if (port !== null && followSuspensions.get(port)?.pending) return
       if (!controlScrollRef.current || !following || port === null || (followSpaceEpochs.get(port) ?? 0) !== spaceEpoch) return
       if (hostOwnsScroll || followHostScrollPorts.has(port)) {
         hostOwnsScroll = true
@@ -2174,6 +2241,7 @@ export function useConversationFollow(
 
     const frame = (now: number) => {
       rafId = requestAnimationFrame(frame)
+      if (lifecycleRef.current.hidden()) return
       // Spring time is clamped so one paint after a stall cannot teleport the
       // transcript. Runway response uses real elapsed time, otherwise long
       // frames would open paint room more slowly precisely when it is needed.
@@ -2194,6 +2262,70 @@ export function useConversationFollow(
       // A hidden/unmeasured port has no meaningful floor yet. Keep this owner
       // unprimed and let the already-scheduled RAF initialize it after layout.
       if (nextPort.clientHeight <= 0) return
+
+      // No lifecycle signal is guaranteed when a shell freezes its renderer.
+      // Each running arm detects its own stalled clock; a shared recovery
+      // timestamp deduplicates sibling arms without letting a new arm mask it.
+      const lastRecovery = followRecoveryTimes.get(nextPort)
+      if (primed && elapsedMs >= BACKGROUND_GAP_MS
+        && (lastRecovery === undefined || now - lastRecovery >= BACKGROUND_GAP_MS)) {
+        suspendFollowPort(nextPort)
+        resumeFollowPort(nextPort)
+      }
+      const resumed = followSuspensions.get(nextPort)
+      if (resumed !== undefined && resumed.userRows !== countUserRows(nextPort)) {
+        // A later user input re-establishes native follow intent. An old
+        // suspension must not reapply the previous Turn's reader release.
+        followSuspensions.delete(nextPort)
+      } else if (resumed !== undefined && resumeSequence !== resumed.sequence) {
+        resumeSequence = resumed.sequence
+        spaceEpoch = followSpaceEpochs.get(nextPort) ?? 0
+        if (resumed.pending) {
+          // Never measure or replay an offscreen entrance. Land on current
+          // natural geometry once it is measurable, before opening any runway.
+          if (!hostOwnsScroll) setFollowScrollTop(nextPort, resumed.following
+            ? Math.max(0, nextPort.scrollHeight - nextPort.clientHeight)
+            : Math.min(resumed.readerTop, Math.max(0, nextPort.scrollHeight - nextPort.clientHeight)))
+          if (!resumed.following) nextPort.removeAttribute(FOLLOW_OWNED_ATTR)
+          resumed.pending = false
+        }
+        following = resumed.following && !followReaderHolds.has(nextPort)
+        readerReleased = !following
+        animatedH = nextPort.scrollHeight
+        reservePx = 0
+        velocityPxPerSec = 0
+        trajectoryPositionPx = null
+        trajectoryVelocityPxPerMs = 0
+        trajectoryTargetVelocityPxPerMs = 0
+        trajectoryFloorPx = null
+        trajectoryGrowthAtMs = null
+        trajectoryAccumulatedGrowthPx = 0
+        trajectoryAccumulatedGrowthMs = 0
+        trajectoryGrowthSamples = 0
+        trajectoryWasActive = false
+        externalScrollStrikes = 0
+        interacting = false
+        readerGestureIntent = false
+        predictionNaturalHeight = null
+        invalidatePaintLimit(nextPort)
+        revealPhase = new FollowRevealPhaseTracker()
+        releaseRevealScale()
+        finishEntrance()
+        primed = true
+        last = now
+        followScrollLedgers.set(nextPort, nextPort.scrollTop)
+        if (following && !hostOwnsScroll) hold(nextPort)
+        reportFollow(nextPort, following && !hostOwnsScroll)
+        return
+      }
+      // A host-owned port is passive even on a newly mounted arm's first frame.
+      // Skipping scrollTop alone still writes transforms, fills and runways.
+      if (hostOwnsScroll) {
+        primed = true
+        followScrollLedgers.set(nextPort, nextPort.scrollTop)
+        finishEntrance()
+        return
+      }
 
       const floor = Math.max(0, nextPort.scrollHeight - nextPort.clientHeight)
       const reportedLag = floor - nextPort.scrollTop
@@ -2590,6 +2722,8 @@ export function useConversationFollow(
         const disabledHost = rootRef.current?.closest<HTMLElement>('[data-conversation-scroll]') ?? port
         if (disabledHost !== null) {
           releaseFollowSpace(disabledHost)
+          followSuspensions.delete(disabledHost)
+          followRecoveryTimes.delete(disabledHost)
           followLeaders.delete(disabledHost)
           debugRuntime.reportFollow(disabledHost, null)
         }
@@ -2790,6 +2924,10 @@ export function useConversationFollow(
       // settle rate and the pinned viewport glides down to the natural
       // resting position against the composer.
       const settleFrame = (now: number): void => {
+        if (lifecycleRef.current.hidden()) {
+          stopSettleListeners()
+          return
+        }
         if (!controlScrollRef.current || (followSpaceEpochs.get(host) ?? 0) !== spaceEpoch) {
           stopSettleListeners()
           return
@@ -2940,16 +3078,20 @@ export function useConversationFollow(
       }
       requestAnimationFrame(settleFrame)
     }
-  }, [active, rootRef, speedCpsRef, revealScaleRef, predictive, predictiveRef, controlScroll])
+  }, [active, rootRef, speedCpsRef, revealScaleRef, predictive, predictiveRef, controlScroll, lifecycleVersion])
 
   useLayoutEffect(() => {
     const host = rootRef.current?.closest<HTMLElement>('[data-conversation-scroll]') ?? null
     if (host === null) return
     if (!controlScroll) {
       releaseFollowSpace(host)
+      followSuspensions.delete(host)
+      followRecoveryTimes.delete(host)
       return
     }
-    const reconcile = (): void => reconcileFollowBudget(host)
+    const reconcile = (): void => {
+      if (!lifecycleRef.current.hidden()) reconcileFollowBudget(host)
+    }
     reconcile()
     return debugRuntime.subscribe(reconcile)
   }, [rootRef, controlScroll])

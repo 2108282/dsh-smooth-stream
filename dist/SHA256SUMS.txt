@@ -2,3 +2,4 @@
 b18c8ecb45077ac04e0402615a947d579902e7d055f303c0fa20b5ebc749e4ed  dsh-smooth-stream-0.10.0.tgz
 731f705dc538b23236b25ad002355f043b2fb1e2eba0708456a72890576da949  dsh-smooth-stream-0.10.1.tgz
 38e8c6f2b4e0dace582c0cc93ff1882efddafe8177f145feca7ae85d21003707  dsh-smooth-stream-0.10.2.tgz
+51d0dc5f7b872cfd599bffab08df4e461f31e1c60baac4b02d28a5590ebd6754  dsh-smooth-stream-0.10.3.tgz
