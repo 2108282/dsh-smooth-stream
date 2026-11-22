@@ -10,6 +10,7 @@ import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client'
 import { NativeAssistantNodeView } from './NativeAssistantNodeView.tsx'
 import { installRendererAdapter } from './rendererAdapter.ts'
 import { installConversationPipeline } from './conversationPipeline.ts'
+import { bindRecoverySynchronization } from './recoverySynchronization.ts'
 import { wrapFollowNodeView, type FollowWrapProps } from './TypewriterToolNodeView.tsx'
 import { SmoothStreamCard } from './SmoothStreamCard.tsx'
 import { SmoothStreamCardController } from './smooth-stream-card-controller.ts'
@@ -211,6 +212,10 @@ export function apply(ctx: ClientContext): void {
     document.getElementById(FAST_FOLD_STYLE_ID)?.remove()
   })
   healDshConversationPipeline(ctx, settings)
+  ctx.inject(['sessions', 'connection'], scopedCtx => bindRecoverySynchronization(
+    scopedCtx.sessions,
+    scopedCtx.get('connection') as unknown as ConnectionHandle,
+  ))
   const useControlScroll = (): boolean => useSyncExternalStore(
     settings.subscribe,
     () => settings.getSnapshot().controlScroll,

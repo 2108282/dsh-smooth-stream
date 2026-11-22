@@ -1,3 +1,5 @@
+import { assistantProgress } from '../src/client/presentationProgress.ts'
+import { clearToolPresentationLedger } from '../src/client/TypewriterToolNodeView.tsx'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { Context } from '@deepseek-ai/cordis'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
@@ -55,6 +57,8 @@ const FAKE = ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'req
 
 afterEach(() => {
   cleanup()
+  assistantProgress.clear()
+  clearToolPresentationLedger()
   debugRuntime.resetRuntime()
   vi.useRealTimers()
   vi.unstubAllGlobals()
@@ -171,7 +175,9 @@ function ProgressiveDomProbe({ text }: { text: string }) {
 function FollowToggleProgressiveDomProbe({ enabled, text }: { enabled: boolean; text: string }) {
   const rootRef = useRef<HTMLDivElement>(null)
   const speedCpsRef = useRef(35)
-  useProgressiveDomText(rootRef, enabled, true, speedCpsRef)
+  // This probe temporarily releases follow while its live renderer still
+  // receives output; it is not a terminal row retiring its observer.
+  useProgressiveDomText(rootRef, enabled, true, speedCpsRef, undefined, undefined, false, 'catch-up', undefined, undefined, true)
   return <div ref={rootRef}>{text}</div>
 }
 
@@ -4256,7 +4262,7 @@ describe('isGrowingChatNode', () => {
       running: { data: { kind: 'command', commandId: '1', outcome: null } },
       settled: { data: { kind: 'command', commandId: '1', outcome: { kind: 'success', text: 'done' } } },
     },
-  ])('uses all safe paint room to soften the final $label height', async ({ running, settled }) => {
+  ])('does not re-arm follow when a drained $label settles', async ({ running, settled }) => {
     vi.useFakeTimers({ toFake: [...FAKE] })
     let height = 500
     function Inner({ node }: { node: typeof running }) {
@@ -4287,7 +4293,8 @@ describe('isGrowingChatNode', () => {
 
     port.scrollTop = 390
     await act(() => vi.advanceTimersByTimeAsync(80))
-    const before = -port.scrollTop + currentTranslate(transcript)
+    const beforeScroll = port.scrollTop
+    const beforeShift = currentTranslate(transcript)
     height = 700
     view.rerender(
       <div data-conversation-scroll>
@@ -4298,21 +4305,18 @@ describe('isGrowingChatNode', () => {
       </div>,
     )
 
-    const landed = currentTranslate(transcript)
     expect(view.container.querySelector(`.${css.follow}`)).not.toBeNull()
-    expect(port.scrollTop).toBeGreaterThan(400)
-    expect(port.scrollTop).toBe(600)
-    expect(landed).toBeGreaterThan(0)
-    const landedVisual = -port.scrollTop + landed
-    expect(landedVisual).toBeGreaterThan(-port.scrollTop)
-    expect(landedVisual).toBeLessThan(before)
-    await act(() => vi.advanceTimersByTimeAsync(32))
-    const nextVisual = -port.scrollTop + currentTranslate(transcript)
-    expect(nextVisual).toBeLessThan(landedVisual)
-    expect(landedVisual - nextVisual).toBeLessThan(40)
-    await act(() => vi.advanceTimersByTimeAsync(320))
     expect(view.container.textContent).toContain('final output')
-    expect(port.scrollTop).toBeGreaterThan(500)
+    // The visible queue drained before completion. Backend completion alone
+    // does not re-enrol this static row or claim additional scroll room.
+    expect(port.scrollTop).toBe(beforeScroll)
+    expect(currentTranslate(transcript)).toBe(beforeShift)
+    await act(() => vi.advanceTimersByTimeAsync(352))
+    expect(view.container.textContent).toContain('final output')
+    // A handoff already in flight may finish at the newly measured natural
+    // floor. That does not make the completed text a fresh animation queue.
+    expect(port.scrollTop).toBe(600)
+    expect(view.container.querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('settled')
   })
 
   it('hosts follow only while the wrapped node is growing', () => {

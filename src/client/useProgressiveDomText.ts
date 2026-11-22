@@ -11,7 +11,7 @@
 import { useLayoutEffect, useRef, type RefObject } from 'react'
 import { computeAdaptiveQueueStep } from './useSmoothStreamContent.ts'
 import type { BackgroundRecovery } from '../settings.ts'
-import { recoveryBudget, RECOVERY_COMMIT_MS, useBackgroundRecovery, type RecoveryPosition } from './backgroundRecovery.ts'
+import { recoveryBudget, useBackgroundRecovery, type RecoveryPosition } from './backgroundRecovery.ts'
 import { debugRuntime } from './debugRuntime.ts'
 
 interface TextRevealRecord {
@@ -32,12 +32,59 @@ const SKIP_TEXT_SELECTOR = [
   'textarea',
 ].join(',')
 
+function excludedElement(element: Element): boolean {
+  return element.matches(SKIP_TEXT_SELECTOR)
+}
+
+/** DSH ToolRow mounts its DisclosureRow body on open; nested ToolDetails also
+ * use native details. Neither an aria-hidden icon nor a collapsed summary is
+ * evidence that the whole Tool call should stop updating. */
+const cssHidden = new WeakSet<Element>()
+const measuredClasses = new WeakMap<Element, string>()
+
+function hiddenElement(element: Element): boolean {
+  if (element.hasAttribute('hidden')) return true
+  if (element instanceof HTMLElement && (element.style.display === 'none'
+    || element.style.contentVisibility === 'hidden'
+    || (!element.hasAttribute('data-chat-call-id') && element.style.visibility === 'hidden'))) return true
+  const classes = element.getAttribute('class') ?? ''
+  if (classes === '' && measuredClasses.has(element)) {
+    measuredClasses.delete(element)
+    cssHidden.delete(element)
+  } else if (classes !== '' && measuredClasses.get(element) !== classes) {
+    measuredClasses.set(element, classes)
+    const style = getComputedStyle(element)
+    if (style.display === 'none' || style.contentVisibility === 'hidden') cssHidden.add(element)
+    else cssHidden.delete(element)
+  }
+  if (cssHidden.has(element)) return true
+  const parent = element.parentElement
+  return parent instanceof HTMLDetailsElement && !parent.open
+    && element !== parent.querySelector(':scope > summary')
+}
+
+function hiddenOutside(root: HTMLElement): boolean {
+  let element = root.parentElement
+  while (element !== null) {
+    if (hiddenElement(element)) return true
+    element = element.parentElement
+  }
+  return false
+}
+
+function visibleWithin(node: Node, root: HTMLElement): boolean {
+  if (node.nodeType === Node.TEXT_NODE && node.parentElement instanceof HTMLDetailsElement && !node.parentElement.open) return false
+  let element = node instanceof Element ? node : node.parentElement
+  while (element !== null) {
+    if (excludedElement(element) || hiddenElement(element)) return false
+    if (element === root) return !hiddenOutside(root)
+    element = element.parentElement
+  }
+  return false
+}
+
 function revealable(node: Text, root: HTMLElement): boolean {
-  if (node.data.trim() === '') return false
-  const parent = node.parentElement
-  return parent !== null
-    && root.contains(parent)
-    && parent.closest(SKIP_TEXT_SELECTOR) === null
+  return node.data.trim() !== '' && visibleWithin(node, root)
 }
 
 function commonPrefix(left: readonly string[], right: readonly string[]): number {
@@ -64,6 +111,7 @@ export function useProgressiveDomText(
   backgroundRecovery: BackgroundRecovery = 'catch-up',
   recoveryKey?: string,
   recoveryPosition?: RecoveryPosition,
+  observeChanges = enabled,
 ): void {
   const callbacks = useRef({ onSettled, onPendingChange })
   callbacks.current = { onSettled, onPendingChange }
@@ -71,7 +119,8 @@ export function useProgressiveDomText(
   pausedRef.current = paused
   const resume = useRef<(() => void) | null>(null)
   const suspend = useRef<(() => void) | null>(null)
-  const recovery = useBackgroundRecovery(backgroundRecovery, () => suspend.current?.(), () => resume.current?.(), recoveryKey, recoveryPosition)
+  const recovery = useBackgroundRecovery(backgroundRecovery, () => suspend.current?.(), () => resume.current?.(),
+    recoveryKey, recoveryPosition, false, enabled || observeChanges)
   const recoveryRef = useRef(recovery)
   recoveryRef.current = recovery
   useLayoutEffect(() => { if (!paused) resume.current?.() }, [paused])
@@ -80,7 +129,7 @@ export function useProgressiveDomText(
     if (root === null || typeof document === 'undefined') return
 
     let records = ledgerByRoot.get(root)
-    if (!enabled && records === undefined) {
+    if (!enabled && records === undefined && !observeChanges) {
       callbacks.current.onPendingChange?.(false)
       return
     }
@@ -89,12 +138,31 @@ export function useProgressiveDomText(
       ledgerByRoot.set(root, records)
     }
 
+    const callRows = new Set<HTMLElement>()
+    let orderedCalls: HTMLElement[] = []
+    let callOrderDirty = true
+    const registerCall = (element: HTMLElement): void => {
+      if (callRows.has(element)) return
+      callRows.add(element)
+      callOrderDirty = true
+    }
     const forEachText = (from: Node, callback: (text: Text) => void): void => {
+      if (!visibleWithin(from, root)) return
+      if (from instanceof HTMLElement && from.hasAttribute('data-chat-call-id')) registerCall(from)
       if (from.nodeType === Node.TEXT_NODE) {
         callback(from as Text)
         return
       }
-      const walker = document.createTreeWalker(from, NodeFilter.SHOW_TEXT)
+      // SHOW_ELEMENT is essential: rejecting an element prunes its complete
+      // hidden subtree before any of its Text nodes are visited.
+      const walker = document.createTreeWalker(from, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+        acceptNode: node => {
+          if (!(node instanceof Element)) return NodeFilter.FILTER_ACCEPT
+          if (excludedElement(node) || hiddenElement(node)) return NodeFilter.FILTER_REJECT
+          if (node instanceof HTMLElement && node.hasAttribute('data-chat-call-id')) registerCall(node)
+          return NodeFilter.FILTER_SKIP
+        },
+      })
       let current = walker.nextNode()
       while (current !== null) {
         callback(current as Text)
@@ -123,30 +191,51 @@ export function useProgressiveDomText(
     if (!enabled) {
       callbacks.current.onPendingChange?.(false)
       snapshotVisible()
-      const observer = typeof MutationObserver === 'undefined'
-        ? null
-        : new MutationObserver(snapshotVisible)
+      // Terminal/static rows need no observer. An explicitly live caller can
+      // retain local snapshot bookkeeping without rescanning the entire root.
+      if (!observeChanges) return
+      const observer = typeof MutationObserver === 'undefined' ? null : new MutationObserver(mutations => {
+        for (const mutation of mutations) {
+          if (!visibleWithin(mutation.target, root)) continue
+          if (mutation.type === 'characterData') settle(mutation.target as Text)
+          else for (const added of mutation.addedNodes) forEachText(added, settle)
+        }
+      })
       observer?.observe(root, { childList: true, characterData: true, subtree: true })
-      return () => {
-        observer?.disconnect()
-      }
+      return () => { observer?.disconnect() }
     }
 
     const pending = new Set<Text>()
     // Atomic Tool rows share this root's single budget. Keep later call chrome
     // hidden as well, so icons/running effects cannot all appear before text.
     const concealed = new Map<HTMLElement, { visibility: string; priority: string }>()
-    let calls: HTMLElement[] | null = null
     const syncCallVisibility = (): void => {
-      calls ??= [...root.querySelectorAll<HTMLElement>('[data-chat-call-id]')]
-      if (calls.length === 0) return
+      if (callRows.size === 0) return
+      if (callOrderDirty) {
+        // Structural mutations can move an existing call without changing its
+        // identity. Rebuild this small visible-call order only on those commits.
+        orderedCalls = [...callRows].sort((left, right) => left === right ? 0
+          : (left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 ? -1 : 1)
+        callOrderDirty = false
+      }
       const pendingCalls = new Set<Element>()
       for (const text of pending) {
         const call = text.parentElement?.closest('[data-chat-call-id]')
         if (call) pendingCalls.add(call)
       }
       let waitingForEarlier = false
-      for (const call of calls) {
+      for (const call of orderedCalls) {
+        if (!root.contains(call) || !visibleWithin(call, root)) {
+          const previous = concealed.get(call)
+          if (previous !== undefined) {
+            if (previous.visibility) call.style.setProperty('visibility', previous.visibility, previous.priority)
+            else call.style.removeProperty('visibility')
+            concealed.delete(call)
+          }
+          callRows.delete(call)
+          callOrderDirty = true
+          continue
+        }
         const hasPending = pendingCalls.has(call)
         const hide = pausedRef.current || waitingForEarlier
         if (hide && !concealed.has(call)) {
@@ -174,11 +263,11 @@ export function useProgressiveDomText(
       debt = 0
       speedCpsRef.current = 35
       debugRuntime.reportStream(streamId, null)
+      recoveryRef.current.finish()
       if (announcedSettled) return
       announcedSettled = true
       callbacks.current.onPendingChange?.(false)
       callbacks.current.onSettled?.()
-      recoveryRef.current.finish()
     }
 
     const write = (node: Text, value: string): void => {
@@ -205,7 +294,6 @@ export function useProgressiveDomText(
       if (preserved < chars.length) {
         pending.add(node)
         announcedSettled = false
-        recoveryRef.current.observeBacklog(true)
         callbacks.current.onPendingChange?.(true)
       } else {
         pending.delete(node)
@@ -228,11 +316,11 @@ export function useProgressiveDomText(
     }
 
     const forget = (from: Node): void => {
-      forEachText(from, (text) => {
-        if (root.contains(text)) return
+      for (const [text] of records) {
+        if (!from.contains(text) || root.contains(text)) continue
         records.delete(text)
         pending.delete(text)
-      })
+      }
     }
 
     const scheduleFrame = (): void => {
@@ -243,11 +331,12 @@ export function useProgressiveDomText(
 
     const frame = (now: number): void => {
       rafId = 0
-      if (stopped || pausedRef.current || recoveryRef.current.hidden()) { lastFrame = null; return }
+      if (stopped || recoveryRef.current.hidden()) { lastFrame = null; return }
       if (pending.size === 0) {
         announceSettled()
         return
       }
+      if (pausedRef.current) { lastFrame = null; return }
       announcedSettled = false
       if (lastFrame === null) {
         lastFrame = now
@@ -258,13 +347,19 @@ export function useProgressiveDomText(
       const playback = recoveryRef.current
       playback.detectGap(elapsed)
       const catchingUp = playback.recovering() && playback.mode() === 'catch-up'
-      if (catchingUp && elapsed < RECOVERY_COMMIT_MS) { scheduleFrame(); return }
 
       const orderedPending: Array<{ node: Text; record: TextRevealRecord }> = []
       let backlog = 0
       for (const node of pending) {
         const record = records.get(node)
-        if (record === undefined || !node.isConnected || !root.contains(node)) {
+        if (record === undefined || !node.isConnected || !visibleWithin(node, root)) {
+          // A collapse can land before MutationObserver delivery. Stop spending
+          // the visible reveal budget on that node; the observer restores its
+          // source once, never one character per frame.
+          if (record !== undefined && node.isConnected && root.contains(node)) {
+            const controlled = record.chars.slice(0, record.shown).join('')
+            if (node.data === controlled) write(node, record.full)
+          }
           pending.delete(node)
           records.delete(node)
           continue
@@ -319,7 +414,7 @@ export function useProgressiveDomText(
       }
       debugRuntime.reportStream(streamId, {
         backlog: nextBacklog,
-        speedCps: step.speedCps,
+        speedCps: speedCpsRef.current,
         targetChars,
         displayedChars,
         active: pending.size > 0,
@@ -329,14 +424,64 @@ export function useProgressiveDomText(
       else scheduleFrame()
     }
 
-    resume.current = () => { lastFrame = null; debt = 0; scheduleFrame() }
+    resume.current = () => {
+      lastFrame = null
+      debt = 0
+      if (pending.size === 0 && rafId === 0 && !stopped && !recoveryRef.current.hidden()) rafId = requestAnimationFrame(frame)
+      else scheduleFrame()
+    }
     suspend.current = () => { cancelAnimationFrame(rafId); rafId = 0; lastFrame = null; debt = 0 }
     visit(root, revealInitial)
 
-    const observer = typeof MutationObserver === 'undefined'
+    const releaseSubtree = (from: Node): void => {
+      // Work from the small controlled ledger, never walk a collapsed body.
+      for (const [node, record] of records) {
+        if (!from.contains(node)) continue
+        const controlled = record.chars.slice(0, record.shown).join('')
+        if (node.data === controlled) write(node, record.full)
+        records.delete(node)
+        pending.delete(node)
+      }
+    }
+    const isOpenedBody = (node: Node): boolean => node instanceof Element
+      && node.closest('[data-tool]') !== null
+      && (node.matches('[data-tool-body], [data-disclosure-body], [class*="_bodyWrap"]')
+        || (node.id !== '' && [...node.parentElement?.querySelectorAll('[data-disclosure-header] [aria-controls][aria-expanded="true"]') ?? []]
+          .some(control => control.getAttribute('aria-controls')?.split(/\s+/).includes(node.id))))
+
+    const observer = !observeChanges || typeof MutationObserver === 'undefined'
       ? null
       : new MutationObserver((mutations) => {
+          // Attribute reveals are snapshots, even when child insertion arrived
+          // in the same React commit. Dedupe roots so nested mutations don't
+          // repeatedly scan the same newly visible details.
+          const snapshots = new Set<Node>()
           for (const mutation of mutations) {
+            if (mutation.type !== 'attributes') continue
+            const target = mutation.target as Element
+            const attribute = mutation.attributeName
+            // A mutation inside an already hidden ancestor cannot reveal this
+            // body. Its ancestor's own visibility mutation will snapshot it.
+            if (target !== root && target.parentElement !== null && !visibleWithin(target.parentElement, root)) continue
+            const previouslyHidden = cssHidden.has(target)
+              || (attribute === 'hidden' && mutation.oldValue !== null)
+              || (attribute === 'style' && (/(?:display\s*:\s*none|content-visibility\s*:\s*hidden)/i.test(mutation.oldValue ?? '')
+                || (!target.hasAttribute('data-chat-call-id') && /(?:^|;)\s*visibility\s*:\s*hidden/i.test(mutation.oldValue ?? ''))))
+            if (attribute === 'style' || attribute === 'class') {
+              // Only the changed element is measured, once per observer batch;
+              // reveal frames never read computed style or scan hidden bodies.
+              const style = getComputedStyle(target)
+              if (style.display === 'none' || style.contentVisibility === 'hidden') cssHidden.add(target)
+              else cssHidden.delete(target)
+            }
+            const nowHidden = hiddenElement(target)
+            if (attribute !== 'open' && previouslyHidden === nowHidden) continue
+            releaseSubtree(target)
+            if (visibleWithin(target, root)) snapshots.add(target)
+          }
+          for (const mutation of mutations) {
+            if (mutation.type === 'attributes' || !visibleWithin(mutation.target, root)) continue
+            if ([...snapshots].some(snapshot => snapshot.contains(mutation.target))) continue
             if (mutation.type === 'characterData') {
               const node = mutation.target as Text
               const expected = internalWrites.get(node)
@@ -347,15 +492,41 @@ export function useProgressiveDomText(
               enqueue(node, node.data, records.get(node))
               continue
             }
-            calls = null
+            callOrderDirty = true
             for (const removed of mutation.removedNodes) forget(removed)
-            for (const added of mutation.addedNodes) visit(added, true)
+            for (const added of mutation.addedNodes) {
+              if (isOpenedBody(added)) snapshots.add(added)
+              else visit(added, true)
+            }
+          }
+          for (const snapshot of snapshots) {
+            if ([...snapshots].some(other => other !== snapshot && other.contains(snapshot))) continue
+            visit(snapshot, false)
           }
           syncCallVisibility()
           if (pending.size === 0) announceSettled()
           else scheduleFrame()
         })
-    observer?.observe(root, { childList: true, characterData: true, subtree: true })
+    let outsideHidden = hiddenOutside(root)
+    const ancestorObserver = typeof MutationObserver === 'undefined' ? null : new MutationObserver(() => {
+      const hidden = hiddenOutside(root)
+      if (hidden === outsideHidden) return
+      outsideHidden = hidden
+      // A folded Turn can hide the whole Tool wrapper outside our owned root.
+      // Restore its controlled text once; reopening is a snapshot, not replay.
+      if (hidden) releaseSubtree(root)
+      else visit(root, false)
+      syncCallVisibility()
+      if (pending.size === 0) announceSettled()
+      else scheduleFrame()
+    })
+    for (let ancestor = root.parentElement; ancestor !== null; ancestor = ancestor.parentElement) {
+      ancestorObserver?.observe(ancestor, { attributes: true, attributeFilter: ['hidden', 'style', 'class'] })
+    }
+    observer?.observe(root, {
+      childList: true, characterData: true, subtree: true, attributes: true,
+      attributeFilter: ['hidden', 'style', 'class', 'open'], attributeOldValue: true,
+    })
     if (pending.size === 0) announceSettled()
     else scheduleFrame()
 
@@ -366,6 +537,7 @@ export function useProgressiveDomText(
       callbacks.current.onPendingChange?.(false)
       cancelAnimationFrame(rafId)
       observer?.disconnect()
+      ancestorObserver?.disconnect()
       for (const [node, record] of records) {
         const controlled = record.chars.slice(0, record.shown).join('')
         // React may have committed a terminal replacement in the same mutation
@@ -384,5 +556,5 @@ export function useProgressiveDomText(
       speedCpsRef.current = 35
       debugRuntime.reportStream(streamId, null)
     }
-  }, [enabled, revealInitial, rootRef, speedCpsRef])
+  }, [enabled, observeChanges, revealInitial, rootRef, speedCpsRef])
 }

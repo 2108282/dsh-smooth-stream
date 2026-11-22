@@ -1,10 +1,12 @@
+import { assistantProgress } from '../src/client/presentationProgress.ts'
+import { clearToolPresentationLedger } from '../src/client/TypewriterToolNodeView.tsx'
 import { act, cleanup, render } from '@testing-library/react'
 import { createElement } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LARGE_RECOVERY_BACKLOG_CHARS, useSmoothStreamContent } from '../src/client/useSmoothStreamContent.ts'
 import { wrapFollowNodeView } from '../src/client/TypewriterToolNodeView.tsx'
 import { streamRelay } from '../src/client/streamRelay.ts'
-import { recoveryBudget, RECOVERY_MAX_CHARS } from '../src/client/backgroundRecovery.ts'
+import { installRecoverySynchronization, isBackgroundRecoveryScope, notifyRecoverySynchronized, recoveryBudget, RECOVERY_MAX_CHARS } from '../src/client/backgroundRecovery.ts'
 import { DEFAULT_STREAM_DEBUG_TUNING, type BackgroundRecovery } from '../src/settings.ts'
 
 let frames: Map<number, FrameRequestCallback>
@@ -25,8 +27,8 @@ beforeEach(() => {
   vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id))
   vi.stubGlobal('performance', { now: () => time })
 })
-afterEach(() => { cleanup(); streamRelay.clearAll(); vi.unstubAllGlobals() })
-function Probe({ text, mode, complete = false, enabled = true, replayOnEnable = false, shouldHoldBack, onRecoveryBacklogChange }: {
+afterEach(() => { cleanup(); assistantProgress.clear(); clearToolPresentationLedger(); streamRelay.clearAll(); vi.unstubAllGlobals() })
+function Probe({ text, mode, complete = false, enabled = true, replayOnEnable = false, shouldHoldBack, onRecoveryBacklogChange, recoveryKey }: {
   text: string
   mode: BackgroundRecovery
   complete?: boolean
@@ -34,9 +36,10 @@ function Probe({ text, mode, complete = false, enabled = true, replayOnEnable = 
   replayOnEnable?: boolean
   shouldHoldBack?: () => boolean
   onRecoveryBacklogChange?: (pending: boolean) => void
+  recoveryKey?: string
 }) {
   return createElement('output', null, useSmoothStreamContent(text, {
-    backgroundRecovery: mode, inputComplete: complete, enabled, replayOnEnable, shouldHoldBack, onRecoveryBacklogChange,
+    backgroundRecovery: mode, inputComplete: complete, enabled, replayOnEnable, shouldHoldBack, onRecoveryBacklogChange, recoveryKey,
   }))
 }
 
@@ -57,18 +60,22 @@ describe('background playback choices', () => {
     expect(added).toBeLessThanOrEqual(5 * DEFAULT_STREAM_DEBUG_TUNING.cadenceClamp)
   })
 
-  it('limits catch-up to one bounded commit per 40ms and resumes new live text normally', async () => {
+  it.each([1000 / 120, 1000 / 60])('reveals catch-up on consecutive %sms frames without a 40ms gate', async interval => {
     const view = render(createElement(Probe, { text: 'x'.repeat(100), mode: 'catch-up' }))
     await paint(3)
     await background(true)
     view.rerender(createElement(Probe, { text: 'x'.repeat(1000), mode: 'catch-up', complete: true }))
     const before = view.container.textContent!.length
     await background(false)
-    await paint(3)
+    await paint(1, interval)
     expect(view.container.textContent!.length).toBe(before)
-    await paint()
-    expect(view.container.textContent!.length - before).toBeLessThanOrEqual(RECOVERY_MAX_CHARS)
-    expect(view.container.textContent!.length).toBeGreaterThan(before)
+    for (let index = 0; index < 4; index++) {
+      const previous = view.container.textContent!.length
+      await paint(1, interval)
+      const added = view.container.textContent!.length - previous
+      expect(added).toBeGreaterThan(0)
+      expect(added).toBeLessThanOrEqual(RECOVERY_MAX_CHARS)
+    }
     await paint(500)
     expect(view.container.textContent).toBe('x'.repeat(1000))
     view.rerender(createElement(Probe, { text: 'x'.repeat(1100), mode: 'catch-up' }))
@@ -203,16 +210,62 @@ describe('background playback choices', () => {
     expect(view.container.textContent!.length).toBeLessThan(LARGE_RECOVERY_BACKLOG_CHARS)
   })
 
-  it.each(['replay', 'catch-up', 'latest'] as const)('retains %s when data arrives after the foreground callback', async mode => {
-    const view = render(createElement(Probe, { text: 'abc', mode }))
+  it.each(['replay', 'catch-up', 'latest'] as const)('retains %s for delayed synchronization data, then exits once drained', async mode => {
+    let syncing = true
+    const stop = installRecoverySynchronization({ pending: () => syncing })
+    const recoveryKey = '["delayed",1]'
+    try {
+      const view = render(createElement(Probe, { text: 'abc', mode, recoveryKey }))
+      await paint(30)
+      await background(true)
+      await background(false)
+      await paint(3)
+      expect(isBackgroundRecoveryScope(recoveryKey)).toBe(true)
+      view.rerender(createElement(Probe, { text: 'abc' + 'x'.repeat(2000), mode, complete: true, recoveryKey }))
+      syncing = false
+      await act(async () => { notifyRecoverySynchronized() })
+      await paint(5)
+      if (mode === 'latest') expect(view.container.textContent!.length).toBe(2003)
+      else expect(view.container.textContent!.length).toBeLessThanOrEqual(3 + (mode === 'replay' ? 20 : 5 * RECOVERY_MAX_CHARS))
+      await paint(700)
+      expect(view.container.textContent!.length).toBe(2003)
+      expect(isBackgroundRecoveryScope(recoveryKey)).toBe(false)
+    } finally { stop() }
+  })
+
+  it.each(['replay', 'catch-up', 'latest'] as const)('does not treat future foreground text as %s recovery after an empty synchronized resume', async mode => {
+    const recoveryKey = '["empty",1]'
+    const view = render(createElement(Probe, { text: 'abc', mode, recoveryKey }))
     await paint(30)
     await background(true)
     await background(false)
     await paint(3)
-    view.rerender(createElement(Probe, { text: 'abc' + 'x'.repeat(2000), mode, complete: true }))
-    await paint(5)
-    if (mode === 'latest') expect(view.container.textContent!.length).toBe(2003)
-    else expect(view.container.textContent!.length).toBeLessThanOrEqual(3 + (mode === 'replay' ? 20 : 32))
+    expect(isBackgroundRecoveryScope(recoveryKey)).toBe(false)
+    time += 30000
+    view.rerender(createElement(Probe, { text: 'abc' + 'x'.repeat(1000), mode, complete: true, recoveryKey }))
+    await paint(10)
+    expect(view.container.textContent!.length).toBeGreaterThan(3 + 10 * RECOVERY_MAX_CHARS)
+    expect(view.container.textContent!.length).toBeLessThan(1003)
+    await paint(30)
+    expect(view.container.textContent!.length).toBe(1003)
+  })
+
+  it('retires an empty queue on synchronization completion even without another text chunk', async () => {
+    let syncing = true
+    const stop = installRecoverySynchronization({ pending: () => syncing })
+    const recoveryKey = '["unchanged",1]'
+    try {
+      render(createElement(Probe, { text: 'abc', mode: 'catch-up', recoveryKey }))
+      await paint(30)
+      await background(true)
+      await background(false)
+      await paint(3)
+      expect(isBackgroundRecoveryScope(recoveryKey)).toBe(true)
+      syncing = false
+      await act(async () => { notifyRecoverySynchronized() })
+      await paint(2)
+      expect(isBackgroundRecoveryScope(recoveryKey)).toBe(false)
+    } finally { stop() }
   })
 
   it('falls back to a long RAF gap when a WebView omits visibility events', async () => {

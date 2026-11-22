@@ -1,7 +1,7 @@
 import { act, cleanup, render } from '@testing-library/react'
 import { createElement, StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { wrapFollowNodeView } from '../src/client/TypewriterToolNodeView.tsx'
+import { wrapFollowNodeView, clearToolPresentationLedger } from '../src/client/TypewriterToolNodeView.tsx'
 import { StreamRelay, streamRelay } from '../src/client/streamRelay.ts'
 
 let frames: Map<number, FrameRequestCallback>
@@ -23,7 +23,7 @@ beforeEach(() => {
   vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id))
   vi.stubGlobal('performance', { now: () => time })
 })
-afterEach(() => { cleanup(); streamRelay.clearAll(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); clearToolPresentationLedger(); streamRelay.clearAll(); vi.unstubAllGlobals() })
 
 const Row = wrapFollowNodeView((props) => createElement('article', { 'data-id': props.id }, props.text as string), () => false)
 function row(id: string, order: number, kind: string, text: string, sessionId = 'session') {
@@ -97,7 +97,7 @@ describe('ordered Agent output presentation', () => {
     expect(view.container.querySelector('[data-id="c"]')!.textContent).toBe('ccc')
   })
 
-  it('drains a fast completed result in an open turn and releases on interruption', async () => {
+  it('shows a first completed result immediately even in an open turn', async () => {
     const text = 'x'.repeat(80)
     const tree = (interrupted: boolean) => createElement('main', null,
       createElement('section', { key: 'fast', 'data-chat-flow-key': 'fast' }, createElement(Row, {
@@ -108,8 +108,8 @@ describe('ordered Agent output presentation', () => {
       })), row('later', 2, 'context', text, 's'))
     const view = render(tree(false))
     await paint(3)
-    expect(view.container.querySelector('[data-id="fast"]')!.textContent!.length).toBeLessThan(text.length)
-    expect(view.container.querySelector('[data-id="later"]')!.textContent).toBe('')
+    expect(view.container.querySelector('[data-id="fast"]')!.textContent).toBe(text)
+    expect(view.container.querySelector('[data-id="later"]')!.textContent!.length).toBeGreaterThan(0)
     view.rerender(tree(true))
     await paint(3)
     expect(view.container.querySelector('[data-id="fast"]')!.textContent).toBe(text)

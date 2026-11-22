@@ -7,6 +7,7 @@ import { useLogarithmicFade } from './useLogarithmicFade.ts'
 import type { StreamSettings } from '../settings.ts'
 import { relayScope, relayTurnKey, streamRelay } from './streamRelay.ts'
 import { isBackgroundRecoveryScope } from './backgroundRecovery.ts'
+import { assistantProgress } from './presentationProgress.ts'
 
 export interface NativeAssistantPreferences extends Pick<StreamSettings,
   'controlScroll' | 'motionPreference' | 'logarithmicFade' | 'thinkAutoExpand' | 'keepStreamOnToolCall'> {
@@ -126,6 +127,98 @@ export function revealAssistantBlocks(blocks: readonly AssistantBlock[], project
 
 type DisclosureHook = AssistantProps['useDisclosure']
 
+/** Match the official reasoning-text prefix filter without importing a Client plugin. */
+function reasoningDisplayStart(text: string): number {
+  if (text[0] !== '<') return 0
+  const opening = '<signature>'
+  if (opening.startsWith(text)) return text.length
+  if (!text.startsWith(opening)) return 0
+  const closing = '</signature>'
+  const end = text.indexOf(closing, opening.length)
+  if (end === -1) return text.length
+  let start = end + closing.length
+  while (start < text.length) {
+    if (text[start] === '\n') start++
+    else if (text[start] === '\r' && text[start + 1] === '\n') start += 2
+    else break
+  }
+  return start
+}
+function hasVisibleReasoning(text: string): boolean {
+  return text.slice(reasoningDisplayStart(text)).trim() !== ''
+}
+
+function hiddenAncestor(element: Element): boolean {
+  let current: Element | null = element
+  while (current !== null) {
+    if (current.hasAttribute('hidden') || current.hasAttribute('data-turn-process-inline')) return true
+    if (current instanceof HTMLElement && (current.style.display === 'none' || current.style.contentVisibility === 'hidden')) return true
+    const style = getComputedStyle(current)
+    if (style.display === 'none' || style.contentVisibility === 'hidden') return true
+    current = current.parentElement
+  }
+  return false
+}
+
+/** Observe the official disclosures, not a second invocation of their independent Hook. */
+function useCollapsedReasoning(root: { current: HTMLDivElement | null }, blocks: readonly AssistantBlock[], active: boolean,
+  disclosureRows: { current: Map<number, HTMLElement> },
+  setCollapsed: (update: (previous: readonly number[]) => readonly number[]) => void,
+  setHidden: (update: (previous: boolean) => boolean) => void) {
+  const blocksRef = useRef(blocks)
+  blocksRef.current = blocks
+  // Header identities change only when a nonblank reasoning block enters/leaves;
+  // character commits do not rescan the expanded Markdown tree.
+  const shape = blocks.flatMap((block, index) => block.kind === 'reasoning' && hasVisibleReasoning(block.text) ? [index] : []).join(',')
+  useLayoutEffect(() => {
+    const element = root.current
+    if (!active || element === null) return
+    const indices = shape === '' ? [] : shape.split(',').map(Number)
+    const rows = [...element.querySelectorAll<HTMLElement>('[data-variant="think"]')]
+    const mappedRows = new Map<number, HTMLElement>()
+    rows.forEach((row, order) => { if (indices[order] !== undefined) mappedRows.set(indices[order]!, row) })
+    disclosureRows.current = mappedRows
+    let disposed = false
+    const inspect = () => {
+      if (disposed) return
+      const hidden = hiddenAncestor(element)
+      setHidden(previous => previous === hidden ? previous : hidden)
+      setCollapsed(previous => {
+        const next = new Set(previous.filter(index => blocksRef.current[index]?.kind === 'reasoning'))
+        rows.forEach((row, order) => {
+          const index = indices[order]
+          if (index === undefined) return
+          if (!row.hasAttribute('data-expanded') || hiddenAncestor(row)) next.add(index)
+          else next.delete(index)
+        })
+        const sorted = [...next].sort((left, right) => left - right)
+        return previous.length === sorted.length && previous.every((index, order) => index === sorted[order]) ? previous : sorted
+      })
+    }
+    // Automatic expansion uses the official passive effect. Inspect after that
+    // commit, so a just-mounted auto-opening row is not synchronized prematurely.
+    const changed = () => { queueMicrotask(inspect) }
+    const observer = typeof MutationObserver === 'undefined' ? null : new MutationObserver(changed)
+    for (const row of rows) {
+      observer?.observe(row, { attributes: true, attributeFilter: ['data-expanded'] })
+      for (let parent = row.parentElement; parent !== null && parent !== element; parent = parent.parentElement) {
+        observer?.observe(parent, { attributes: true, attributeFilter: ['hidden', 'data-turn-process-inline'] })
+      }
+    }
+    // FollowHost changes internal transform styles each frame. Only external
+    // containers can fold this whole seat; do not turn scrolling into a scan.
+    for (let parent: HTMLElement | null = element; parent !== null; parent = parent.parentElement) {
+      observer?.observe(parent, { attributes: true, attributeFilter: ['hidden', 'style', 'class'] })
+    }
+    changed()
+    return () => {
+      disposed = true
+      observer?.disconnect()
+      if (disclosureRows.current === mappedRows) disclosureRows.current = new Map()
+    }
+  }, [root, shape, active])
+}
+
 /** Call the official Hook in every ReasoningRow, retaining its reset subscription. */
 function useAutomaticDisclosure(official: DisclosureHook, enabled: boolean, active: boolean): DisclosureHook {
   return useMemo(() => function useStreamDisclosure() {
@@ -195,29 +288,75 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   const [recoveryBacklog, setRecoveryBacklog] = useState(() => !reduced && node.data.status !== 'interrupted'
     && recoveringScope && countChars(source) > LARGE_RECOVERY_BACKLOG_CHARS)
   const root = useRef<HTMLDivElement>(null)
+  const [collapsedReasoning, setCollapsedReasoning] = useState<readonly number[]>(() => !preferences.thinkAutoExpand
+    ? node.data.blocks.flatMap((block, index) => block.kind === 'reasoning' ? [index] : []) : [])
+  const [detailsHidden, setDetailsHidden] = useState(false)
+  const disclosureRows = useRef(new Map<number, HTMLElement>())
+  const skipPlan = useMemo(() => {
+    const collapsed = new Set(collapsedReasoning)
+    const ranges: (readonly [number, number])[] = []
+    const guards = new Map<number, { blockIndex: number; prefixOnly: boolean }>()
+    let offset = 0
+    segments.segments.forEach((segment, index) => {
+      const start = offset
+      offset += countChars(segment)
+      const blockIndex = segments.blockIndices[index]!
+      const block = node.data.blocks[blockIndex]
+      const invisibleReasoning = block?.kind === 'reasoning' && !hasVisibleReasoning(segment)
+      if (detailsHidden || collapsed.has(blockIndex) || invisibleReasoning) {
+        ranges.push([start, offset])
+        guards.set(start, { blockIndex, prefixOnly: invisibleReasoning })
+      } else if (block?.kind === 'reasoning') {
+        const hiddenPrefix = reasoningDisplayStart(segment)
+        if (hiddenPrefix > 0) {
+          ranges.push([start, start + countChars(segment.slice(0, hiddenPrefix))])
+          guards.set(start, { blockIndex, prefixOnly: true })
+        }
+      }
+    })
+    return { ranges, guards }
+  }, [segments, collapsedReasoning, detailsHidden, node.data.blocks])
+  const canSkipRange = useCallback((start: number) => {
+    const guard = skipPlan.guards.get(start)
+    if (guard?.prefixOnly) return true
+    const element = root.current
+    if (element === null || !element.isConnected) return false
+    if (hiddenAncestor(element)) return true
+    if (guard === undefined || node.data.blocks[guard.blockIndex]?.kind !== 'reasoning') return false
+    const row = disclosureRows.current.get(guard.blockIndex)
+    // Opening and an incoming chunk can commit before the observer's React
+    // state update. Never synchronize new visible text from a stale range.
+    if (row === undefined || !row.isConnected) return !preferences.thinkAutoExpand
+    return !row.hasAttribute('data-expanded') || hiddenAncestor(row)
+  }, [skipPlan, node.data.blocks, preferences.thinkAutoExpand])
   const speed = useRef(35)
   const revealed = useRef(0)
   const scale = useRef(1)
-  // Playback policy never bypasses ordering. A first settled publication may
-  // join a live queue even outside recovery; retain its own baton so several
-  // late seats cannot all appear as soon as their common predecessor drains.
   const part = groupPart === 'reasoning' ? 'reasoning' : 'response'
-  const blocked = useSyncExternalStore(streamRelay.subscribe,
-    () => streamRelay.isBlocked(scope, part), () => false)
-  if (blocked) seenLive.current = true
+  const presentationKey = JSON.stringify([scope.session, scope.turn, scope.step, scope.node, part])
+  const [restored] = useState(() => assistantProgress.read(presentationKey, source))
+  const committed = useRef(restored ?? (seenLive.current ? '' : source))
+  // Only live/new backlog participates; an already presented historical row
+  // cannot be turned back into a stream by an unrelated predecessor.
   const animate = seenLive.current && !reduced && node.data.status !== 'interrupted'
-  const toolPresent = useSyncExternalStore(streamRelay.subscribe,
-    () => streamRelay.hasTool(scope), () => false)
+  const subscribeTool = useCallback((listener: () => void) => live
+    ? streamRelay.subscribeTool(scope, listener) : () => {}, [live, scope])
+  const toolPresent = useSyncExternalStore(subscribeTool,
+    () => live && streamRelay.hasTool(scope), () => false)
   const toolHandoff = !preferences.keepStreamOnToolCall
     && (toolPresent || node.data.blocks.some(block => block.kind === 'tool-call'))
-  const hold = useRef(blocked)
-  hold.current = blocked
+  const hold = useRef(false)
+  hold.current = animate && source !== committed.current && streamRelay.isBlocked(scope, part)
   const smoothed = useSmoothStreamContent(source, {
     enabled: animate,
     backgroundRecovery: preferences.backgroundRecovery,
     recoveryKey: seenLive.current ? recoveryKey : undefined,
     recoveryPosition,
-    replayOnEnable: true,
+    replayOnEnable: false,
+    initialDisplayedContent: restored,
+    resumeOnMount: restored !== undefined,
+    skipRanges: skipPlan.ranges,
+    canSkipRange,
     onRecoveryBacklogChange: setRecoveryBacklog,
     inputComplete: !live || toolPresent || node.data.blocks.some(block => block.kind === 'tool-call')
       || (groupPart === 'reasoning' && node.data.blocks.at(-1)?.kind !== 'reasoning'),
@@ -230,24 +369,32 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   })
   const shown = animate && !toolHandoff ? smoothed : source
   const pending = animate && !toolHandoff && shown !== source
+  const subscribeBlocked = useCallback((listener: () => void) => pending
+    ? streamRelay.subscribeBlocked(scope, part, listener) : () => {}, [pending, scope, part])
+  const blocked = useSyncExternalStore(subscribeBlocked,
+    () => pending && streamRelay.isBlocked(scope, part), () => false)
+  hold.current = blocked
   const ownsLiveTail = live && !toolPresent && !node.data.blocks.some(block => block.kind === 'tool-call')
     && (groupPart !== 'reasoning' || node.data.blocks.at(-1)?.kind === 'reasoning')
   const typing = !toolHandoff && (ownsLiveTail || pending)
+  useLayoutEffect(() => {
+    committed.current = shown
+    if (seenLive.current) assistantProgress.remember(presentationKey, shown)
+  }, [presentationKey, shown])
   const lease = useRef<symbol | null>(null)
   useLayoutEffect(() => {
-    const token = streamRelay.acquire(scope, part, false)
+    if (!pending) return
+    const token = streamRelay.acquire(scope, part, true)
     lease.current = token
     return () => {
       streamRelay.release(token)
       if (lease.current === token) lease.current = null
     }
-  }, [scope, part])
-  useLayoutEffect(() => {
-    if (lease.current !== null) streamRelay.update(lease.current, animate && typing)
-  }, [scope, part, animate, typing])
+  }, [scope, part, pending])
   const blocks = useMemo(() => animate && !toolHandoff
     ? revealAssistantBlocks(node.data.blocks, segments, shown)
     : node.data.blocks, [animate, toolHandoff, node.data.blocks, segments, shown])
+  useCollapsedReasoning(root, blocks, animate, disclosureRows, setCollapsedReasoning, setDetailsHidden)
   const reasoningPending = blocks.some((block, index) => block.kind === 'reasoning'
     && block.text !== (node.data.blocks[index] as { text?: string } | undefined)?.text)
   const reasoningTyping = !toolHandoff && (reasoningPending

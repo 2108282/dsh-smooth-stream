@@ -163,6 +163,16 @@ function liveAgentTailMode(root: HTMLElement): 'turn' | 'handoff' | null {
   return hasRecentConversationFollow(port) ? 'handoff' : null
 }
 
+/** Presentation identity survives regrouping/session remounts without retaining DOM. */
+const presentedTools = new Map<string, true>()
+const PRESENTED_TOOL_LIMIT = 512
+export function clearToolPresentationLedger(): void { presentedTools.clear() }
+function rememberTool(key: string): void {
+  presentedTools.delete(key)
+  presentedTools.set(key, true)
+  if (presentedTools.size > PRESENTED_TOOL_LIMIT) presentedTools.delete(presentedTools.keys().next().value!)
+}
+
 /**
  * Wrap a prior Agent Chat renderer so its entrance and later growth share
  * conversation follow. Presentation stays with the wrapped component; kit
@@ -183,15 +193,11 @@ export function wrapFollowNodeView(
     const scope = useMemo(() => relayScope(props.node, props.sessionId), [props.node, props.sessionId])
     const recoveryKey = relayTurnKey(scope)
     const recoveryPosition = [scope.step, scope.order, 2] as const
-    const relayBlocked = useSyncExternalStore(
-      streamRelay.subscribe,
-      () => streamRelay.isBlocked(scope, 'tool'),
-      () => false,
-    )
-    // A fast result in the active recovery turn still owns a presentation seat,
-    // including a final snapshot whose Turn/Step has already closed.
-    const structurallyFollowable = isFollowableChatNode(props.node) || openAgentLocation(props.node)
-      || relayBlocked || isBackgroundRecoveryScope(recoveryKey, recoveryPosition)
+    // A static result is not a new presentation queue merely because an
+    // earlier row is still typing. Mounted live rows retain their own pending
+    // work across completion, including updates within an open Agent step.
+    const structurallyFollowable = isFollowableChatNode(props.node)
+      || (!isSettled && (openAgentLocation(props.node) || isBackgroundRecoveryScope(recoveryKey, recoveryPosition)))
     const structuralRef = useRef(structurallyFollowable)
     const [runtimeFollowable, setRuntimeFollowable] = useState(false)
     const runtimePersistentRef = useRef(false)
@@ -201,8 +207,12 @@ export function wrapFollowNodeView(
     const settledOpenGrowth = isSettled && seenFollowable.current && openAgentLocation(props.node)
     const followable = !isInterruptedChatNode(props.node)
       && (seenFollowable.current || (!isSettled && runtimeFollowable) || settledOpenGrowth)
-    const [revealPending, setRevealPending] = useState(followable)
-    const revealInitialRef = useRef(true)
+    const presentationKey = scope.node === 'unknown' ? undefined : JSON.stringify([scope.session, scope.turn, scope.node])
+    const revealInitialRef = useRef(presentationKey === undefined || !presentedTools.has(presentationKey))
+    const [revealPending, setRevealPending] = useState(followable && revealInitialRef.current)
+    useLayoutEffect(() => {
+      if (presentationKey !== undefined) rememberTool(presentationKey)
+    }, [presentationKey])
     const [entering, setEntering] = useState(structurallyFollowable)
     const [growthPulse, setGrowthPulse] = useState(false)
     const followableRef = useRef(false)
@@ -224,8 +234,16 @@ export function wrapFollowNodeView(
       || (props.node !== null && typeof props.node === 'object' && 'data' in props.node
         && props.node.data !== null && typeof props.node.data === 'object' && 'root' in props.node.data)
     const part = toolPresence ? 'tool' : 'output'
+    const participating = growing || revealPending || (!isSettled && followable)
+    const subscribeBlocked = useCallback((listener: () => void) => participating
+      ? streamRelay.subscribeBlocked(scope, part, listener) : () => {},
+    [participating, scope.session, scope.turn, scope.step, scope.node, scope.order, part])
+    const readBlocked = useCallback(() => participating && streamRelay.isBlocked(scope, part),
+      [participating, scope.session, scope.turn, scope.step, scope.node, scope.order, part])
+    const relayBlocked = useSyncExternalStore(subscribeBlocked, readBlocked, () => false)
     const lease = useRef<symbol | null>(null)
-    const pendingRef = useRef(followable)
+    const pendingRef = useRef(revealPending)
+    const needsLease = participating
     const updatePending = useCallback((pending: boolean) => {
       pendingRef.current = pending
       setRevealPending(pending)
@@ -234,19 +252,20 @@ export function wrapFollowNodeView(
     useLayoutEffect(() => {
       // Reserve in layout before any frame can reveal. Running backend work
       // does not retain the baton once its currently available text is drained.
+      if (!needsLease) return
       const token = streamRelay.acquire(scope, part, pendingRef.current)
       lease.current = token
       return () => {
         streamRelay.release(token)
         if (lease.current === token) lease.current = null
       }
-    }, [scope.session, scope.turn, scope.step, scope.node, scope.order, part])
+    }, [scope.session, scope.turn, scope.step, scope.node, scope.order, part, needsLease])
 
     // DOM 前驱时序门禁：仅检查并监听紧邻的前驱卡片，切断全容器广播风暴
     const [precedingTyping, setPrecedingTyping] = useState(false)
     // A tool may settle before its preceding assistant has drained. Completion
     // never bypasses that queue; historical rows have no preceding live lease.
-    const isUnsettled = relayBlocked || growing || structurallyFollowable
+    const isUnsettled = participating && (relayBlocked || growing || structurallyFollowable)
 
     useLayoutEffect(() => {
       if (!isUnsettled) {
@@ -325,7 +344,7 @@ export function wrapFollowNodeView(
 
     useProgressiveDomText(
       hostRef,
-      followable,
+      followable && (!isSettled || settledOpenGrowth || revealPending),
       revealInitialRef.current,
       speedCpsRef,
       runtimeFollowable ? finishRuntimeReveal : undefined,
@@ -334,6 +353,7 @@ export function wrapFollowNodeView(
       recoveryMode,
       followable && (growing || revealPending) ? recoveryKey : undefined,
       recoveryPosition,
+      growing || settledOpenGrowth || revealPending || (!isSettled && followable),
     )
 
     useLayoutEffect(() => {
@@ -407,10 +427,10 @@ export function wrapFollowNodeView(
     return (
       <div data-smooth-stream-phase={waiting ? 'waiting' : revealPending ? 'typing' : 'settled'} data-smooth-stream-typing={revealPending ? 'true' : undefined} style={waiting ? { opacity: 0, pointerEvents: 'none', height: 0, overflow: 'hidden' } : { transition: 'opacity 0.15s ease' }}>
         <FollowHost
-          active={!waiting && growing}
+          active={!waiting && revealPending}
           entrance={!waiting && (entering || growthPulse)}
           onEntranceSettled={finishEntrance}
-          onGrowth={followable && !waiting ? onGrowth : undefined}
+          onGrowth={followable && !waiting && (!isSettled || settledOpenGrowth) ? onGrowth : undefined}
           entranceExtentRef={growthExtentRef}
           speedCpsRef={speedCpsRef}
           controlScroll={controlScroll}

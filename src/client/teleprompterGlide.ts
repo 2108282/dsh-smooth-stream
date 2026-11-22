@@ -1728,6 +1728,8 @@ export function useConversationFollow(
   activeRef.current = active
   const controlScrollRef = useRef(controlScroll)
   controlScrollRef.current = controlScroll
+  // Keep lifecycle work only while following or handing off a real settle.
+  const [settlingOwner, setSettlingOwner] = useState<object | null>(null)
   const [lifecycleVersion, setLifecycleVersion] = useState(0)
   const lifecycle = useBackgroundRecovery('replay', () => {
     if (!controlScrollRef.current) return
@@ -1739,7 +1741,7 @@ export function useConversationFollow(
     const port = rootRef.current?.closest<HTMLElement>('[data-conversation-scroll]')
     if (port !== undefined && port !== null) resumeFollowPort(port)
     setLifecycleVersion(version => version + 1)
-  })
+  }, undefined, undefined, false, controlScroll && (active || settlingOwner !== null))
   const lifecycleRef = useRef(lifecycle)
   lifecycleRef.current = lifecycle
 
@@ -2903,6 +2905,7 @@ export function useConversationFollow(
         host.addEventListener(name, markGesture, { passive: true })
       }
       const stopSettleListeners = (): void => {
+        setSettlingOwner(current => current === owner ? null : current)
         followSettleStops.get(host)?.delete(stopSettleListeners)
         for (const name of GESTURE_EVENTS) host.removeEventListener(name, markGesture)
         resize?.disconnect()
@@ -2937,6 +2940,7 @@ export function useConversationFollow(
       stops.add(stopSettleListeners)
       followSettleStops.set(host, stops)
       handedOff = true
+      setSettlingOwner(owner)
       let settleLast = performance.now()
       // Settle-pad transfer state lives above the completion handoff; the
       // loop below only drives it frame by frame. `settleRetiring` marks the

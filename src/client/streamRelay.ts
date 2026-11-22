@@ -9,7 +9,10 @@ export interface RelayScope {
 }
 export type RelayPart = 'reasoning' | 'response' | 'tool' | 'output'
 interface Lease {
-  scope: RelayScope
+  turnKey: string
+  step: number
+  node: string
+  order: number
   part: RelayPart
   active: boolean
 }
@@ -41,28 +44,134 @@ export function relayTurnKey(scope: RelayScope): string {
   return JSON.stringify([scope.session, scope.turn])
 }
 
-function sameTurn(a: RelayScope, b: RelayScope): boolean {
-  return a.session === b.session && a.turn === b.turn
+function lowerBound<T>(items: readonly T[], before: (value: T) => boolean): number {
+  let start = 0
+  let end = items.length
+  while (start < end) {
+    const middle = (start + end) >>> 1
+    if (before(items[middle]!)) start = middle + 1
+    else end = middle
+  }
+  return start
 }
-function precedes(a: Lease, scope: RelayScope, part: RelayPart): boolean {
-  if (!sameTurn(a.scope, scope)) return false
-  if (a.scope.step !== scope.step) return a.scope.step < scope.step
-  if (a.scope.node === scope.node) return PART_ORDER[a.part] < PART_ORDER[part]
-  // Event order covers tools, context, commands and future keyed Agent rows.
-  if (a.scope.order !== scope.order) return a.scope.order < scope.order
-  return PART_ORDER[a.part] < PART_ORDER[part]
+
+interface Position {
+  order: number
+  part: number
+}
+
+function before(left: Position, right: Position): boolean {
+  return left.order < right.order || (left.order === right.order && left.part < right.part)
+}
+
+interface NodeActivity {
+  // Keep duplicates so multiple viewport leases for the same position retire independently.
+  ordered: Position[]
+  counts: [number, number, number]
+}
+
+interface NodeFrontier extends Position { node: string }
+
+/** Same-node ordering is by part; cross-node ordering is by event position. */
+class StepActivity {
+  private readonly nodes = new Map<string, NodeActivity>()
+  private readonly frontier: NodeFrontier[] = []
+
+  get empty(): boolean { return this.nodes.size === 0 }
+
+  change(lease: Lease, active: boolean): void {
+    const part = PART_ORDER[lease.part]
+    const position = { order: lease.order, part }
+    const activity = this.nodes.get(lease.node) ?? { ordered: [], counts: [0, 0, 0] }
+    const previous = activity.ordered[0]
+    activity.counts[part] = activity.counts[part]! + (active ? 1 : -1)
+    // An unknown event order cannot precede another node, but its part still orders its own node.
+    if (!Number.isNaN(position.order)) {
+      const index = lowerBound(activity.ordered, value => before(value, position))
+      if (active) activity.ordered.splice(index, 0, position)
+      else activity.ordered.splice(index, 1)
+    }
+    if (activity.counts.some(count => count > 0)) this.nodes.set(lease.node, activity)
+    else this.nodes.delete(lease.node)
+
+    const next = activity.ordered[0]
+    if (previous?.order === next?.order && previous?.part === next?.part) return
+    if (previous !== undefined) {
+      // Use the node as a tie-breaker only for finding its entry, never for precedence.
+      this.frontier.splice(this.frontierIndex({ ...previous, node: lease.node }), 1)
+    }
+    if (next !== undefined) {
+      const head = { ...next, node: lease.node }
+      this.frontier.splice(this.frontierIndex(head), 0, head)
+    }
+  }
+
+  blocks(scope: RelayScope, part: number): boolean {
+    const own = this.nodes.get(scope.node)
+    if (own !== undefined && ((part >= 1 && own.counts[0] > 0) || (part >= 2 && own.counts[1] > 0))) return true
+    const other = this.frontier[this.frontier[0]?.node === scope.node ? 1 : 0]
+    return other !== undefined && before(other, { order: scope.order, part })
+  }
+
+  private frontierIndex(position: NodeFrontier): number {
+    return lowerBound(this.frontier, value => before(value, position)
+      || (value.order === position.order && value.part === position.part && value.node < position.node))
+  }
+}
+
+class TurnActivity {
+  private readonly steps: number[] = []
+  private readonly byStep = new Map<number, StepActivity>()
+
+  get empty(): boolean { return this.steps.length === 0 }
+
+  change(lease: Lease, active: boolean): void {
+    let step = this.byStep.get(lease.step)
+    if (step === undefined) {
+      step = new StepActivity()
+      this.byStep.set(lease.step, step)
+      this.steps.splice(lowerBound(this.steps, value => value < lease.step), 0, lease.step)
+    }
+    step.change(lease, active)
+    if (step.empty) {
+      this.byStep.delete(lease.step)
+      this.steps.splice(lowerBound(this.steps, value => value < lease.step), 1)
+    }
+  }
+
+  blocks(scope: RelayScope, part: RelayPart): boolean {
+    const first = this.steps[0]
+    if (first === undefined || !(first <= scope.step)) return false
+    return first < scope.step || this.byStep.get(first)!.blocks(scope, PART_ORDER[part])
+  }
+}
+
+interface Subscription {
+  listener: Listener
+  query: () => boolean
+  previous: boolean
 }
 
 /** Every mounted renderer owns a token; another viewport cannot release its work. */
 export class StreamRelay {
   private readonly leases = new Map<symbol, Lease>()
+  private readonly activeTurns = new Map<string, TurnActivity>()
+  private readonly tools = new Map<string, Map<number, number>>()
+  private readonly blockedListeners = new Map<string, Set<Subscription>>()
+  private readonly toolListeners = new Map<string, Map<number, Set<Subscription>>>()
+  private readonly pending = new Set<Subscription>()
   private readonly legacy = new Map<string, { reasoning: boolean; response: boolean }>()
-  private readonly listeners = new Set<Listener>()
+  private readonly legacyListeners = new Set<Listener>()
+  private legacyPending = false
+  private notifying = false
 
   acquire(scope: RelayScope, part: RelayPart, active = true): symbol {
     const token = Symbol(part)
-    this.leases.set(token, { scope, part, active })
-    this.notify()
+    const lease = { turnKey: relayTurnKey(scope), step: scope.step, node: scope.node, order: scope.order, part, active }
+    this.leases.set(token, lease)
+    if (part === 'tool') this.changeTool(lease, 1)
+    if (active) this.changeActive(lease, true)
+    this.flushNotifications()
     return token
   }
 
@@ -70,25 +179,107 @@ export class StreamRelay {
     const lease = this.leases.get(token)
     if (lease === undefined || lease.active === active) return
     lease.active = active
-    this.notify()
+    this.changeActive(lease, active)
+    this.flushNotifications()
   }
 
   release(token: symbol): void {
-    if (this.leases.delete(token)) this.notify()
+    const lease = this.leases.get(token)
+    if (lease === undefined) return
+    this.leases.delete(token)
+    if (lease.active) this.changeActive(lease, false)
+    if (lease.part === 'tool') this.changeTool(lease, -1)
+    this.flushNotifications()
   }
 
   isBlocked(scope: RelayScope, part: RelayPart): boolean {
-    for (const lease of this.leases.values()) {
-      if (lease.active && precedes(lease, scope, part)) return true
-    }
-    return false
+    return this.activeTurns.get(relayTurnKey(scope))?.blocks(scope, part) ?? false
   }
 
   hasTool(scope: RelayScope): boolean {
-    for (const lease of this.leases.values()) {
-      if (lease.part === 'tool' && sameTurn(lease.scope, scope) && lease.scope.step === scope.step) return true
+    return this.tools.get(relayTurnKey(scope))?.has(scope.step) ?? false
+  }
+
+  subscribeBlocked(scope: RelayScope, part: RelayPart, listener: Listener): () => void {
+    const key = relayTurnKey(scope)
+    const position = { ...scope }
+    return this.subscribeTo(this.blockedListeners, key, listener,
+      () => this.activeTurns.get(key)?.blocks(position, part) ?? false)
+  }
+
+  subscribeTool(scope: RelayScope, listener: Listener): () => void {
+    const key = relayTurnKey(scope)
+    const step = scope.step
+    const byStep = this.toolListeners.get(key) ?? new Map<number, Set<Subscription>>()
+    this.toolListeners.set(key, byStep)
+    const stop = this.subscribeTo(byStep, step, listener, () => this.tools.get(key)?.has(step) ?? false)
+    return () => {
+      stop()
+      if (byStep.size === 0 && this.toolListeners.get(key) === byStep) this.toolListeners.delete(key)
     }
-    return false
+  }
+
+  private subscribeTo<K>(groups: Map<K, Set<Subscription>>, key: K, listener: Listener, query: () => boolean): () => void {
+    const group = groups.get(key) ?? new Set<Subscription>()
+    const subscription = { listener, query, previous: query() }
+    group.add(subscription)
+    groups.set(key, group)
+    return () => {
+      if (!group.delete(subscription)) return
+      this.pending.delete(subscription)
+      if (group.size === 0) groups.delete(key)
+    }
+  }
+
+  private changeActive(lease: Lease, active: boolean): void {
+    if (Number.isNaN(lease.step)) return
+    const turn = this.activeTurns.get(lease.turnKey) ?? new TurnActivity()
+    turn.change(lease, active)
+    if (turn.empty) this.activeTurns.delete(lease.turnKey)
+    else this.activeTurns.set(lease.turnKey, turn)
+    this.enqueue(this.blockedListeners.get(lease.turnKey))
+  }
+
+  private changeTool(lease: Lease, delta: number): void {
+    if (Number.isNaN(lease.step)) return
+    const byStep = this.tools.get(lease.turnKey) ?? new Map<number, number>()
+    const previous = byStep.get(lease.step) ?? 0
+    const next = previous + delta
+    if (next === 0) byStep.delete(lease.step)
+    else byStep.set(lease.step, next)
+    if (byStep.size === 0) this.tools.delete(lease.turnKey)
+    else this.tools.set(lease.turnKey, byStep)
+    if ((previous === 0) !== (next === 0)) this.enqueue(this.toolListeners.get(lease.turnKey)?.get(lease.step))
+  }
+
+  private enqueue(subscriptions: Set<Subscription> | undefined): void {
+    if (subscriptions !== undefined) for (const subscription of subscriptions) this.pending.add(subscription)
+  }
+
+  private flushNotifications(): void {
+    if (this.notifying) return
+    this.notifying = true
+    try {
+      // Reentrant mutations queue work in the same drain. Always compare the
+      // current snapshot, so a callback cannot deliver a stale result to its successors.
+      while (this.pending.size > 0 || this.legacyPending) {
+        const subscription = this.pending.values().next().value
+        if (subscription !== undefined) {
+          this.pending.delete(subscription)
+          const current = subscription.query()
+          if (current === subscription.previous) continue
+          subscription.previous = current
+          subscription.listener()
+        } else {
+          this.legacyPending = false
+          for (const listener of [...this.legacyListeners]) {
+            if (this.legacyListeners.has(listener)) listener()
+          }
+        }
+      }
+    } finally {
+      this.notifying = false
+    }
   }
 
   // Compatibility for the previous renderer. Explicit keys never fall through
@@ -102,25 +293,36 @@ export class StreamRelay {
     state[part] = active
     if (!state.reasoning && !state.response) this.legacy.delete(id)
     else this.legacy.set(id, state)
-    this.notify()
+    this.legacyPending = true
+    this.flushNotifications()
   }
   isReasoningActive(key?: string | null): boolean { return this.legacy.get(key ?? 'active')?.reasoning ?? false }
   isTextActive(key?: string | null): boolean { return this.legacy.get(key ?? 'active')?.response ?? false }
   isToolBlocked(key?: string | null): boolean { return this.isReasoningActive(key) || this.isTextActive(key) }
   resetTurn(key?: string | null): void {
-    if (this.legacy.delete(key ?? 'active')) this.notify()
+    if (!this.legacy.delete(key ?? 'active')) return
+    this.legacyPending = true
+    this.flushNotifications()
   }
   clearAll(): void {
-    if (this.leases.size === 0 && this.legacy.size === 0) return
+    for (const key of this.activeTurns.keys()) this.enqueue(this.blockedListeners.get(key))
+    for (const [key, byStep] of this.tools) {
+      const listeners = this.toolListeners.get(key)
+      if (listeners !== undefined) for (const step of byStep.keys()) this.enqueue(listeners.get(step))
+    }
     this.leases.clear()
-    this.legacy.clear()
-    this.notify()
+    this.activeTurns.clear()
+    this.tools.clear()
+    if (this.legacy.size > 0) {
+      this.legacy.clear()
+      this.legacyPending = true
+    }
+    this.flushNotifications()
   }
   subscribe = (listener: Listener): (() => void) => {
-    this.listeners.add(listener)
-    return () => { this.listeners.delete(listener) }
+    this.legacyListeners.add(listener)
+    return () => { this.legacyListeners.delete(listener) }
   }
-  private notify(): void { for (const listener of [...this.listeners]) listener() }
 }
 
 export const streamRelay = new StreamRelay()

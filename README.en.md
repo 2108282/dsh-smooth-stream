@@ -190,7 +190,8 @@ Open **Settings → Plugins → Plugin Configuration** in the Web UI:
 For a local preview, run `pnpm build:repro`, serve the repository with `python3 -m http.server 8765 --bind 127.0.0.1`, and open `http://127.0.0.1:8765/repro/index.html?demo=fade`. This uses the real reveal/fade hooks with synthetic rich-text fixtures. Run `node scripts/verify-logarithmic-fade.mjs` to check and record it (Chrome and `pnpm exec playwright-core install ffmpeg` required; override the Chrome path with `CHROME_BIN`). Reports and recordings go to the ignored `repro/artifacts/logarithmic-fade/` directory.
 
 - **Enable smooth streaming** (default on): Toggles custom stream rendering and follow. Disabling instantly falls back to built-in Harness rendering.
-- **Auto-expand thinking**: Controls whether reasoning opens automatically while streaming.
+- **Auto-expand thinking**: Controls whether reasoning opens automatically while streaming. Collapsed thinking and Tool details synchronize existing content without invisible typewriter debt; visible headers retain their animation, and reopening shows the existing snapshot. Newly arriving expanded content is still paced.
+- **Background recovery**: Bounded catch-up uses each animation frame with at most 16 characters per commit, without a fixed 40ms inter-commit wait. After a reconnect, recovery waits for the Session-owned replacement baseline and exits once its visible queues are drained; an unchanged or empty synchronized baseline does not leave future foreground text in recovery mode.
 - **Collapse finished work** (default on): Folds thoughts and tool steps into a summary line once the turn settles.
 - **Show render diagnostics** (default off): Opens a live HUD on the right side to inspect FPS, character backlog, spring state, and adjust physical parameters in real time.
 
