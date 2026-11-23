@@ -1,5 +1,7 @@
 # dsh-smooth-stream
 
+> **正式修复版 0.10.4（main）**：后台重同步、收起内容门禁与省略号尾巴修复。16 字追赶预算及用户参数不变；性能诊断尚未实现，不能据此宣称实机掉帧已解决。详见 [版本记录](docs/changes-0.10.4.md)。
+
 > **让 AI 的长篇生成如提词器般温润流淌。**  
 > 为 DeepSeek Harness（`dsh`）打造的二阶弹簧物理流式渲染与零重排跟随引擎。
 
@@ -155,14 +157,14 @@ Host 日志中显示 `[dsh-smooth-stream] plugin loaded!` 即表示已成功加�
 不联网构建时，可直接安装仓库里已构建好的安装包（见 [`dist/`](dist/README.md)）：
 
 ```sh
-npm install https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.3.tgz
+npm install https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.4.tgz
 ```
 
 装进 DSH profile 时先下载再用本地路径：
 
 ```sh
-curl -L -O https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.3.tgz
-pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.10.3.tgz
+curl -L -O https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.4.tgz
+pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.10.4.tgz
 ```
 
 卸载命令：`pnpm dsh plugin --profile web remove dsh-smooth-stream`。
