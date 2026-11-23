@@ -13,6 +13,7 @@ import { computeAdaptiveQueueStep } from './useSmoothStreamContent.ts'
 import type { BackgroundRecovery } from '../settings.ts'
 import { recoveryBudget, useBackgroundRecovery, type RecoveryPosition } from './backgroundRecovery.ts'
 import { debugRuntime } from './debugRuntime.ts'
+import { createEllipsisTailProbe } from './ellipsisTail.ts'
 
 interface TextRevealRecord {
   chars: readonly string[]
@@ -257,6 +258,7 @@ export function useProgressiveDomText(
     let stopped = false
     let announcedSettled = false
     const streamId = `dom-${Math.random().toString(36).slice(2)}`
+    const isEllipsisTailClipped = createEllipsisTailProbe(root)
 
     const announceSettled = (): void => {
       lastFrame = null
@@ -332,6 +334,10 @@ export function useProgressiveDomText(
     const frame = (now: number): void => {
       rafId = 0
       if (stopped || recoveryRef.current.hidden()) { lastFrame = null; return }
+      // Drain queued native commits before the ellipsis decision, including a
+      // source shortened to exactly our current prefix (no data mismatch).
+      const mutations = observer?.takeRecords()
+      if (mutations !== undefined && mutations.length > 0) processMutations(mutations)
       if (pending.size === 0) {
         announceSettled()
         return
@@ -351,7 +357,7 @@ export function useProgressiveDomText(
       const orderedPending: Array<{ node: Text; record: TextRevealRecord }> = []
       let backlog = 0
       for (const node of pending) {
-        const record = records.get(node)
+        let record = records.get(node)
         if (record === undefined || !node.isConnected || !visibleWithin(node, root)) {
           // A collapse can land before MutationObserver delivery. Stop spending
           // the visible reveal budget on that node; the observer restores its
@@ -364,6 +370,14 @@ export function useProgressiveDomText(
           records.delete(node)
           continue
         }
+        // A native source commit can precede its MutationObserver delivery.
+        // Adopt it through the existing enqueue path before either a normal
+        // character write or an ellipsis shortcut can overwrite the new value.
+        if (node.data !== record.chars.slice(0, record.shown).join('')) {
+          enqueue(node, node.data, record)
+          record = records.get(node)
+          if (record === undefined || !pending.has(node)) continue
+        }
         orderedPending.push({ node, record })
         backlog += record.chars.length - record.shown
       }
@@ -371,6 +385,23 @@ export function useProgressiveDomText(
       orderedPending.sort((left, right) => (
         (left.node.compareDocumentPosition(right.node) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 ? -1 : 1
       ))
+      // Only the queue frontier may retire an ellipsized tail. Measure all
+      // eligible prefixes before writing, so adjacent cards do not alternate
+      // DOM writes with forced layout reads. No extra subtree scan is needed.
+      let clippedCount = 0
+      for (const { node, record } of orderedPending) {
+        if (record.shown === 0 || node.data !== record.chars.slice(0, record.shown).join('')
+          || !isEllipsisTailClipped(node, record.full)) break
+        clippedCount++
+      }
+      for (let index = 0; index < clippedCount; index++) {
+        const { node, record } = orderedPending[index]!
+        backlog -= record.chars.length - record.shown
+        write(node, record.full)
+        records.set(node, { ...record, shown: record.chars.length })
+        pending.delete(node)
+      }
+      if (clippedCount > 0) orderedPending.splice(0, clippedCount)
       if (playback.recovering() && playback.mode() === 'latest') {
         for (const { node, record } of orderedPending) {
           write(node, record.full)
@@ -449,64 +480,71 @@ export function useProgressiveDomText(
         || (node.id !== '' && [...node.parentElement?.querySelectorAll('[data-disclosure-header] [aria-controls][aria-expanded="true"]') ?? []]
           .some(control => control.getAttribute('aria-controls')?.split(/\s+/).includes(node.id))))
 
+    const processMutations = (mutations: MutationRecord[]): void => {
+      // Attribute reveals are snapshots, even when child insertion arrived
+      // in the same React commit. Dedupe roots so nested mutations don't
+      // repeatedly scan the same newly visible details.
+      const snapshots = new Set<Node>()
+      for (const mutation of mutations) {
+        if (mutation.type !== 'attributes') continue
+        const target = mutation.target as Element
+        const attribute = mutation.attributeName
+        // A mutation inside an already hidden ancestor cannot reveal this
+        // body. Its ancestor's own visibility mutation will snapshot it.
+        if (target !== root && target.parentElement !== null && !visibleWithin(target.parentElement, root)) continue
+        const previouslyHidden = cssHidden.has(target)
+          || (attribute === 'hidden' && mutation.oldValue !== null)
+          || (attribute === 'style' && (/(?:display\s*:\s*none|content-visibility\s*:\s*hidden)/i.test(mutation.oldValue ?? '')
+            || (!target.hasAttribute('data-chat-call-id') && /(?:^|;)\s*visibility\s*:\s*hidden/i.test(mutation.oldValue ?? ''))))
+        if (attribute === 'style' || attribute === 'class') {
+          // Only the changed element is measured once per observer batch;
+          // hidden-body visibility is not rescanned by reveal frames. The
+          // ellipsis frontier has its own current-style geometry guard.
+          const style = getComputedStyle(target)
+          if (style.display === 'none' || style.contentVisibility === 'hidden') cssHidden.add(target)
+          else cssHidden.delete(target)
+        }
+        const nowHidden = hiddenElement(target)
+        if (attribute !== 'open' && previouslyHidden === nowHidden) continue
+        releaseSubtree(target)
+        if (visibleWithin(target, root)) snapshots.add(target)
+      }
+      const processedTexts = new Set<Text>()
+      for (const mutation of mutations) {
+        if (mutation.type === 'attributes' || !visibleWithin(mutation.target, root)) continue
+        if ([...snapshots].some(snapshot => snapshot.contains(mutation.target))) continue
+        if (mutation.type === 'characterData') {
+          const node = mutation.target as Text
+          // A source adoption and its budget write can share one observer
+          // batch. Read each Text's final DOM value once, never as a new source
+          // again after deleting its internal-write marker.
+          if (processedTexts.has(node)) continue
+          processedTexts.add(node)
+          const expected = internalWrites.get(node)
+          if (expected === node.data) {
+            internalWrites.delete(node)
+            continue
+          }
+          enqueue(node, node.data, records.get(node))
+          continue
+        }
+        callOrderDirty = true
+        for (const removed of mutation.removedNodes) forget(removed)
+        for (const added of mutation.addedNodes) {
+          if (isOpenedBody(added)) snapshots.add(added)
+          else visit(added, true)
+        }
+      }
+      for (const snapshot of snapshots) {
+        if ([...snapshots].some(other => other !== snapshot && other.contains(snapshot))) continue
+        visit(snapshot, false)
+      }
+      syncCallVisibility()
+      if (pending.size === 0) announceSettled()
+      else scheduleFrame()
+    }
     const observer = !observeChanges || typeof MutationObserver === 'undefined'
-      ? null
-      : new MutationObserver((mutations) => {
-          // Attribute reveals are snapshots, even when child insertion arrived
-          // in the same React commit. Dedupe roots so nested mutations don't
-          // repeatedly scan the same newly visible details.
-          const snapshots = new Set<Node>()
-          for (const mutation of mutations) {
-            if (mutation.type !== 'attributes') continue
-            const target = mutation.target as Element
-            const attribute = mutation.attributeName
-            // A mutation inside an already hidden ancestor cannot reveal this
-            // body. Its ancestor's own visibility mutation will snapshot it.
-            if (target !== root && target.parentElement !== null && !visibleWithin(target.parentElement, root)) continue
-            const previouslyHidden = cssHidden.has(target)
-              || (attribute === 'hidden' && mutation.oldValue !== null)
-              || (attribute === 'style' && (/(?:display\s*:\s*none|content-visibility\s*:\s*hidden)/i.test(mutation.oldValue ?? '')
-                || (!target.hasAttribute('data-chat-call-id') && /(?:^|;)\s*visibility\s*:\s*hidden/i.test(mutation.oldValue ?? ''))))
-            if (attribute === 'style' || attribute === 'class') {
-              // Only the changed element is measured, once per observer batch;
-              // reveal frames never read computed style or scan hidden bodies.
-              const style = getComputedStyle(target)
-              if (style.display === 'none' || style.contentVisibility === 'hidden') cssHidden.add(target)
-              else cssHidden.delete(target)
-            }
-            const nowHidden = hiddenElement(target)
-            if (attribute !== 'open' && previouslyHidden === nowHidden) continue
-            releaseSubtree(target)
-            if (visibleWithin(target, root)) snapshots.add(target)
-          }
-          for (const mutation of mutations) {
-            if (mutation.type === 'attributes' || !visibleWithin(mutation.target, root)) continue
-            if ([...snapshots].some(snapshot => snapshot.contains(mutation.target))) continue
-            if (mutation.type === 'characterData') {
-              const node = mutation.target as Text
-              const expected = internalWrites.get(node)
-              if (expected === node.data) {
-                internalWrites.delete(node)
-                continue
-              }
-              enqueue(node, node.data, records.get(node))
-              continue
-            }
-            callOrderDirty = true
-            for (const removed of mutation.removedNodes) forget(removed)
-            for (const added of mutation.addedNodes) {
-              if (isOpenedBody(added)) snapshots.add(added)
-              else visit(added, true)
-            }
-          }
-          for (const snapshot of snapshots) {
-            if ([...snapshots].some(other => other !== snapshot && other.contains(snapshot))) continue
-            visit(snapshot, false)
-          }
-          syncCallVisibility()
-          if (pending.size === 0) announceSettled()
-          else scheduleFrame()
-        })
+      ? null : new MutationObserver(processMutations)
     let outsideHidden = hiddenOutside(root)
     const ancestorObserver = typeof MutationObserver === 'undefined' ? null : new MutationObserver(() => {
       const hidden = hiddenOutside(root)
@@ -523,10 +561,15 @@ export function useProgressiveDomText(
     for (let ancestor = root.parentElement; ancestor !== null; ancestor = ancestor.parentElement) {
       ancestorObserver?.observe(ancestor, { attributes: true, attributeFilter: ['hidden', 'style', 'class'] })
     }
-    observer?.observe(root, {
-      childList: true, characterData: true, subtree: true, attributes: true,
-      attributeFilter: ['hidden', 'style', 'class', 'open'], attributeOldValue: true,
-    })
+    if (observer !== null) {
+      // Initial reveal writes happened before observation. Their markers must
+      // not disguise a native clear of the still-empty first-frame prefix.
+      for (const node of records.keys()) internalWrites.delete(node)
+      observer.observe(root, {
+        childList: true, characterData: true, subtree: true, attributes: true,
+        attributeFilter: ['hidden', 'style', 'class', 'open'], attributeOldValue: true,
+      })
+    }
     if (pending.size === 0) announceSettled()
     else scheduleFrame()
 
