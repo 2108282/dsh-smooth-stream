@@ -2262,6 +2262,7 @@ export function useConversationFollow(
     }
 
     const frame = (now: number) => {
+      const frameStartedAt = performance.now()
       rafId = requestAnimationFrame(frame)
       if (lifecycleRef.current.hidden()) return
       // Spring time is clamped so one paint after a stall cannot teleport the
@@ -2269,6 +2270,7 @@ export function useConversationFollow(
       // frames would open paint room more slowly precisely when it is needed.
       const elapsedMs = Math.max(0.001, now - last)
       const dt = Math.min(FOLLOW_MAX_FRAME_MS, elapsedMs)
+      const recordFrame = () => { debugRuntime.recordDiagnosticFrame(`follow-${generation}`, now, performance.now() - frameStartedAt) }
       const tuning = debugRuntime.activeTuning()
       last = now
       const root = rootRef.current
@@ -2279,12 +2281,12 @@ export function useConversationFollow(
       observeTailSurface()
       resetHostScrollOwnershipForNewTurn(nextPort)
       hostOwnsScroll = followHostScrollPorts.has(nextPort)
-      if (hostInputFoldActive(nextPort)) { yieldToInputFold(nextPort); return }
+      if (hostInputFoldActive(nextPort)) { yieldToInputFold(nextPort); recordFrame(); return }
       if (activeRef.current) followActivePorts.add(nextPort)
       else followActivePorts.delete(nextPort)
       // A hidden/unmeasured port has no meaningful floor yet. Keep this owner
       // unprimed and let the already-scheduled RAF initialize it after layout.
-      if (nextPort.clientHeight <= 0) return
+      if (nextPort.clientHeight <= 0) { recordFrame(); return }
 
       // No lifecycle signal is guaranteed when a shell freezes its renderer.
       // Each running arm detects its own stalled clock; a shared recovery
@@ -2509,17 +2511,20 @@ export function useConversationFollow(
       if (!activeRef.current || !following) {
         followScrollLedgers.set(nextPort, nextPort.scrollTop)
         reportFollow(nextPort, activeRef.current)
+        recordFrame()
         return
       }
       detectHostScroll(nextPort, floor)
       if (hostOwnsScroll) {
         followScrollLedgers.set(nextPort, nextPort.scrollTop)
         reportFollow(nextPort, false)
+        recordFrame()
         return
       }
       hold(nextPort)
       if (!isLeader(nextPort)) {
         finishEntrance()
+        recordFrame()
         return
       }
       // Runway and an equal transform cancel visually. It is the zero point,
@@ -2696,6 +2701,7 @@ export function useConversationFollow(
       }
       updateRevealScale(nextPort, elapsedMs)
       reportFollow(nextPort, true)
+      recordFrame()
       // Keep the previous painted tail as the completion handoff baseline.
       // The active loop is the only place that sees the old surface before a
       // host live->settled replacement disconnects it.

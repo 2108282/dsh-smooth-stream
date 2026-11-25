@@ -45,6 +45,23 @@ describe('scoped stream relay leases', () => {
     expect(relay.isBlocked(scope, 'tool')).toBe(false)
   })
 
+  it('uses source event order instead of part category order across nodes', () => {
+    const relay = new StreamRelay()
+    const laterReasoning = relay.acquire({ ...scope, node: 'later', order: 4, sourceOrder: 40 }, 'reasoning')
+    const earlierTool = relay.acquire({ ...scope, node: 'earlier', order: 4, sourceOrder: 20 }, 'tool')
+    expect(relay.isBlocked({ ...scope, node: 'later', order: 4, sourceOrder: 40 }, 'reasoning')).toBe(true)
+    relay.release(earlierTool)
+    expect(relay.isBlocked({ ...scope, node: 'later', order: 4, sourceOrder: 40 }, 'reasoning')).toBe(false)
+    relay.release(laterReasoning)
+  })
+
+  it('does not turn a missing anchor into the earliest position', () => {
+    const relay = new StreamRelay()
+    const unknown = relay.acquire({ ...scope, node: 'unknown', order: Number.NaN }, 'output')
+    relay.acquire({ ...scope, node: 'known', order: 2 }, 'response')
+    expect(relay.isBlocked({ ...scope, node: 'unknown', order: Number.NaN }, 'output')).toBe(false)
+    relay.release(unknown)
+  })
   it('uses tool presence without a tool ever blocking its preceding text', () => {
     const relay = new StreamRelay()
     const tool = relay.acquire({ ...scope, node: 'tool:1', order: 2 }, 'tool', false)
@@ -55,6 +72,7 @@ describe('scoped stream relay leases', () => {
     relay.release(tool)
     expect(relay.hasTool(scope)).toBe(false)
   })
+
 
   it('notifies only same-turn blocked queries whose result changes', () => {
     const relay = new StreamRelay()

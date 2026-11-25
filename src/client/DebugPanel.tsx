@@ -177,7 +177,6 @@ export function DebugPanel(props: DebugPanelProps) {
     }, null, 2))
     if (accepted) setCopied(true)
   }
-
   const panel = !state.enabled || !open ? null : (
     <aside className={css.panel} role="complementary" aria-label={t('debugPanelTitle')}>
       <header className={css.panelHeader}>

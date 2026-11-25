@@ -383,6 +383,22 @@ export function useSmoothStreamContent(
   skipRangesRef.current = skipRanges
   const canSkipRangeRef = useRef(canSkipRange)
   canSkipRangeRef.current = canSkipRange
+  // A collapsed range is hidden text: it is never printed and must never be
+  // counted as pending visible backlog. Ranges the cursor has already passed
+  // are excluded by the cursor arithmetic itself, so only ranges still ahead
+  // (or straddling the cursor) are subtracted here. A range whose guard says
+  // it is not really hidden is real text and stays counted.
+  const visibleBacklog = useCallback((displayed: number, target: number): number => {
+    let hidden = 0
+    for (const [start, end] of skipRangesRef.current ?? []) {
+      if (end <= displayed) continue
+      if (canSkipRangeRef.current?.(start, end) === false) continue
+      const from = Math.max(start, displayed)
+      const to = Math.min(target, end)
+      if (to > from) hidden += to - from
+    }
+    return Math.max(0, target - displayed - hidden)
+  }, [])
   const recoveryBacklogRef = useRef(false)
   const onRecoveryBacklogChangeRef = useRef(onRecoveryBacklogChange)
   onRecoveryBacklogChangeRef.current = onRecoveryBacklogChange
@@ -429,9 +445,10 @@ export function useSmoothStreamContent(
     settleCpsRef.current = null
     lastDrainCpsRef.current = 0
     lastFrameTsRef.current = null
-    observeRecoveryBacklog(replacementPendingRef.current
-      ? targetCountRef.current
-      : targetCountRef.current - displayedCountRef.current)
+    observeRecoveryBacklog(visibleBacklog(
+      replacementPendingRef.current ? 0 : displayedCountRef.current,
+      targetCountRef.current,
+    ))
     startFrameLoopRef.current()
   }, enabled && (!inputComplete || content !== displayedContent) ? recoveryKey : undefined, recoveryPosition, resumeOnMount,
   enabled && (!inputComplete || content !== displayedContent))
@@ -480,10 +497,12 @@ export function useSmoothStreamContent(
     if (rafRef.current !== null || recoveryRef.current.hidden()) return
 
     const tick = (now: number) => {
+      const frameStartedAt = performance.now()
       if (recoveryRef.current.hidden()) { stopFrameLoop(); return }
       if (replacementPendingRef.current) {
         if (holdBackRef.current?.() === true) {
           lastFrameTsRef.current = null
+          debugRuntime.recordDiagnosticFrame(`${streamIdRef.current}:text`, now, performance.now() - frameStartedAt)
           rafRef.current = requestAnimationFrame(tick)
           return
         }
@@ -511,14 +530,23 @@ export function useSmoothStreamContent(
         }
       }
       const backlog = targetCount - displayedCount
+      // Drain must be decided by visible text only. A collapsed reasoning block
+      // that has not been reached by the cursor yet is hidden, not pending, so
+      // fast-forwarding it later must not be the thing that ends recovery.
+      const drainBacklog = visibleBacklog(displayedCount, targetCount)
+      debugRuntime.recordDiagnostic('text-queue', { backlogChars: backlog, mode: 'assistant' })
 
-      if (backlog <= 0) {
+      if (drainBacklog <= 0) {
         reportRecoveryBacklog(false)
         recoveryRef.current.finish()
         queueDebtRef.current = 0
         settleCpsRef.current = null
         const speedOut = speedOutRef.current
         if (speedOut !== undefined) speedOut.current = seedCps
+        debugRuntime.recordDiagnosticFrame(`${streamIdRef.current}:text`, now, performance.now() - frameStartedAt)
+        debugRuntime.recordDiagnostic('text-queue', { backlogChars: 0, mode: 'drained' })
+        debugRuntime.recordDiagnosticFrame(`${streamIdRef.current}:text`, now, performance.now() - frameStartedAt)
+        debugRuntime.recordDiagnostic('text-queue', { backlogChars: 0, mode: 'drained' })
         debugRuntime.reportStream(streamIdRef.current, null)
         stopFrameLoop()
         return
@@ -532,9 +560,10 @@ export function useSmoothStreamContent(
 
       const frameIntervalMs = Math.max(0, now - lastFrameTsRef.current)
       const playback = recoveryRef.current
+      debugRuntime.recordDiagnosticFrame(`${streamIdRef.current}:text`, now, performance.now() - frameStartedAt)
       playback.detectGap(frameIntervalMs)
       const recovering = playback.recovering()
-      if (playback.resumed()) observeRecoveryBacklog(backlog)
+      if (playback.resumed()) observeRecoveryBacklog(drainBacklog)
       const recoveryMode = playback.mode()
       // A latest snapshot is still ordered behind its predecessor; only its
       // character animation is skipped, never the conversation relay.
@@ -662,13 +691,13 @@ export function useSmoothStreamContent(
         displayedCountRef.current = targetCount
         setDisplayedContent(targetContentRef.current)
       }
-      if (displayedCountRef.current === targetCount) reportRecoveryBacklog(false)
+      if (visibleBacklog(displayedCountRef.current, targetCount) <= 0) reportRecoveryBacklog(false)
 
       rafRef.current = requestAnimationFrame(tick)
     }
 
     rafRef.current = requestAnimationFrame(tick)
-  }, [config, observeRecoveryBacklog, reportRecoveryBacklog, seedCps, stopFrameLoop, steadyCps, syncImmediate])
+  }, [config, observeRecoveryBacklog, reportRecoveryBacklog, seedCps, stopFrameLoop, steadyCps, syncImmediate, visibleBacklog])
 
   // Run AFTER the commit's DOM mutations, before paint: the follower's
   // same-task correction hook.
@@ -710,7 +739,7 @@ export function useSmoothStreamContent(
         targetCharsRef.current = [...content]
         targetCountRef.current = targetCharsRef.current.length
         replacementPendingRef.current = true
-        if (recoveryRef.current.resumed()) observeRecoveryBacklog(targetCountRef.current)
+        if (recoveryRef.current.resumed()) observeRecoveryBacklog(visibleBacklog(0, targetCountRef.current))
         startFrameLoop()
         return
       }
@@ -745,11 +774,12 @@ export function useSmoothStreamContent(
     lastInputTsRef.current = now
     lastInputCountRef.current = targetCountRef.current
 
-    if (recoveryRef.current.resumed()) observeRecoveryBacklog(replacementPendingRef.current
-      ? targetCountRef.current
-      : targetCountRef.current - displayedCountRef.current)
+    if (recoveryRef.current.resumed()) observeRecoveryBacklog(visibleBacklog(
+      replacementPendingRef.current ? 0 : displayedCountRef.current,
+      targetCountRef.current,
+    ))
     startFrameLoop()
-  }, [content, enabled, replayOnEnable, config, observeRecoveryBacklog, startFrameLoop, syncImmediate])
+  }, [content, enabled, replayOnEnable, config, observeRecoveryBacklog, startFrameLoop, syncImmediate, visibleBacklog])
 
   useEffect(() => {
     if (enabled && skipRanges !== undefined) startFrameLoop()

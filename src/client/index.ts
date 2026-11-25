@@ -11,6 +11,8 @@ import { NativeAssistantNodeView } from './NativeAssistantNodeView.tsx'
 import { installRendererAdapter } from './rendererAdapter.ts'
 import { installConversationPipeline } from './conversationPipeline.ts'
 import { bindRecoverySynchronization } from './recoverySynchronization.ts'
+import { setForegroundRecoveryDelay } from './backgroundRecovery.ts'
+import { streamOrderDefinition } from './streamOrder.ts'
 import { wrapFollowNodeView, type FollowWrapProps } from './TypewriterToolNodeView.tsx'
 import { SmoothStreamCard } from './SmoothStreamCard.tsx'
 import { SmoothStreamCardController } from './smooth-stream-card-controller.ts'
@@ -124,6 +126,7 @@ class SettingsCell {
       && next.controlScroll === this.value.controlScroll
       && next.motionPreference === this.value.motionPreference
       && next.backgroundRecovery === this.value.backgroundRecovery
+       && next.foregroundRecoveryDelayMs === this.value.foregroundRecoveryDelayMs
       && next.thinkAutoExpand === this.value.thinkAutoExpand
       && next.logarithmicFade === this.value.logarithmicFade
       && next.fastFold === this.value.fastFold
@@ -204,14 +207,20 @@ export function apply(ctx: ClientContext): void {
   const config = readBootConfig()
   const settings = new SettingsCell()
   const syncStyles = (): void => { syncFastFold(settings.getSnapshot().enabled && settings.getSnapshot().fastFold) }
+  const syncRecoveryDelay = (): void => { setForegroundRecoveryDelay(settings.getSnapshot().foregroundRecoveryDelayMs) }
   syncStyles()
+  syncRecoveryDelay()
   const offStyles = settings.subscribe(syncStyles)
+  const offRecoveryDelay = settings.subscribe(syncRecoveryDelay)
   ctx.effect(() => () => {
     offStyles()
+    offRecoveryDelay()
+    setForegroundRecoveryDelay(0)
     document.documentElement.removeAttribute('data-smooth-stream-fast-fold')
     document.getElementById(FAST_FOLD_STYLE_ID)?.remove()
   })
   healDshConversationPipeline(ctx, settings)
+  ctx.inject(['uiConversation'], scopedCtx => scopedCtx.uiConversation.events.register(streamOrderDefinition()))
   ctx.inject(['sessions', 'connection'], scopedCtx => bindRecoverySynchronization(
     scopedCtx.sessions,
     scopedCtx.get('connection') as unknown as ConnectionHandle,

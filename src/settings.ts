@@ -87,6 +87,8 @@ export interface StreamSettings {
   motionPreference: StreamMotionPreference
   /** How queued content resumes after the page returns to the foreground. */
   backgroundRecovery: BackgroundRecovery
+  /** Delay before smooth-stream resumes after a native foreground signal, in ms. */
+  foregroundRecoveryDelayMs: number
   /**
    * Whether a reasoning ("Think") block auto-expands while it is the
    * streaming tail. Off keeps the block collapsed — the user can still open
@@ -121,6 +123,7 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   controlScroll: true,
   motionPreference: 'force-smooth',
   backgroundRecovery: 'catch-up',
+  foregroundRecoveryDelayMs: 0,
   thinkAutoExpand: true,
   logarithmicFade: true,
   fastFold: true,

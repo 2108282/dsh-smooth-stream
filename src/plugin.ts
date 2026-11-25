@@ -62,6 +62,7 @@ export const StreamSettingsSchema: Schema<StreamSettings> = Schema.object({
     Schema.const('force-reduced'),
   ] as const).default(DEFAULT_STREAM_SETTINGS.motionPreference),
   backgroundRecovery: Schema.union(['replay', 'catch-up', 'latest'] as const).default(DEFAULT_STREAM_SETTINGS.backgroundRecovery),
+  foregroundRecoveryDelayMs: Schema.number().step(1).min(0).max(10000).default(DEFAULT_STREAM_SETTINGS.foregroundRecoveryDelayMs),
   thinkAutoExpand: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.thinkAutoExpand),
   logarithmicFade: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.logarithmicFade),
   fastFold: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.fastFold),
@@ -150,6 +151,7 @@ export function apply(ctx: Context, config: Config): void {
           controlScroll: currentSettings.controlScroll,
           motionPreference: currentSettings.motionPreference,
           backgroundRecovery: currentSettings.backgroundRecovery,
+          foregroundRecoveryDelayMs: currentSettings.foregroundRecoveryDelayMs,
           thinkAutoExpand: currentSettings.thinkAutoExpand,
           logarithmicFade: currentSettings.logarithmicFade,
           fastFold: currentSettings.fastFold ?? DEFAULT_STREAM_SETTINGS.fastFold,
@@ -212,7 +214,7 @@ export function apply(ctx: Context, config: Config): void {
         }
         const next = payload as Record<string, unknown>
         const allowedKeys = new Set([
-          'enabled', 'controlScroll', 'motionPreference', 'backgroundRecovery', 'thinkAutoExpand', 'logarithmicFade',
+          'enabled', 'controlScroll', 'motionPreference', 'backgroundRecovery', 'foregroundRecoveryDelayMs', 'thinkAutoExpand', 'logarithmicFade',
           'fastFold', 'fastPipeline', 'keepStreamOnToolCall', 'debugEnabled', 'debugTuningEnabled', 'debugTuning',
         ])
         if (Object.keys(next).some(key => !allowedKeys.has(key))) {
@@ -236,6 +238,13 @@ export function apply(ctx: Context, config: Config): void {
           && next.backgroundRecovery !== 'catch-up'
           && next.backgroundRecovery !== 'latest') {
           return rejectedSettings('settings payload contains an invalid backgroundRecovery')
+        }
+        if ('foregroundRecoveryDelayMs' in next
+          && (typeof next.foregroundRecoveryDelayMs !== 'number'
+            || !Number.isInteger(next.foregroundRecoveryDelayMs)
+            || next.foregroundRecoveryDelayMs < 0
+            || next.foregroundRecoveryDelayMs > 10000)) {
+          return rejectedSettings('settings payload contains an invalid foregroundRecoveryDelayMs')
         }
         if ('debugTuning' in next && !validDebugTuning(next.debugTuning)) {
           return rejectedSettings('settings payload contains invalid debugTuning')

@@ -1,6 +1,6 @@
 # dsh-smooth-stream
 
-> **Stable fix release 0.10.4 (main)**: WebView resynchronization, folded-content gates and ellipsis-tail fixes. The 16-character catch-up budget and user tuning are unchanged. Performance instrumentation is not implemented; these fixes do not establish real-device FPS. See the [release record](docs/changes-0.10.4.md).
+> **Stable fix release 0.10.7 (main)**: Includes the WebView resynchronization, folded-content gates and ellipsis-tail fixes from 0.10.4, plus opt-in foreground recovery diagnostics. The 16-character catch-up budget and user tuning are unchanged. Diagnostics report RAF callback intervals, callback duration, queue size and Long Tasks; they are not compositor FPS. See the [release record](docs/changes-0.10.7.md).
 
 > **Transform jumpy AI outputs into a calm, teleprompter-smooth reading experience.**  
 > Physics-based stream rendering and zero-reflow viewport tracking for the DeepSeek Harness (`dsh`) Web UI.

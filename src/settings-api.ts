@@ -31,6 +31,8 @@ export interface StreamSettingsView {
   motionPreference: import('./settings.ts').StreamMotionPreference
   /** Foreground recovery policy for content accumulated in the background. */
   backgroundRecovery: import('./settings.ts').BackgroundRecovery
+  /** Delay before native foreground recovery resumes, in ms. */
+  foregroundRecoveryDelayMs: number
   /** Current resolved preference. */
   thinkAutoExpand: boolean
   /** Whether new answer/thinking text fades into its original color. */

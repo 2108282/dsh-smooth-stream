@@ -8,6 +8,7 @@ import type { StreamSettings } from '../settings.ts'
 import { relayScope, relayTurnKey, streamRelay } from './streamRelay.ts'
 import { isBackgroundRecoveryScope } from './backgroundRecovery.ts'
 import { assistantProgress } from './presentationProgress.ts'
+import { STREAM_ORDER_DATA_KEY, type StreamOrderData } from './streamOrder.ts'
 
 export interface NativeAssistantPreferences extends Pick<StreamSettings,
   'controlScroll' | 'motionPreference' | 'logarithmicFade' | 'thinkAutoExpand' | 'keepStreamOnToolCall'> {
@@ -143,6 +144,22 @@ function reasoningDisplayStart(text: string): number {
     else break
   }
   return start
+}
+function blockSourceOrder(node: AssistantProps['node'], groupPart: string | undefined, shown: string): number | undefined {
+  const location = node.location
+  if (location.kind !== 'step') return undefined
+  const data = location.step.data.get(STREAM_ORDER_DATA_KEY) as StreamOrderData | undefined
+  if (data === undefined) return undefined
+  let offset = 0
+  for (const [index, block] of node.data.blocks.entries()) {
+    if (block.kind !== 'reasoning' && block.kind !== 'text') continue
+    if (groupPart === 'reasoning' && block.kind !== 'reasoning') continue
+    if (groupPart === 'response' && block.kind !== 'text') continue
+    const next = offset + countChars(block.text)
+    if (shown.length < next) return data.blockSeqs.get(index)
+    offset = next
+  }
+  return undefined
 }
 function hasVisibleReasoning(text: string): boolean {
   return text.slice(reasoningDisplayStart(text)).trim() !== ''
@@ -287,6 +304,13 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   const source = projectionCache(segments).source
   const [recoveryBacklog, setRecoveryBacklog] = useState(() => !reduced && node.data.status !== 'interrupted'
     && recoveringScope && countChars(source) > LARGE_RECOVERY_BACKLOG_CHARS)
+  // A resumed seat must never auto-open its reasoning, whatever the backlog
+  // size. Latch the recovery scope (the shared recovery map is mutable, so a
+  // mid-drain snapshot can drop to `false`) together with any large recovery
+  // backlog, so fast-forwarding a collapsed block to "drained" cannot re-open
+  // it. The latch resets only when this seat unmounts (a new turn/step seat).
+  const recoveryDisclosure = useRef(reduced ? false : (recoveringScope || recoveryBacklog))
+  if (!reduced && (recoveringScope || recoveryBacklog)) recoveryDisclosure.current = true
   const root = useRef<HTMLDivElement>(null)
   const [collapsedReasoning, setCollapsedReasoning] = useState<readonly number[]>(() => !preferences.thinkAutoExpand
     ? node.data.blocks.flatMap((block, index) => block.kind === 'reasoning' ? [index] : []) : [])
@@ -369,10 +393,12 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   })
   const shown = animate && !toolHandoff ? smoothed : source
   const pending = animate && !toolHandoff && shown !== source
+  const sourceOrder = blockSourceOrder(node, groupPart, shown)
+  const activeScope = useMemo(() => sourceOrder === undefined ? scope : { ...scope, sourceOrder }, [scope, sourceOrder])
   const subscribeBlocked = useCallback((listener: () => void) => pending
-    ? streamRelay.subscribeBlocked(scope, part, listener) : () => {}, [pending, scope, part])
+    ? streamRelay.subscribeBlocked(activeScope, part, listener) : () => {}, [pending, activeScope, part])
   const blocked = useSyncExternalStore(subscribeBlocked,
-    () => pending && streamRelay.isBlocked(scope, part), () => false)
+    () => pending && streamRelay.isBlocked(activeScope, part), () => false)
   hold.current = blocked
   const ownsLiveTail = live && !toolPresent && !node.data.blocks.some(block => block.kind === 'tool-call')
     && (groupPart !== 'reasoning' || node.data.blocks.at(-1)?.kind === 'reasoning')
@@ -384,13 +410,13 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   const lease = useRef<symbol | null>(null)
   useLayoutEffect(() => {
     if (!pending) return
-    const token = streamRelay.acquire(scope, part, true)
+    const token = streamRelay.acquire(activeScope, part, true)
     lease.current = token
     return () => {
       streamRelay.release(token)
       if (lease.current === token) lease.current = null
     }
-  }, [scope, part, pending])
+  }, [activeScope, part, pending])
   const blocks = useMemo(() => animate && !toolHandoff
     ? revealAssistantBlocks(node.data.blocks, segments, shown)
     : node.data.blocks, [animate, toolHandoff, node.data.blocks, segments, shown])
@@ -399,9 +425,11 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
     && block.text !== (node.data.blocks[index] as { text?: string } | undefined)?.text)
   const reasoningTyping = !toolHandoff && (reasoningPending
     || (live && !toolPresent && node.data.blocks.at(-1)?.kind === 'reasoning'))
-  // Recovery catches up silently; ordinary live reasoning keeps its usual
-  // auto-expand policy, and the disclosure hook still honours manual choices.
-  const useDisclosure = useAutomaticDisclosure(owner.useDisclosure, preferences.thinkAutoExpand && !recoveryBacklog, reasoningTyping && !blocked)
+  // Ordinary live reasoning keeps the usual auto-expand policy. A background
+  // resume never auto-opens: the latch above stays set until this seat is
+  // replaced, so a collapsed block cannot reopen mid-catch-up. The disclosure
+  // hook still honours manual choices.
+  const useDisclosure = useAutomaticDisclosure(owner.useDisclosure, preferences.thinkAutoExpand && !recoveryDisclosure.current, reasoningTyping && !blocked)
   // The Hook changes only with its policy/phase, so the official memo tree
   // observes completion even if the final text snapshot is unchanged. React
   // retains each ReasoningRow's Hook state and the official reset subscription.

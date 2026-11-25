@@ -16,6 +16,7 @@ function state(overrides: Partial<DebugRuntimeState> = {}): DebugRuntimeState {
   return {
     available: true,
     enabled: true,
+    diagnosticActive: false,
     tuningEnabled: false,
     writable: true,
     dirty: false,
@@ -55,6 +56,8 @@ function setup(overrides: Partial<DebugRuntimeState> = {}) {
     save: vi.fn(),
     discard: vi.fn(),
     reset: vi.fn(),
+    startDiagnostics: vi.fn(),
+    stopDiagnostics: vi.fn(() => ({ startedAtMs: null, durationMs: 0, frameMetric: 'test', samples: [], frames: {}, longTasks: { count: 0, maxDurationMs: 0, over50: 0, over100: 0, supported: false } })),
   }
   const props = {
     ...face,
@@ -140,6 +143,24 @@ describe('render diagnostics panel', () => {
       frameMs: null,
       fpsDegraded: false,
     })
+  })
+
+  it('captures bounded diagnostics only when explicitly started and exports raw frame gaps', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(1000)
+    debugRuntime.syncSettings({ enabled: true, writable: true, dirty: false, status: 'ready' })
+    debugRuntime.startDiagnostics()
+    expect(debugRuntime.diagnosticsActive()).toBe(true)
+    debugRuntime.recordDiagnostic('lifecycle', { event: 'native-foreground' })
+    debugRuntime.recordDiagnosticFrame('text', 1016, 1)
+    debugRuntime.recordDiagnosticFrame('text', 1180, 3)
+    const result = debugRuntime.stopDiagnostics()
+    if (result === null) throw new Error('diagnostic capture unexpectedly stopped')
+    expect(debugRuntime.diagnosticsActive()).toBe(false)
+    expect(result.frames).toMatchObject({ text: { count: 2, over100: 1, maxGapMs: 164, maxDurationMs: 3 } })
+    expect(result.samples).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'lifecycle', event: 'native-foreground' }),
+      expect.objectContaining({ kind: 'text-frame', gapMs: 164, durationMs: 3 }),
+    ]))
   })
 
   it('shows live stream and follow measurements in the chat-side panel', () => {

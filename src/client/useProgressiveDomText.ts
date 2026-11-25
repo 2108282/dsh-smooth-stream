@@ -332,6 +332,7 @@ export function useProgressiveDomText(
     }
 
     const frame = (now: number): void => {
+      const frameStartedAt = performance.now()
       rafId = 0
       if (stopped || recoveryRef.current.hidden()) { lastFrame = null; return }
       // Drain queued native commits before the ellipsis decision, including a
@@ -353,6 +354,9 @@ export function useProgressiveDomText(
       const playback = recoveryRef.current
       playback.detectGap(elapsed)
       const catchingUp = playback.recovering() && playback.mode() === 'catch-up'
+      if (playback.recovering()) {
+        debugRuntime.recordDiagnostic('raf', { event: 'text-recovery-frame', gapMs: elapsed, mode: playback.mode() })
+      }
 
       const orderedPending: Array<{ node: Text; record: TextRevealRecord }> = []
       let backlog = 0
@@ -443,6 +447,13 @@ export function useProgressiveDomText(
         displayedChars += record.shown
         if (pending.has(node)) nextBacklog += record.chars.length - record.shown
       }
+      debugRuntime.recordDiagnostic('text-queue', {
+        backlogChars: nextBacklog,
+        pendingNodes: pending.size,
+        records: records.size,
+        mode: catchingUp ? 'catch-up' : playback.recovering() ? playback.mode() : 'normal',
+      })
+      debugRuntime.recordDiagnosticFrame(streamId, now, performance.now() - frameStartedAt)
       debugRuntime.reportStream(streamId, {
         backlog: nextBacklog,
         speedCps: speedCpsRef.current,

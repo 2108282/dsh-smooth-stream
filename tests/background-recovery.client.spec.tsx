@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LARGE_RECOVERY_BACKLOG_CHARS, useSmoothStreamContent } from '../src/client/useSmoothStreamContent.ts'
 import { wrapFollowNodeView } from '../src/client/TypewriterToolNodeView.tsx'
 import { streamRelay } from '../src/client/streamRelay.ts'
-import { installRecoverySynchronization, isBackgroundRecoveryScope, notifyRecoverySynchronized, recoveryBudget, RECOVERY_MAX_CHARS } from '../src/client/backgroundRecovery.ts'
+import { installRecoverySynchronization, isBackgroundRecoveryScope, notifyRecoverySynchronized, recoveryBudget, RECOVERY_MAX_CHARS, setForegroundRecoveryDelay } from '../src/client/backgroundRecovery.ts'
 import { DEFAULT_STREAM_DEBUG_TUNING, type BackgroundRecovery } from '../src/settings.ts'
 
 let frames: Map<number, FrameRequestCallback>
@@ -26,8 +26,9 @@ beforeEach(() => {
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { const id = next++; frames.set(id, callback); return id })
   vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id))
   vi.stubGlobal('performance', { now: () => time })
+  setForegroundRecoveryDelay(0)
 })
-afterEach(() => { cleanup(); assistantProgress.clear(); clearToolPresentationLedger(); streamRelay.clearAll(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); setForegroundRecoveryDelay(0); assistantProgress.clear(); clearToolPresentationLedger(); streamRelay.clearAll(); vi.unstubAllGlobals() })
 function Probe({ text, mode, complete = false, enabled = true, replayOnEnable = false, shouldHoldBack, onRecoveryBacklogChange, recoveryKey }: {
   text: string
   mode: BackgroundRecovery
@@ -82,6 +83,42 @@ describe('background playback choices', () => {
     await paint(3)
     expect(view.container.textContent!.length).toBeGreaterThan(1000)
     expect(view.container.textContent!.length).toBeLessThan(1100)
+  })
+
+  it('ignores focus recovery until native foreground arrives', async () => {
+    setForegroundRecoveryDelay(500)
+    const view = render(createElement(Probe, { text: 'start', mode: 'catch-up' }))
+    await paint(10)
+    await act(async () => { window.dispatchEvent(new Event('dsha:background')) })
+    view.rerender(createElement(Probe, { text: 'start' + 'x'.repeat(100), mode: 'catch-up', complete: true }))
+    const before = view.container.textContent
+    await act(async () => { window.dispatchEvent(new Event('focus')) })
+    await paint(5)
+    expect(view.container.textContent).toBe(before)
+    await act(async () => { window.dispatchEvent(new Event('dsha:foreground')) })
+    await new Promise(resolve => setTimeout(resolve, 501))
+    await paint(2)
+    expect(view.container.textContent!.length).toBeGreaterThan(before!.length)
+  })
+
+  it('delays native foreground recovery and cancels it when hidden again', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    setForegroundRecoveryDelay(500)
+    const view = render(createElement(Probe, { text: 'start', mode: 'catch-up' }))
+    await paint(10)
+    await background(true)
+    view.rerender(createElement(Probe, { text: 'start' + 'x'.repeat(100), mode: 'catch-up', complete: true }))
+    const before = view.container.textContent
+    await act(async () => { window.dispatchEvent(new Event('dsha:foreground')) })
+    await vi.advanceTimersByTimeAsync(499)
+    expect(view.container.textContent).toBe(before)
+    await act(async () => { window.dispatchEvent(new Event('dsha:background')) })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(view.container.textContent).toBe(before)
+    setForegroundRecoveryDelay(0)
+    await act(async () => { window.dispatchEvent(new Event('dsha:foreground')) })
+    await paint(2)
+    expect(view.container.textContent!.length).toBeGreaterThan(before!.length)
   })
 
   it('shows latest on resume then paces later chunks, with repeated foreground signals idempotent', async () => {
@@ -298,5 +335,32 @@ describe('background playback choices', () => {
 
   it('caps even a minute-long catch-up interval', () => {
     expect(recoveryBudget(10000, 60000, 0, DEFAULT_STREAM_DEBUG_TUNING).chars).toBeLessThanOrEqual(RECOVERY_MAX_CHARS)
+  })
+
+  it('counts only visible text when a collapsed range sits between visible text', async () => {
+    // Visible prefix, a long collapsed reasoning range, then a visible tail.
+    // While the cursor is still inside the prefix the collapsed range has not
+    // been fast-forwarded yet; it is hidden text and must not inflate the
+    // backlog past the large-recovery threshold.
+    const head = 'h'.repeat(20)
+    const hidden = 'r'.repeat(2000)
+    const tail = 't'.repeat(20)
+    const onRecoveryBacklogChange = vi.fn()
+    const Collapsed = ({ text }: { text: string }) => createElement('output', null, useSmoothStreamContent(text, {
+      backgroundRecovery: 'catch-up',
+      onRecoveryBacklogChange,
+      skipRanges: [[head.length, head.length + hidden.length]] as const,
+      canSkipRange: () => true,
+    }))
+    const view = render(createElement(Collapsed, { text: '' }))
+    await paint(3)
+    await background(true)
+    view.rerender(createElement(Collapsed, { text: head + hidden + tail }))
+    await background(false)
+    await paint(2)
+    // Only 40 characters are visible, so no large backlog may be reported.
+    expect(onRecoveryBacklogChange).not.toHaveBeenCalledWith(true)
+    await paint(2000)
+    expect(view.container.textContent).toBe(head + hidden + tail)
   })
 })

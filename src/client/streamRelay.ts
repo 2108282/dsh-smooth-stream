@@ -6,6 +6,8 @@ export interface RelayScope {
   step: number
   node: string
   order: number
+  /** Source event position of the currently pending block, when available. */
+  sourceOrder?: number | undefined
 }
 export type RelayPart = 'reasoning' | 'response' | 'tool' | 'output'
 interface Lease {
@@ -13,6 +15,7 @@ interface Lease {
   step: number
   node: string
   order: number
+  sourceOrder?: number | undefined
   part: RelayPart
   active: boolean
 }
@@ -35,7 +38,7 @@ export function relayScope(node: unknown, sessionId?: unknown): RelayScope {
     turn: String(data.turn ?? turn.turn ?? root.turn ?? n.key ?? 'unknown'),
     step: Number(data.step ?? step.step ?? root.step ?? 0),
     node: String(n.key ?? 'unknown'),
-    order: Number(n.anchorSeq ?? 0),
+    order: typeof n.anchorSeq === 'number' ? n.anchorSeq : Number.NaN,
   }
 }
 
@@ -60,7 +63,22 @@ interface Position {
   part: number
 }
 
+function positionForLease(lease: Lease): Position {
+  return {
+    order: Number.isFinite(lease.sourceOrder) ? lease.sourceOrder! : lease.order,
+    part: PART_ORDER[lease.part],
+  }
+}
+
+function positionForScope(scope: RelayScope, part: number): Position {
+  return {
+    order: Number.isFinite(scope.sourceOrder) ? scope.sourceOrder! : scope.order,
+    part,
+  }
+}
+
 function before(left: Position, right: Position): boolean {
+  if (!Number.isFinite(left.order) || !Number.isFinite(right.order)) return false
   return left.order < right.order || (left.order === right.order && left.part < right.part)
 }
 
@@ -81,7 +99,7 @@ class StepActivity {
 
   change(lease: Lease, active: boolean): void {
     const part = PART_ORDER[lease.part]
-    const position = { order: lease.order, part }
+    const position = positionForLease(lease)
     const activity = this.nodes.get(lease.node) ?? { ordered: [], counts: [0, 0, 0] }
     const previous = activity.ordered[0]
     activity.counts[part] = activity.counts[part]! + (active ? 1 : -1)
@@ -109,8 +127,14 @@ class StepActivity {
   blocks(scope: RelayScope, part: number): boolean {
     const own = this.nodes.get(scope.node)
     if (own !== undefined && ((part >= 1 && own.counts[0] > 0) || (part >= 2 && own.counts[1] > 0))) return true
-    const other = this.frontier[this.frontier[0]?.node === scope.node ? 1 : 0]
-    return other !== undefined && before(other, { order: scope.order, part })
+    // `part` is meaningful only within the same node. Different nodes may
+    // share an assistant step's anchorSeq (or be remounted from one snapshot),
+    // but the view props carry no source event position finer than that anchor.
+    // Never invent a cross-node order from reasoning/tool/output categories.
+    const other = this.frontier.find(entry => entry.node !== scope.node && Number.isFinite(entry.order))
+    const target = positionForScope(scope, part)
+    if (other === undefined || !Number.isFinite(target.order) || other.order >= target.order) return false
+    return true
   }
 
   private frontierIndex(position: NodeFrontier): number {
@@ -167,7 +191,7 @@ export class StreamRelay {
 
   acquire(scope: RelayScope, part: RelayPart, active = true): symbol {
     const token = Symbol(part)
-    const lease = { turnKey: relayTurnKey(scope), step: scope.step, node: scope.node, order: scope.order, part, active }
+    const lease = { turnKey: relayTurnKey(scope), step: scope.step, node: scope.node, order: scope.order, sourceOrder: scope.sourceOrder, part, active }
     this.leases.set(token, lease)
     if (part === 'tool') this.changeTool(lease, 1)
     if (active) this.changeActive(lease, true)

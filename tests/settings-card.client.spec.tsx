@@ -34,6 +34,7 @@ const developmentView: StreamSettingsView = {
     controlScroll: true,
     motionPreference: 'auto',
     backgroundRecovery: 'catch-up',
+  foregroundRecoveryDelayMs: 0,
     thinkAutoExpand: true,
     logarithmicFade: true,
     fastFold: true,
@@ -357,6 +358,7 @@ describe('smooth-stream settings card', () => {
       controlScroll: true,
       motionPreference: 'auto',
       backgroundRecovery: 'catch-up',
+  foregroundRecoveryDelayMs: 0,
       thinkAutoExpand: false,
       logarithmicFade: true,
       fastFold: true,
@@ -463,6 +465,7 @@ describe('smooth-stream settings card', () => {
       controlScroll: true,
       motionPreference: 'auto',
       backgroundRecovery: 'catch-up',
+  foregroundRecoveryDelayMs: 0,
       thinkAutoExpand: true,
       logarithmicFade: true,
       fastFold: true,
@@ -584,6 +587,28 @@ describe('smooth-stream settings card', () => {
       .toBe(true)
     expect(screen.getByRole('checkbox', { name: new RegExp(`^${en.thinkAutoExpand}`) }).getAttribute('disabled'))
       .toBeNull()
+  })
+
+  it('starts recovery capture with the diagnostics panel switch off and preserves it after remount', async () => {
+    const { ctx, slots } = await bench({ view: { ...developmentView, enabled: true } })
+    declareCardSlot(slots)
+    await ctx.plugin({ inject: [...inject], apply }).await()
+    const face = cardFace(slots)
+    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().status).toBe('ready'))
+    debugRuntime.syncSettings({ enabled: false, writable: true, dirty: false, status: 'ready' })
+    const card = render(<SmoothStreamCard {...cardProps(face)} />)
+    fireEvent.click(screen.getByRole('button', { name: /smooth stream/i }))
+    expect(screen.getByRole('button', { name: en.debugCaptureStart })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en.debugCaptureStart }))
+    expect(debugRuntime.diagnosticsActive()).toBe(true)
+    expect(screen.getByRole('button', { name: en.debugCaptureStopCopy })).toBeTruthy()
+    expect(screen.getByRole('checkbox', { name: new RegExp(`^${en.debugEnabled}`) })).toHaveProperty('checked', false)
+    card.unmount()
+    render(<SmoothStreamCard {...cardProps(face)} />)
+    fireEvent.click(screen.getByRole('button', { name: /smooth stream/i }))
+    expect(screen.getByRole('button', { name: en.debugCaptureStopCopy })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en.debugCaptureStopCopy }))
+    expect(debugRuntime.diagnosticsActive()).toBe(false)
   })
 
   it('keeps native entry identity and selects the official renderer while smooth streaming is disabled', async () => {

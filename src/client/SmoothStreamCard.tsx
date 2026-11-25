@@ -8,7 +8,8 @@
 import { useState, useSyncExternalStore } from 'react'
 import type { InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import { IconChevronDownOutlineRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { debugRuntime } from './debugRuntime.ts'
+import { IconChevronDownOutlineRegular, IconRefreshOutlineRegular, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SmoothStreamCardController, SmoothStreamCardFace } from './smooth-stream-card-controller.ts'
 import { zh } from './locales.ts'
 import css from './SmoothStreamCard.module.css'
@@ -39,6 +40,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
       controlScroll: true,
       motionPreference: 'auto' as const,
       backgroundRecovery: 'catch-up' as const,
+      foregroundRecoveryDelayMs: 0,
       thinkAutoExpand: false,
       logarithmicFade: true,
       fastFold: true,
@@ -66,11 +68,23 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
       restartRequired: false,
     })
   const t = typeof props.t === 'function' ? props.t : ((key: string) => (zh as Record<string, string>)[key] ?? key)
+  const diagnostics = useSyncExternalStore(debugRuntime.subscribe, debugRuntime.getSnapshot, debugRuntime.getSnapshot)
   const edit = props.edit ?? (patch => { cardFace?.edit(patch) })
   const save = props.save ?? (() => { cardFace?.save() })
   const discard = props.discard ?? (() => { cardFace?.discard() })
   const reload = props.reload ?? (() => { cardFace?.reload() })
   const upgrade = props.upgrade ?? (() => { cardFace?.upgrade() })
+  const startCapture = () => {
+    const started = debugRuntime.startDiagnostics()
+    setCaptureError(!started)
+  }
+  const [captureError, setCaptureError] = useState(false)
+  const stopCapture = async () => {
+    const capture = debugRuntime.stopDiagnostics()
+    if (capture === null) return
+    const accepted = await writeClipboard(JSON.stringify({ version: state.version ?? '0.10.7', capture, tuning: state.debugTuning }, null, 2))
+    setCaptureError(!accepted)
+  }
   const blocked = !state.dirty || state.saving || state.status !== 'ready'
   const versionLabel = state.version === undefined
     ? null
@@ -199,7 +213,18 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                     ))}
                   </div>
                 </div>
-                {/* Motion preference is a radio group, so this row is a div:
+                <label className={state.enabled ? css.field : `${css.field} ${css.fieldDisabled}`}>
+                   <span className={css.fieldHead}><span className={css.label}>{t('foregroundRecoveryDelay')}</span></span>
+                   <span className={css.hint}>{t('foregroundRecoveryDelayHint')}</span>
+                   <input type="number" min={0} max={10000} step={1} inputMode="numeric"
+                     value={state.foregroundRecoveryDelayMs}
+                     disabled={!state.writable || state.saving || !state.enabled}
+                     onChange={(event) => {
+                       const value = event.currentTarget.valueAsNumber
+                       if (Number.isInteger(value) && value >= 0 && value <= 10000) edit({ foregroundRecoveryDelayMs: value })
+                     }} />
+                 </label>
+                 {/* Motion preference is a radio group, so this row is a div:
                     nesting the choice labels inside a field <label> would be
                     illegal HTML (label within label) and browsers route the
                     inner click away, so React never sees onChange. */}
@@ -280,6 +305,22 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                   </span>
                   <span className={css.hint}>{state.debugAvailable ? t('debugEnabledHint') : t('debugUnavailable')}</span>
                 </label>
+                {state.status === 'ready' ? (
+                  <div className={css.field}>
+                    <span className={css.fieldHead}>
+                      <span className={css.label}>{t(diagnostics.diagnosticActive ? 'debugCaptureStopCopy' : 'debugCaptureStart')}</span>
+                      <button
+                        type="button"
+                        className={diagnostics.diagnosticActive ? css.discard : css.save}
+                        onClick={() => { void (diagnostics.diagnosticActive ? stopCapture() : startCapture()) }}
+                      >
+                        {t(diagnostics.diagnosticActive ? 'debugCaptureStopCopy' : 'debugCaptureStart')}
+                      </button>
+                    </span>
+                    <span className={css.hint}>{t('debugCaptureHint')}</span>
+                    {captureError ? <span className={css.failed} role="status">{t('debugCaptureCopyFailed')}</span> : null}
+                  </div>
+                ) : null}
                 <div className={css.updateRow}>
                   <span className={css.updateCopy}>
                     <span className={css.label}>{t('updates')}</span>

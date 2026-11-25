@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef } from 'react'
 import type { BackgroundRecovery, StreamDebugTuning } from '../settings.ts'
+import { debugRuntime } from './debugRuntime.ts'
 
 /** A stalled WebView may not deliver visibility events; only a long frame gap is a fallback. */
 export const BACKGROUND_GAP_MS = 1000
@@ -40,6 +41,15 @@ const clients = new Set<RecoveryClient>()
 const recoveryScopes = new Map<string, RecoveryPosition | undefined>()
 let attached = false
 let background = false
+let nativeBackground = false
+let foregroundDelayMs = 0
+let foregroundPending = false
+let foregroundTimer: ReturnType<typeof setTimeout> | undefined
+
+/** Set the user-owned delay used only for native dsha:foreground signals. */
+export function setForegroundRecoveryDelay(delayMs: number): void {
+  foregroundDelayMs = Number.isInteger(delayMs) && delayMs >= 0 ? Math.min(10000, delayMs) : 0
+}
 
 /** A resume batch belongs to its observed turn, not a wall-clock window. */
 export function isBackgroundRecoveryScope(key: string, position?: RecoveryPosition): boolean {
@@ -74,43 +84,76 @@ function retireScopes(): void {
   }
 }
 
-function hide(): void {
-  if (background) return
+function hide(native = false): void {
+  if (native) nativeBackground = true
+  if (background && !foregroundPending) return
+  if (foregroundTimer !== undefined) clearTimeout(foregroundTimer)
+  foregroundTimer = undefined
+  foregroundPending = false
   background = true
+  debugRuntime.recordDiagnostic('lifecycle', { event: 'recovery-hidden' })
   rememberScopes()
   for (const client of [...clients]) client.hidden()
 }
-function show(): void {
-  if (!background) return
+function show(delayMs = 0, native = false): void {
+  if (foregroundPending) return
+  if (native) nativeBackground = false
+  if (nativeBackground && !native) return
+  if (!background && !foregroundPending) return
+  if (foregroundTimer !== undefined) clearTimeout(foregroundTimer)
+  foregroundTimer = undefined
+  foregroundPending = false
+  if (delayMs > 0) {
+    foregroundPending = true
+    foregroundTimer = setTimeout(() => {
+      foregroundTimer = undefined
+      if (!foregroundPending) return
+      foregroundPending = false
+      background = false
+      debugRuntime.recordDiagnostic('lifecycle', { event: 'recovery-resume' })
+      rememberScopes()
+      for (const client of [...clients]) client.resume()
+    }, delayMs)
+    return
+  }
   background = false
+  debugRuntime.recordDiagnostic('lifecycle', { event: 'recovery-resume' })
   rememberScopes()
   for (const client of [...clients]) client.resume()
 }
 function visibility(): void { if (document.hidden) hide(); else show() }
+function pageHide(): void { hide() }
 function focus(): void { if (!document.hidden) show() }
+function nativeBackgroundSignal(): void { hide(true) }
+function nativeForeground(): void { show(foregroundDelayMs, true) }
 function attach(): void {
   if (attached || typeof document === 'undefined') return
   attached = true
   background = document.hidden
+  nativeBackground = false
   document.addEventListener('visibilitychange', visibility)
-  window.addEventListener('pagehide', hide)
+  window.addEventListener('pagehide', pageHide)
   window.addEventListener('pageshow', focus)
   // Focus loss alone (dialogs, menus, keyboard) is not a WebView suspension.
   window.addEventListener('focus', focus)
   // Native shells can emit these without forging browser network/visibility state.
-  window.addEventListener('dsha:background', hide)
-  window.addEventListener('dsha:foreground', show)
+  window.addEventListener('dsha:background', nativeBackgroundSignal)
+  window.addEventListener('dsha:foreground', nativeForeground)
 }
 function detach(): void {
   if (!attached || clients.size !== 0) return
   document.removeEventListener('visibilitychange', visibility)
-  window.removeEventListener('pagehide', hide)
+  window.removeEventListener('pagehide', pageHide)
   window.removeEventListener('pageshow', focus)
   window.removeEventListener('focus', focus)
-  window.removeEventListener('dsha:background', hide)
-  window.removeEventListener('dsha:foreground', show)
+  window.removeEventListener('dsha:background', nativeBackgroundSignal)
+  window.removeEventListener('dsha:foreground', nativeForeground)
   attached = false
   background = false
+  nativeBackground = false
+  foregroundPending = false
+  if (foregroundTimer !== undefined) clearTimeout(foregroundTimer)
+  foregroundTimer = undefined
   recoveryScopes.clear()
 }
 
@@ -139,7 +182,11 @@ export function useBackgroundRecovery(mode: BackgroundRecovery, onHidden: () => 
       position: () => positionRef.current,
       recovering: () => state.current.recovering || state.current.wasHidden,
       waitingForSync: () => state.current.waitingSync,
-      hidden: () => { state.current.wasHidden = true; state.current.waitingSync = false; callbacks.current.onHidden() },
+      hidden: () => {
+        state.current.wasHidden = true
+        state.current.waitingSync = false
+        callbacks.current.onHidden()
+      },
       resume: () => {
         state.current.wasHidden = false
         state.current.waitingSync = false
@@ -160,7 +207,11 @@ export function useBackgroundRecovery(mode: BackgroundRecovery, onHidden: () => 
       rememberScope(key, positionRef.current)
       client.hidden()
     }
-    return () => { clients.delete(client); retireScopes(); detach() }
+    return () => {
+      clients.delete(client)
+      retireScopes()
+      detach()
+    }
   }, [active])
   useLayoutEffect(() => {
     // Observe a new Session before its connection can enter recovery.

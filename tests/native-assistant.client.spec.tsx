@@ -354,7 +354,7 @@ describe('native assistant wrapper', () => {
     expect(view.getByTestId('settled').querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('settled')
   })
 
-  it('synchronizes large collapsed recovery reasoning instead of waiting on hidden character debt', async () => {
+  it('keeps collapsed recovery reasoning closed after a large resume instead of auto-expanding', async () => {
     const props = owner('running', 'reasoning '.repeat(160), true)
     const view = render(native(props, preferences, Official))
     await paint(3)
@@ -364,20 +364,27 @@ describe('native assistant wrapper', () => {
       blocks: [{ kind: 'reasoning', text: 'reasoning '.repeat(180) }] } } }, preferences, Official))
     await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
     expect(view.queryByTestId('reasoning-body')).toBeNull()
-    await paint(4)
-    // Hidden source is synchronized in a frame, so the old 700-frame drain
-    // must no longer gate automatic expansion or a following visible reply.
+    await paint(60)
+    // A background resume never auto-opens reasoning, even once the hidden
+    // source has been synchronized. The previous policy re-expanded the block
+    // here, which is the "thinking opens early after returning from background"
+    // conflict this latch removes.
+    expect(view.queryByTestId('reasoning-body')).toBeNull()
+    // A manual open still reveals the full synchronized text.
+    fireEvent.click(view.getByText('Official thinking'))
     expect(view.getByTestId('reasoning-body').textContent).toBe('reasoning '.repeat(180))
   })
 
-  it('leaves automatic reasoning expanded for a small recovery backlog', async () => {
+  it('keeps automatic reasoning closed after a small recovery backlog too', async () => {
     const props = owner('running', 'reasoning '.repeat(20), true)
     const view = render(native(props, preferences, Official))
     await paint(3)
     await act(() => { window.dispatchEvent(new Event('dsha:background')) })
     await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
     await paint(4)
-    expect(view.queryByTestId('reasoning-body')).not.toBeNull()
+    // Resuming from the background never auto-expands reasoning regardless of
+    // backlog size; only ordinary foreground streaming may open it.
+    expect(view.queryByTestId('reasoning-body')).toBeNull()
   })
 
   it('does not collapse a manually opened reasoning panel during large recovery', async () => {

@@ -63,11 +63,13 @@ export type SmoothStreamLocaleKey =
   | 'keepStreamOnToolCall' | 'keepStreamOnToolCallHint'
   | 'backgroundRecovery' | 'backgroundRecoveryHint' | 'backgroundReplay' | 'backgroundReplayHint'
   | 'backgroundCatchUp' | 'backgroundCatchUpHint' | 'backgroundLatest' | 'backgroundLatestHint'
+  | 'foregroundRecoveryDelay' | 'foregroundRecoveryDelayHint'
   | 'debugEnabled' | 'debugEnabledHint' | 'debugUnavailable'
   | 'debugTuningEnabled' | 'debugTuningEnabledHint'
   | 'debugPanelTitle' | 'debugPanelToggle' | 'debugPanelClose' | 'debugGuide'
   | 'debugLive' | 'debugIdle' | 'debugUnsaved'
   | 'debugSave' | 'debugDiscard' | 'debugReset' | 'debugCopy' | 'debugCopied'
+  | 'debugCaptureStart' | 'debugCaptureStopCopy' | 'debugCaptureCopied' | 'debugCaptureHint' | 'debugCaptureCopyFailed'
   | 'debugSectionLive' | 'debugSectionReveal' | 'debugSectionFollow'
   | 'debugFps' | 'debugFrameTime' | 'debugBacklog' | 'debugRevealSpeed' | 'debugProgress'
   | 'debugFollowState' | 'debugFollowing' | 'debugReleased'
@@ -94,6 +96,8 @@ export const en: Record<SmoothStreamLocaleKey, string> = {
   controlScrollHint: 'On by default; smooth-stream writes the conversation scroll position. Turn off to leave bottom-follow to Harness.',
   backgroundRecovery: 'Background recovery',
   backgroundRecoveryHint: 'Choose how queued text is displayed when returning to the page. Task execution is unchanged.',
+  foregroundRecoveryDelay: 'Foreground recovery delay (ms)',
+  foregroundRecoveryDelayHint: 'Wait this long after the native foreground signal before resuming text and scroll animation. Range: 0–10000 ms.',
   backgroundReplay: 'Continue at normal speed',
   backgroundReplayHint: 'Resume from the previous display position with small frame budgets, including completed replies.',
   backgroundCatchUp: 'Bounded catch-up',
@@ -117,7 +121,7 @@ export const en: Record<SmoothStreamLocaleKey, string> = {
   fastPipelineHint: 'Bypass DSH 3-frame nested requestAnimationFrame throttle (~50ms delay per chunk) into instant native single-frame rendering, making streaming output completely responsive.',
   keepStreamOnToolCall: 'Keep streaming before tool calls',
   keepStreamOnToolCallHint: 'Do not end text streaming early when followed by a tool call; preserve fluid typewriter reveal.',
-  thinkAutoExpandHint: 'Open thinking while it streams. After returning from the background, keep it collapsed while a backlog over 1200 characters drains. Ordinary foreground output and manual choices are unchanged. Turn off to keep automatic expansion disabled.',
+  thinkAutoExpandHint: 'Open thinking while it streams. After returning from the background, keep it collapsed for the rest of that reply; ordinary foreground output and manual choices are unchanged. Turn off to keep automatic expansion disabled.',
   debugTuningEnabled: 'Apply saved physical parameters',
   debugTuningEnabledHint: 'Use your saved reveal and scroll parameters even with diagnostics hidden. Turn off to use production defaults; saved values are retained.',
   debugEnabled: 'Show render diagnostics',
@@ -135,6 +139,11 @@ export const en: Record<SmoothStreamLocaleKey, string> = {
   debugReset: 'Reset tuning',
   debugCopy: 'Copy diagnostics',
   debugCopied: 'Copied',
+  debugCaptureStart: 'Start recovery capture',
+  debugCaptureStopCopy: 'Stop and copy recovery capture',
+  debugCaptureCopied: 'Recovery capture copied',
+  debugCaptureHint: 'Capture continues while you leave this settings page. Stop to copy the JSON.',
+  debugCaptureCopyFailed: 'Could not copy diagnostics. Check clipboard permission and try stopping again.',
   debugSectionLive: 'Live renderer',
   debugSectionReveal: 'Reveal tuning',
   debugSectionFollow: 'Scroll tuning',
@@ -202,6 +211,8 @@ export const zh: Record<SmoothStreamLocaleKey, string> = {
   controlScrollHint: '默认开启，由丝滑流式写入会话滚动位置；关闭后贴底滚动交给 Harness。',
   backgroundRecovery: '后台恢复方式',
   backgroundRecoveryHint: '返回页面时如何显示后台积压的文字；不影响任务执行。',
+  foregroundRecoveryDelay: '前台恢复延迟（毫秒）',
+  foregroundRecoveryDelayHint: '收到原生前台恢复信号后，等待指定时间再恢复文字与滚动动画。范围：0–10000 毫秒。',
   backgroundReplay: '正常速度续播',
   backgroundReplayHint: '从离开时的显示位置继续，小预算逐帧播放；已完成回复也不突然加速排空。',
   backgroundCatchUp: '限速追赶',
@@ -225,7 +236,7 @@ export const zh: Record<SmoothStreamLocaleKey, string> = {
   fastPipelineHint: 'DSH 官方核心写死了 3 重嵌套 requestAnimationFrame（每 50ms 仅刷新一次，长对话严重顿挫）。插件在内存中将其自愈为原生单帧极速派发，出字顺滑跟手。',
   keepStreamOnToolCall: '工具引导语保持流式',
   keepStreamOnToolCallHint: '文字后紧接工具调用时不提前宣告结束，让短引导语保持平滑打字。',
-  thinkAutoExpandHint: '流式时自动展开思考；仅在从后台恢复且积压超过 1200 字时，保持收起至本次积压排空。普通前台输出和手动操作不受影响；关闭后不再自动展开。',
+  thinkAutoExpandHint: '流式时自动展开思考；从后台恢复后，该条回复余下过程保持收起，普通前台输出和手动点开不受影响；关闭后不再自动展开。',
   debugTuningEnabled: '启用已保存的物理参数',
   debugTuningEnabledHint: '开启后使用已保存的吐字与滚动物理参数，关闭诊断面板仍然生效；关闭此开关使用默认参数，已保存数值会保留。',
   debugEnabled: '显示渲染调试面板',
@@ -243,6 +254,11 @@ export const zh: Record<SmoothStreamLocaleKey, string> = {
   debugReset: '恢复默认参数',
   debugCopy: '复制诊断数据',
   debugCopied: '已复制',
+  debugCaptureStart: '开始捕获恢复过程',
+  debugCaptureStopCopy: '停止并复制恢复诊断',
+  debugCaptureCopied: '恢复诊断已复制',
+  debugCaptureHint: '离开设置页后仍会继续捕获；点击停止后复制 JSON。',
+  debugCaptureCopyFailed: '复制诊断失败。请检查剪贴板权限后再点停止复制。',
   debugSectionLive: '实时渲染',
   debugSectionReveal: '流式参数',
   debugSectionFollow: '滚动参数',
