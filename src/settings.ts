@@ -10,6 +10,7 @@
 /** Settings namespace registered by the Host and served through the plugin RPC. */
 export const STREAM_SETTINGS_NS = 'smooth-stream'
 
+/** @deprecated Accepted for saved-setting compatibility; every value now synchronizes the latest snapshot. */
 export type BackgroundRecovery = 'replay' | 'catch-up' | 'latest'
 
 /** Runtime knobs selected by the independent physical-tuning switch. */
@@ -85,7 +86,7 @@ export interface StreamSettings {
    * RDP sessions, forced browser flags) would otherwise bypass it silently.
    */
   motionPreference: StreamMotionPreference
-  /** How queued content resumes after the page returns to the foreground. */
+  /** @deprecated Saved for compatibility; recovery always uses the latest snapshot. */
   backgroundRecovery: BackgroundRecovery
   /** Delay before smooth-stream resumes after a native foreground signal, in ms. */
   foregroundRecoveryDelayMs: number

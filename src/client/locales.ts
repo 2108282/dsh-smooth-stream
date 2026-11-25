@@ -61,8 +61,7 @@ export type SmoothStreamLocaleKey =
   | 'fastFold' | 'fastFoldHint'
   | 'fastPipeline' | 'fastPipelineHint'
   | 'keepStreamOnToolCall' | 'keepStreamOnToolCallHint'
-  | 'backgroundRecovery' | 'backgroundRecoveryHint' | 'backgroundReplay' | 'backgroundReplayHint'
-  | 'backgroundCatchUp' | 'backgroundCatchUpHint' | 'backgroundLatest' | 'backgroundLatestHint'
+  | 'backgroundRecovery' | 'backgroundRecoveryHint'
   | 'foregroundRecoveryDelay' | 'foregroundRecoveryDelayHint'
   | 'debugEnabled' | 'debugEnabledHint' | 'debugUnavailable'
   | 'debugTuningEnabled' | 'debugTuningEnabledHint'
@@ -95,15 +94,9 @@ export const en: Record<SmoothStreamLocaleKey, string> = {
   controlScroll: 'Take over scrolling',
   controlScrollHint: 'On by default; smooth-stream writes the conversation scroll position. Turn off to leave bottom-follow to Harness.',
   backgroundRecovery: 'Background recovery',
-  backgroundRecoveryHint: 'Choose how queued text is displayed when returning to the page. Task execution is unchanged.',
+  backgroundRecoveryHint: 'On return, show all text already received immediately. New text resumes normal streaming; task execution is unchanged.',
   foregroundRecoveryDelay: 'Foreground recovery delay (ms)',
   foregroundRecoveryDelayHint: 'Wait this long after the native foreground signal before resuming text and scroll animation. Range: 0–10000 ms.',
-  backgroundReplay: 'Continue at normal speed',
-  backgroundReplayHint: 'Resume from the previous display position with small frame budgets, including completed replies.',
-  backgroundCatchUp: 'Bounded catch-up',
-  backgroundCatchUpHint: 'Catch up on each animation frame, with at most 16 characters per commit and no fixed inter-commit wait.',
-  backgroundLatest: 'Show latest immediately',
-  backgroundLatestHint: 'Skip queued character animation on return, then reveal new text normally. Existing row order is preserved.',
   motionPreference: 'Motion',
   motionPreferenceHint: 'How streaming responds to the system reduce-motion setting.',
   motionAuto: 'Follow system',
@@ -209,16 +202,10 @@ export const zh: Record<SmoothStreamLocaleKey, string> = {
   enabledHint: '由本插件渲染并跟随流式回复；关闭后使用 Harness 内置渲染。',
   controlScroll: '接管滚动',
   controlScrollHint: '默认开启，由丝滑流式写入会话滚动位置；关闭后贴底滚动交给 Harness。',
-  backgroundRecovery: '后台恢复方式',
-  backgroundRecoveryHint: '返回页面时如何显示后台积压的文字；不影响任务执行。',
+  backgroundRecovery: '后台恢复',
+  backgroundRecoveryHint: '返回页面时立即显示此前已到达的全部文字；之后新到文字恢复正常流式输出，任务执行不受影响。',
   foregroundRecoveryDelay: '前台恢复延迟（毫秒）',
   foregroundRecoveryDelayHint: '收到原生前台恢复信号后，等待指定时间再恢复文字与滚动动画。范围：0–10000 毫秒。',
-  backgroundReplay: '正常速度续播',
-  backgroundReplayHint: '从离开时的显示位置继续，小预算逐帧播放；已完成回复也不突然加速排空。',
-  backgroundCatchUp: '限速追赶',
-  backgroundCatchUpHint: '逐动画帧限速追赶，单次最多提交 16 字，不再额外等待固定提交间隔。',
-  backgroundLatest: '直接显示最新',
-  backgroundLatestHint: '返回后跳过积压文字动画，后续新文字正常吐字，保留各条记录的顺序。',
   motionPreference: '动效偏好',
   motionPreferenceHint: '流式渲染如何响应系统的「减少动态效果」设置。',
   motionAuto: '跟随系统',

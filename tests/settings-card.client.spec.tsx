@@ -392,28 +392,16 @@ describe('smooth-stream settings card', () => {
     expect(choiceLabel!.parentElement!.closest('label')).toBeNull()
   })
 
-  it('selects, saves and reloads each background playback choice', async () => {
-    const { ctx, slots, call } = await bench()
+  it('describes fixed immediate background snapshot recovery without playback choices', async () => {
+    const { ctx, slots } = await bench()
     declareCardSlot(slots)
     await ctx.plugin({ inject: [...inject], apply }).await()
     const face = cardFace(slots)
     await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().status).toBe('ready'))
-    const rendered = render(<SmoothStreamCard {...cardProps(face)} />)
+    render(<SmoothStreamCard {...cardProps(face)} />)
     fireEvent.click(screen.getByRole('button', { name: /smooth stream/i }))
-    const group = screen.getByRole('radiogroup', { name: en.backgroundRecovery })
-    const radios = [...group.querySelectorAll<HTMLInputElement>('input[type=radio]')]
-    expect(radios.map(input => input.checked)).toEqual([false, true, false])
-    for (const [index, mode] of ['replay', 'catch-up', 'latest'].entries()) {
-      const current = screen.getByRole('radiogroup', { name: en.backgroundRecovery }).querySelectorAll<HTMLInputElement>('input[type=radio]')
-      fireEvent.click(current[index]!)
-      expect(face.hooks.smoothStreamCard.getSnapshot().backgroundRecovery).toBe(mode)
-      face.save()
-      await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().dirty).toBe(false))
-      expect(call).toHaveBeenCalledWith(STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.write, expect.objectContaining({ backgroundRecovery: mode }))
-      face.reload()
-      await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot()).toMatchObject({ status: 'ready', backgroundRecovery: mode }))
-      rendered.rerender(<SmoothStreamCard {...cardProps(face)} />)
-    }
+    expect(screen.getByText(en.backgroundRecoveryHint)).toBeTruthy()
+    expect(screen.queryByRole('radiogroup', { name: en.backgroundRecovery })).toBeNull()
   })
 
   it('stages and persists the diagnostics switch through its compatible endpoint', async () => {

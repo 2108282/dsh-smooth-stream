@@ -10,7 +10,7 @@ import { NativeAssistantNodeView } from '../src/client/NativeAssistantNodeView.t
 import { relayScope, streamRelay } from '../src/client/streamRelay.ts'
 import { wrapFollowNodeView } from '../src/client/TypewriterToolNodeView.tsx'
 import { DEFAULT_STREAM_SETTINGS } from '../src/settings.ts'
-import { isBackgroundRecoveryScope } from '../src/client/backgroundRecovery.ts'
+import { installRecoverySynchronization, isBackgroundRecoveryScope, notifyRecoverySynchronized } from '../src/client/backgroundRecovery.ts'
 
 type Owner = ChatNodeViewProps<'assistant-step'>
 type OfficialProps = Owner & PropsRenderSlots<'conversation.chat.reasoning.body' | 'conversation.chat.message.images'> & {
@@ -218,7 +218,7 @@ describe('native assistant wrapper', () => {
     expect(streamRelay.isBlocked(relayScope(props.node, props.sessionId), 'tool')).toBe(false)
   })
 
-  it.each(['replay', 'catch-up', 'latest'] as const)('orders a first settled reply behind recovering reasoning in %s mode', async mode => {
+  it.each(['replay', 'catch-up', 'latest'] as const)('synchronizes reasoning and a newly mounted settled reply without replay in %s mode', async mode => {
     const initial = { ...owner('running', 'r'.repeat(200), true), groupPart: 'reasoning' }
     const settings = { ...preferences, backgroundRecovery: mode }
     const tree = (settled: boolean) => {
@@ -228,24 +228,26 @@ describe('native assistant wrapper', () => {
         createElement('section', { key: 'reasoning', 'data-testid': 'reasoning-seat' }, native(snapshot, settings)),
         settled ? createElement('section', { key: 'response', 'data-testid': 'response-seat' }, native({ ...snapshot, groupPart: 'response' }, settings)) : null)
     }
-    const view = render(tree(false))
-    await paint(3)
-    const before = view.getByTestId('reasoning-seat').textContent!.length
-    await act(() => { window.dispatchEvent(new Event('pagehide')) })
-    await act(() => { window.dispatchEvent(new Event('pageshow')) })
-    // A slow reconnect must not lose the policy after the old one-second window.
-    timestamp += 3000
-    view.rerender(tree(true))
-    expect(view.getByTestId('reasoning-seat').textContent).toHaveLength(before)
-    expect(view.getByTestId('response-seat').querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('waiting')
-    expect(view.getByTestId('response-seat').textContent).toBe('')
-    for (let index = 0; index < 500; index++) {
-      await paint()
-      if (view.getByTestId('response-seat').textContent !== '') {
-        expect(view.getByTestId('reasoning-seat').textContent).toBe('r'.repeat(400))
-      }
-    }
-    expect(view.getByTestId('response-seat').textContent).toBe('final answer')
+    let syncing = true
+    const stop = installRecoverySynchronization({ pending: () => syncing })
+    try {
+      const view = render(tree(false))
+      await paint(3)
+      await act(() => { window.dispatchEvent(new Event('pagehide')) })
+      await act(() => { window.dispatchEvent(new Event('pageshow')) })
+      expect(view.getByTestId('reasoning-seat').textContent).toBe('r'.repeat(200))
+      // A delayed baseline can commit both updated reasoning and a new seat.
+      timestamp += 3000
+      await act(async () => {
+        view.rerender(tree(true))
+        syncing = false
+        notifyRecoverySynchronized()
+      })
+      expect(view.getByTestId('reasoning-seat').textContent).toBe('r'.repeat(400))
+      expect(view.getByTestId('response-seat').textContent).toBe('final answer')
+      expect(view.getByTestId('response-seat').querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('settled')
+      expect(isBackgroundRecoveryScope(JSON.stringify([initial.sessionId, '1']))).toBe(false)
+    } finally { stop() }
   })
 
   it('shows a first completed tool immediately during recovery', async () => {
@@ -293,13 +295,13 @@ describe('native assistant wrapper', () => {
     expect(view.getByTestId('c').textContent).toBe('c'.repeat(100))
   })
 
-  it('retires a recovery scope when a drained live seat settles without new text', async () => {
+  it('retires a synchronized recovery scope immediately without waiting for producer completion', async () => {
     const props = owner('running', 'short')
     const view = render(native(props))
     await paint(30)
     await act(() => { window.dispatchEvent(new Event('dsha:background')) })
     await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
-    expect(isBackgroundRecoveryScope(JSON.stringify([props.sessionId, '1']))).toBe(true)
+    expect(isBackgroundRecoveryScope(JSON.stringify([props.sessionId, '1']))).toBe(false)
     view.rerender(native({ ...props, node: { ...props.node, data: { ...props.node.data, status: 'settled' } } }))
     expect(isBackgroundRecoveryScope(JSON.stringify([props.sessionId, '1']))).toBe(false)
   })

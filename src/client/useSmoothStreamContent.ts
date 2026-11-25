@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { DEFAULT_STREAM_DEBUG_TUNING, type StreamDebugTuning, type BackgroundRecovery } from '../settings.ts'
 import { debugRuntime } from './debugRuntime.ts'
-import { recoveryBudget, useBackgroundRecovery, type RecoveryPosition } from './backgroundRecovery.ts'
+import { useBackgroundRecovery, type RecoveryPosition } from './backgroundRecovery.ts'
 
 export type StreamSmoothingPreset = 'realtime' | 'balanced' | 'silky'
 
@@ -161,8 +161,6 @@ export const countChars = (text: string): number => {
  */
 export const BACKLOG_CHAR_CEILING = 300
 export const BACKLOG_SECOND_CEILING = 2
-/** Recovery-only threshold for suppressing automatic reasoning disclosure. */
-export const LARGE_RECOVERY_BACKLOG_CHARS = 1200
 
 export interface SettleDrainInput {
   readonly backlog: number
@@ -268,16 +266,15 @@ export interface UseSmoothStreamContentOptions {
   enabled?: boolean
   /** Requeue the current snapshot when smoothing transitions from disabled to enabled. */
   replayOnEnable?: boolean
+  /** @deprecated Compatibility only; background recovery always synchronizes a snapshot. */
   backgroundRecovery?: BackgroundRecovery | undefined
   /** Conversation relay scope for recovery inheritance. */
   recoveryKey?: string | undefined
   /** Position within the recovery scope's ordered output. */
   recoveryPosition?: RecoveryPosition | undefined
-  /** Latches large recovery backlogs until their pending text has drained. */
-  onRecoveryBacklogChange?: ((pending: boolean) => void) | undefined
   /** Restore only a previously committed source prefix on renderer remount. */
   initialDisplayedContent?: string | undefined
-  /** Apply the selected recovery policy to newly accumulated remount backlog. */
+  /** Synchronize the latest source on a renderer remount instead of replaying it. */
   resumeOnMount?: boolean | undefined
   /** Code-point ranges belonging to collapsed details; synchronize without reveal debt. */
   skipRanges?: readonly (readonly [start: number, end: number])[] | undefined
@@ -329,7 +326,6 @@ export function useSmoothStreamContent(
     backgroundRecovery = 'catch-up',
     recoveryKey,
     recoveryPosition,
-    onRecoveryBacklogChange,
     initialDisplayedContent,
     resumeOnMount = false,
     skipRanges,
@@ -399,9 +395,6 @@ export function useSmoothStreamContent(
     }
     return Math.max(0, target - displayed - hidden)
   }, [])
-  const recoveryBacklogRef = useRef(false)
-  const onRecoveryBacklogChangeRef = useRef(onRecoveryBacklogChange)
-  onRecoveryBacklogChangeRef.current = onRecoveryBacklogChange
   const speedOutRef = useRef(speedCpsRef)
   speedOutRef.current = speedCpsRef
   const revealedCharsOutRef = useRef(revealedCharsRef)
@@ -413,6 +406,8 @@ export function useSmoothStreamContent(
   const inputCompleteRef = useRef(inputComplete)
   inputCompleteRef.current = inputComplete
   const streamIdRef = useRef(`stream-${Math.random().toString(36).slice(2)}`)
+  const [recoverySnapshotVersion, setRecoverySnapshotVersion] = useState(0)
+  const appliedRecoverySnapshotRef = useRef(0)
 
   useEffect(() => {
     holdBackRef.current = shouldHoldBack
@@ -426,30 +421,21 @@ export function useSmoothStreamContent(
     lastFrameTsRef.current = null
   }, [])
 
-  const reportRecoveryBacklog = useCallback((pending: boolean) => {
-    if (recoveryBacklogRef.current === pending) return
-    recoveryBacklogRef.current = pending
-    onRecoveryBacklogChangeRef.current?.(pending)
-  }, [])
-
-  const observeRecoveryBacklog = useCallback((backlog: number) => {
-    if (backlog > LARGE_RECOVERY_BACKLOG_CHARS) reportRecoveryBacklog(true)
-    else if (backlog <= 0) reportRecoveryBacklog(false)
-  }, [reportRecoveryBacklog])
-
-  const startFrameLoopRef = useRef<() => void>(() => {})
   const recovery = useBackgroundRecovery(backgroundRecovery, () => {
     stopFrameLoop()
+    targetCharsRef.current = []
+    targetCountRef.current = 0
+    queueDebtRef.current = 0
+    debugRuntime.reportStream(streamIdRef.current, null)
   }, () => {
     queueDebtRef.current = 0
     settleCpsRef.current = null
     lastDrainCpsRef.current = 0
     lastFrameTsRef.current = null
-    observeRecoveryBacklog(visibleBacklog(
-      replacementPendingRef.current ? 0 : displayedCountRef.current,
-      targetCountRef.current,
-    ))
-    startFrameLoopRef.current()
+    setRecoverySnapshotVersion(version => version + 1)
+    syncImmediate(targetContentRef.current)
+    // Retire only after React commits the current snapshot. Other seats also
+    // need to observe this boundary before recovery disclosure is latched.
   }, enabled && (!inputComplete || content !== displayedContent) ? recoveryKey : undefined, recoveryPosition, resumeOnMount,
   enabled && (!inputComplete || content !== displayedContent))
   const recoveryRef = useRef(recovery)
@@ -458,6 +444,7 @@ export function useSmoothStreamContent(
   const syncImmediate = useCallback(
     (nextContent: string) => {
       stopFrameLoop()
+      debugRuntime.reportStream(streamIdRef.current, null)
       replacementPendingRef.current = false
       const chars = [...nextContent]
       const now = performance.now()
@@ -477,10 +464,16 @@ export function useSmoothStreamContent(
       arrivalCpsEmaRef.current = seedCps
       lastInputTsRef.current = now
       lastInputCountRef.current = chars.length
-      reportRecoveryBacklog(false)
     },
-    [reportRecoveryBacklog, seedCps, stopFrameLoop],
+    [seedCps, stopFrameLoop],
   )
+
+  useLayoutEffect(() => {
+    if (recoverySnapshotVersion === appliedRecoverySnapshotRef.current) return
+    appliedRecoverySnapshotRef.current = recoverySnapshotVersion
+    syncImmediate(content)
+    recoveryRef.current.finish()
+  }, [content, recoverySnapshotVersion, syncImmediate])
 
   // Producer completion used to publish the accumulated source in one commit
   // here. That single commit is a visible teleport whenever a fast stream
@@ -499,6 +492,11 @@ export function useSmoothStreamContent(
     const tick = (now: number) => {
       const frameStartedAt = performance.now()
       if (recoveryRef.current.hidden()) { stopFrameLoop(); return }
+      if (recoveryRef.current.recovering()) {
+        syncImmediate(targetContentRef.current)
+        recoveryRef.current.finish()
+        return
+      }
       if (replacementPendingRef.current) {
         if (holdBackRef.current?.() === true) {
           lastFrameTsRef.current = null
@@ -530,14 +528,12 @@ export function useSmoothStreamContent(
         }
       }
       const backlog = targetCount - displayedCount
-      // Drain must be decided by visible text only. A collapsed reasoning block
-      // that has not been reached by the cursor yet is hidden, not pending, so
-      // fast-forwarding it later must not be the thing that ends recovery.
+      // Hidden reasoning does not extend the foreground reveal queue; only
+      // visible text determines whether any animation work remains.
       const drainBacklog = visibleBacklog(displayedCount, targetCount)
       debugRuntime.recordDiagnostic('text-queue', { backlogChars: backlog, mode: 'assistant' })
 
       if (drainBacklog <= 0) {
-        reportRecoveryBacklog(false)
         recoveryRef.current.finish()
         queueDebtRef.current = 0
         settleCpsRef.current = null
@@ -563,11 +559,9 @@ export function useSmoothStreamContent(
       debugRuntime.recordDiagnosticFrame(`${streamIdRef.current}:text`, now, performance.now() - frameStartedAt)
       playback.detectGap(frameIntervalMs)
       const recovering = playback.recovering()
-      if (playback.resumed()) observeRecoveryBacklog(drainBacklog)
-      const recoveryMode = playback.mode()
-      // A latest snapshot is still ordered behind its predecessor; only its
-      // character animation is skipped, never the conversation relay.
-      if (recovering && recoveryMode === 'latest' && holdBackRef.current?.() !== true) {
+      // Recovery is a snapshot boundary: text received while hidden is never
+      // replayed through the foreground typewriter queue.
+      if (recovering) {
         syncImmediate(targetContentRef.current)
         playback.finish()
         return
@@ -585,18 +579,7 @@ export function useSmoothStreamContent(
       let revealChars: number
       let revealSpeedCps: number
       let nextQueueDebt = 0
-      if (recovering && recoveryMode === 'catch-up') {
-        const step = recoveryBudget(backlog, frameIntervalMs, queueDebtRef.current, debugTuning)
-        revealChars = step.chars
-        nextQueueDebt = step.debt
-        revealSpeedCps = revealChars * 1000 / Math.max(1, frameIntervalMs)
-      } else if (recovering) {
-        const step = computeAdaptiveQueueStep(backlog, Math.min(frameIntervalMs, 32), queueDebtRef.current,
-          revealScaleOutRef.current?.current ?? 1, debugTuning)
-        revealChars = step.revealChars
-        revealSpeedCps = step.speedCps
-        nextQueueDebt = step.debt
-      } else if (producerComplete) {
+      if (producerComplete) {
         // Backpressure protects live layout. Once input has ended, retaining
         // that scale only makes a completed response keep typing onscreen.
         // Keep one TARGET velocity for the whole completion tail — recomputing
@@ -691,13 +674,12 @@ export function useSmoothStreamContent(
         displayedCountRef.current = targetCount
         setDisplayedContent(targetContentRef.current)
       }
-      if (visibleBacklog(displayedCountRef.current, targetCount) <= 0) reportRecoveryBacklog(false)
 
       rafRef.current = requestAnimationFrame(tick)
     }
 
     rafRef.current = requestAnimationFrame(tick)
-  }, [config, observeRecoveryBacklog, reportRecoveryBacklog, seedCps, stopFrameLoop, steadyCps, syncImmediate, visibleBacklog])
+  }, [config, seedCps, stopFrameLoop, steadyCps, syncImmediate, visibleBacklog])
 
   // Run AFTER the commit's DOM mutations, before paint: the follower's
   // same-task correction hook.
@@ -707,10 +689,6 @@ export function useSmoothStreamContent(
     if (displayedContent === '') return
     onRevealCommitOutRef.current?.()
   }, [displayedContent])
-
-  useEffect(() => {
-    startFrameLoopRef.current = startFrameLoop
-  }, [startFrameLoop])
 
   useEffect(() => {
     const replay = enabled && !previousEnabledRef.current && replayOnEnable
@@ -726,9 +704,29 @@ export function useSmoothStreamContent(
       return
     }
 
+    if (recoveryRef.current.hidden()) {
+      // Keep only the authoritative source snapshot. Hidden updates do not
+      // append code points, sample arrival rates, or create reveal debt.
+      stopFrameLoop()
+      targetContentRef.current = content
+      targetCharsRef.current = []
+      targetCountRef.current = 0
+      replacementPendingRef.current = false
+      queueDebtRef.current = 0
+      return
+    }
+    if (recoveryRef.current.recovering() && (recoverySnapshotVersion > 0 || !resumeOnMount)) {
+      syncImmediate(content)
+      recoveryRef.current.finish()
+      return
+    }
+
     if (replay) syncImmediate('')
     const prevTargetContent = targetContentRef.current
-    if (content === prevTargetContent) return
+    if (content === prevTargetContent) {
+      if (displayedCountRef.current === targetCountRef.current) recoveryRef.current.finish()
+      return
+    }
 
     const now = performance.now()
     const appendOnly = content.startsWith(prevTargetContent)
@@ -739,7 +737,6 @@ export function useSmoothStreamContent(
         targetCharsRef.current = [...content]
         targetCountRef.current = targetCharsRef.current.length
         replacementPendingRef.current = true
-        if (recoveryRef.current.resumed()) observeRecoveryBacklog(visibleBacklog(0, targetCountRef.current))
         startFrameLoop()
         return
       }
@@ -774,12 +771,8 @@ export function useSmoothStreamContent(
     lastInputTsRef.current = now
     lastInputCountRef.current = targetCountRef.current
 
-    if (recoveryRef.current.resumed()) observeRecoveryBacklog(visibleBacklog(
-      replacementPendingRef.current ? 0 : displayedCountRef.current,
-      targetCountRef.current,
-    ))
     startFrameLoop()
-  }, [content, enabled, replayOnEnable, config, observeRecoveryBacklog, startFrameLoop, syncImmediate, visibleBacklog])
+  }, [content, enabled, replayOnEnable, config, startFrameLoop, stopFrameLoop, syncImmediate, recoverySnapshotVersion, resumeOnMount])
 
   useEffect(() => {
     if (enabled && skipRanges !== undefined) startFrameLoop()

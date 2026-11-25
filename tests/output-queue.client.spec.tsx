@@ -49,11 +49,19 @@ describe('ordered Agent output presentation', () => {
       expect(row.textContent).toBe('')
       expect((row.closest('div[style]') as HTMLElement).style.opacity).toBe('0')
     }
+    // Gate release must retain foreground pacing rather than flush a snapshot.
+    const started = new Set<number>()
     // The next row starts only after the previous committed all text.
     for (let frame = 0; frame < 160; frame++) {
       await paint()
       for (let index = 1; index < rows.length; index++) {
-        if (rows[index]!.textContent !== '') expect(rows[index - 1]!.textContent).toBe(text)
+        if (rows[index]!.textContent !== '') {
+          expect(rows[index - 1]!.textContent).toBe(text)
+          if (!started.has(index)) {
+            expect(rows[index]!.textContent!.length).toBeLessThan(text.length)
+            started.add(index)
+          }
+        }
       }
     }
     for (const row of rows) expect(row.textContent).toBe(text)
@@ -83,6 +91,7 @@ describe('ordered Agent output presentation', () => {
     view.rerender(tree(false))
     await paint(3)
     expect(view.container.querySelector('[data-id="b"]')!.textContent!.length).toBeGreaterThan(0)
+    expect(view.container.querySelector('[data-id="b"]')!.textContent!.length).toBeLessThan(text.length)
   })
 
   it('does not recreate active work when a drained node receives resolved scope metadata', async () => {

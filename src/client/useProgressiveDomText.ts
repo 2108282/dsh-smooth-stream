@@ -8,10 +8,10 @@
  * duplicate accessibility tree is introduced.
  */
 
-import { useLayoutEffect, useRef, type RefObject } from 'react'
+import { useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import { computeAdaptiveQueueStep } from './useSmoothStreamContent.ts'
 import type { BackgroundRecovery } from '../settings.ts'
-import { recoveryBudget, useBackgroundRecovery, type RecoveryPosition } from './backgroundRecovery.ts'
+import { useBackgroundRecovery, type RecoveryPosition } from './backgroundRecovery.ts'
 import { debugRuntime } from './debugRuntime.ts'
 import { createEllipsisTailProbe } from './ellipsisTail.ts'
 
@@ -119,12 +119,21 @@ export function useProgressiveDomText(
   const pausedRef = useRef(paused)
   pausedRef.current = paused
   const resume = useRef<(() => void) | null>(null)
+  const wake = useRef<(() => void) | null>(null)
   const suspend = useRef<(() => void) | null>(null)
-  const recovery = useBackgroundRecovery(backgroundRecovery, () => suspend.current?.(), () => resume.current?.(),
+  const [snapshotVersion, setSnapshotVersion] = useState(0)
+  const recovery = useBackgroundRecovery(backgroundRecovery, () => suspend.current?.(), () => setSnapshotVersion(version => version + 1),
     recoveryKey, recoveryPosition, false, enabled || observeChanges)
   const recoveryRef = useRef(recovery)
   recoveryRef.current = recovery
-  useLayoutEffect(() => { if (!paused) resume.current?.() }, [paused])
+  useLayoutEffect(() => { if (!paused) wake.current?.() }, [paused])
+  // Synchronization can precede React's DOM commit in the same publication.
+  // Reconcile after that commit, including while a predecessor is still live.
+  useLayoutEffect(() => {
+    if (snapshotVersion === 0) return
+    if (resume.current !== null) resume.current()
+    else recoveryRef.current.finish()
+  }, [snapshotVersion])
   useLayoutEffect(() => {
     const root = rootRef.current
     if (root === null || typeof document === 'undefined') return
@@ -238,7 +247,7 @@ export function useProgressiveDomText(
           continue
         }
         const hasPending = pendingCalls.has(call)
-        const hide = pausedRef.current || waitingForEarlier
+        const hide = (pausedRef.current && !foregroundSnapshot) || waitingForEarlier
         if (hide && !concealed.has(call)) {
           concealed.set(call, { visibility: call.style.getPropertyValue('visibility'), priority: call.style.getPropertyPriority('visibility') })
           call.style.setProperty('visibility', 'hidden')
@@ -257,6 +266,7 @@ export function useProgressiveDomText(
     let debt = 0
     let stopped = false
     let announcedSettled = false
+    let foregroundSnapshot = false
     const streamId = `dom-${Math.random().toString(36).slice(2)}`
     const isEllipsisTailClipped = createEllipsisTailProbe(root)
 
@@ -288,12 +298,20 @@ export function useProgressiveDomText(
         return
       }
       const chars = [...full]
+      if (recoveryRef.current.hidden()) {
+        // Background mutations are snapshots, never a pending reveal queue.
+        records.set(node, { chars, full, shown: chars.length })
+        pending.delete(node)
+        write(node, full)
+        return
+      }
       const preserved = preserve === undefined
         ? 0
         : Math.min(preserve.shown, commonPrefix(preserve.chars, chars))
       const record = { chars, full, shown: preserved }
       records.set(node, record)
       if (preserved < chars.length) {
+        foregroundSnapshot = false
         pending.add(node)
         announcedSettled = false
         callbacks.current.onPendingChange?.(true)
@@ -301,6 +319,35 @@ export function useProgressiveDomText(
         pending.delete(node)
       }
       write(node, chars.slice(0, preserved).join(''))
+    }
+
+    const flushPendingSnapshot = (collectMutations = true): void => {
+      cancelAnimationFrame(rafId)
+      rafId = 0
+      const mutations = collectMutations ? observer?.takeRecords() : undefined
+      if (mutations !== undefined && mutations.length > 0) processMutations(mutations)
+      foregroundSnapshot = true
+      for (const node of pending) {
+        const record = records.get(node)
+        if (record === undefined) continue
+        if (!node.isConnected || !root.contains(node)) {
+          records.delete(node)
+          continue
+        }
+        const controlled = record.chars.slice(0, record.shown).join('')
+        // Hidden details may have a newer native value which the visible-only
+        // observer intentionally ignored. Restore only our own old prefix.
+        if (node.data === controlled) write(node, record.full)
+        if (visibleWithin(node, root)) records.set(node, { ...record, shown: record.chars.length })
+        else records.delete(node)
+      }
+      pending.clear()
+      cancelAnimationFrame(rafId)
+      rafId = 0
+      lastFrame = null
+      debt = 0
+      syncCallVisibility()
+      announceSettled()
     }
 
     const visit = (from: Node, reveal: boolean): void => {
@@ -327,7 +374,7 @@ export function useProgressiveDomText(
 
     const scheduleFrame = (): void => {
       syncCallVisibility()
-      if (stopped || pausedRef.current || recoveryRef.current.hidden() || pending.size === 0 || rafId !== 0) return
+      if (stopped || (pausedRef.current && !recoveryRef.current.recovering()) || recoveryRef.current.hidden() || pending.size === 0 || rafId !== 0) return
       rafId = requestAnimationFrame(frame)
     }
 
@@ -343,6 +390,10 @@ export function useProgressiveDomText(
         announceSettled()
         return
       }
+      if (recoveryRef.current.recovering()) {
+        flushPendingSnapshot()
+        return
+      }
       if (pausedRef.current) { lastFrame = null; return }
       announcedSettled = false
       if (lastFrame === null) {
@@ -353,9 +404,9 @@ export function useProgressiveDomText(
       const elapsed = Math.max(0, now - lastFrame)
       const playback = recoveryRef.current
       playback.detectGap(elapsed)
-      const catchingUp = playback.recovering() && playback.mode() === 'catch-up'
       if (playback.recovering()) {
-        debugRuntime.recordDiagnostic('raf', { event: 'text-recovery-frame', gapMs: elapsed, mode: playback.mode() })
+        flushPendingSnapshot()
+        return
       }
 
       const orderedPending: Array<{ node: Text; record: TextRevealRecord }> = []
@@ -406,24 +457,12 @@ export function useProgressiveDomText(
         pending.delete(node)
       }
       if (clippedCount > 0) orderedPending.splice(0, clippedCount)
-      if (playback.recovering() && playback.mode() === 'latest') {
-        for (const { node, record } of orderedPending) {
-          write(node, record.full)
-          records.set(node, { ...record, shown: record.chars.length })
-        }
-        pending.clear()
-        syncCallVisibility()
-        announceSettled()
-        playback.finish()
-        return
-      }
       lastFrame = now
       const tuning = debugRuntime.activeTuning()
       const step = computeAdaptiveQueueStep(backlog, Math.min(elapsed, 32), debt, 1, tuning)
-      const budget = catchingUp ? recoveryBudget(backlog, elapsed, debt, tuning) : { chars: step.revealChars, debt: step.debt }
-      debt = budget.debt
-      speedCpsRef.current = catchingUp ? budget.chars * 1000 / Math.max(1, elapsed) : step.speedCps
-      let remaining = budget.chars
+      debt = step.debt
+      speedCpsRef.current = step.speedCps
+      let remaining = step.revealChars
       for (const { node, record } of orderedPending) {
         if (remaining <= 0) break
         const amount = Math.min(remaining, record.chars.length - record.shown)
@@ -451,7 +490,7 @@ export function useProgressiveDomText(
         backlogChars: nextBacklog,
         pendingNodes: pending.size,
         records: records.size,
-        mode: catchingUp ? 'catch-up' : playback.recovering() ? playback.mode() : 'normal',
+        mode: 'normal',
       })
       debugRuntime.recordDiagnosticFrame(streamId, now, performance.now() - frameStartedAt)
       debugRuntime.reportStream(streamId, {
@@ -466,13 +505,9 @@ export function useProgressiveDomText(
       else scheduleFrame()
     }
 
-    resume.current = () => {
-      lastFrame = null
-      debt = 0
-      if (pending.size === 0 && rafId === 0 && !stopped && !recoveryRef.current.hidden()) rafId = requestAnimationFrame(frame)
-      else scheduleFrame()
-    }
-    suspend.current = () => { cancelAnimationFrame(rafId); rafId = 0; lastFrame = null; debt = 0 }
+    wake.current = () => { lastFrame = null; debt = 0; scheduleFrame() }
+    resume.current = () => { flushPendingSnapshot() }
+    suspend.current = () => { flushPendingSnapshot() }
     visit(root, revealInitial)
 
     const releaseSubtree = (from: Node): void => {
@@ -550,9 +585,12 @@ export function useProgressiveDomText(
         if ([...snapshots].some(other => other !== snapshot && other.contains(snapshot))) continue
         visit(snapshot, false)
       }
-      syncCallVisibility()
-      if (pending.size === 0) announceSettled()
-      else scheduleFrame()
+      if (recoveryRef.current.recovering() && !recoveryRef.current.hidden()) flushPendingSnapshot(false)
+      else {
+        syncCallVisibility()
+        if (pending.size === 0) announceSettled()
+        else scheduleFrame()
+      }
     }
     const observer = !observeChanges || typeof MutationObserver === 'undefined'
       ? null : new MutationObserver(processMutations)
@@ -581,12 +619,14 @@ export function useProgressiveDomText(
         attributeFilter: ['hidden', 'style', 'class', 'open'], attributeOldValue: true,
       })
     }
-    if (pending.size === 0) announceSettled()
+    if (recoveryRef.current.recovering() && !recoveryRef.current.hidden()) flushPendingSnapshot(false)
+    else if (pending.size === 0) announceSettled()
     else scheduleFrame()
 
     return () => {
       stopped = true
       resume.current = null
+      wake.current = null
       suspend.current = null
       callbacks.current.onPendingChange?.(false)
       cancelAnimationFrame(rafId)

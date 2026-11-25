@@ -1,6 +1,6 @@
 # dsh-smooth-stream
 
-> **Stable fix release 0.10.7 (main)**: Includes the WebView resynchronization, folded-content gates and ellipsis-tail fixes from 0.10.4, plus opt-in foreground recovery diagnostics. The 16-character catch-up budget and user tuning are unchanged. Diagnostics report RAF callback intervals, callback duration, queue size and Long Tasks; they are not compositor FPS. See the [release record](docs/changes-0.10.7.md).
+> **Stable fix release 0.10.7 (main)**: Includes the WebView resynchronization, folded-content gates and ellipsis-tail fixes from 0.10.4, plus opt-in foreground recovery diagnostics. The current development code removes background text replay and synchronizes the latest snapshot on return. Diagnostics report RAF callback intervals, callback duration, queue size and Long Tasks; they are not compositor FPS. See the [release record](docs/changes-0.10.7.md).
 
 > **Transform jumpy AI outputs into a calm, teleprompter-smooth reading experience.**  
 > Physics-based stream rendering and zero-reflow viewport tracking for the DeepSeek Harness (`dsh`) Web UI.
@@ -193,7 +193,7 @@ For a local preview, run `pnpm build:repro`, serve the repository with `python3 
 
 - **Enable smooth streaming** (default on): Toggles custom stream rendering and follow. Disabling instantly falls back to built-in Harness rendering.
 - **Auto-expand thinking**: Controls whether reasoning opens automatically while streaming. Collapsed thinking and Tool details synchronize existing content without invisible typewriter debt; visible headers retain their animation, and reopening shows the existing snapshot. Newly arriving expanded content is still paced.
-- **Background recovery**: Bounded catch-up uses each animation frame with at most 16 characters per commit, without a fixed 40ms inter-commit wait. After a reconnect, recovery waits for the Session-owned replacement baseline and exits once its visible queues are drained; an unchanged or empty synchronized baseline does not leave future foreground text in recovery mode.
+- **Background recovery**: Hidden pages stop the plugin's reveal frame loop while the Host task continues. On return, all assistant and tool text already received is shown immediately and pending relay gates are released; newly arriving text resumes normal foreground streaming.
 - **Collapse finished work** (default on): Folds thoughts and tool steps into a summary line once the turn settles.
 - **Show render diagnostics** (default off): Opens a live HUD on the right side to inspect FPS, character backlog, spring state, and adjust physical parameters in real time.
 

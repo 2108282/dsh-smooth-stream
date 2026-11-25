@@ -190,28 +190,6 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                     <span className={css.label}>{t('backgroundRecovery')}</span>
                   </span>
                   <span className={css.hint}>{t('backgroundRecoveryHint')}</span>
-                  <div role="radiogroup" aria-label={t('backgroundRecovery')}>
-                    {([
-                      ['replay', 'backgroundReplay', 'backgroundReplayHint'],
-                      ['catch-up', 'backgroundCatchUp', 'backgroundCatchUpHint'],
-                      ['latest', 'backgroundLatest', 'backgroundLatestHint'],
-                    ] as const).map(([value, label, hint]) => (
-                      <div key={value}>
-                        <label className={css.choice}>
-                          <input
-                            type="radio"
-                            className={css.choiceInput}
-                            name="smooth-stream-background-recovery"
-                            checked={state.backgroundRecovery === value}
-                            disabled={!state.writable || state.saving || !state.enabled}
-                            onChange={() => { edit({ backgroundRecovery: value }) }}
-                          />
-                          {t(label)}
-                        </label>
-                        <p className={css.hint}>{t(hint)}</p>
-                      </div>
-                    ))}
-                  </div>
                 </div>
                 <label className={state.enabled ? css.field : `${css.field} ${css.fieldDisabled}`}>
                    <span className={css.fieldHead}><span className={css.label}>{t('foregroundRecoveryDelay')}</span></span>

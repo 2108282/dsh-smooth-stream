@@ -2,7 +2,7 @@ import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef
 import type { AssistantBlock, ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client'
 import { FollowHost } from './FollowHost.tsx'
 import { notifyFollowCommit } from './teleprompterGlide.ts'
-import { LARGE_RECOVERY_BACKLOG_CHARS, countChars, useSmoothStreamContent, type StreamSmoothingPreset } from './useSmoothStreamContent.ts'
+import { countChars, useSmoothStreamContent, type StreamSmoothingPreset } from './useSmoothStreamContent.ts'
 import { useLogarithmicFade } from './useLogarithmicFade.ts'
 import type { StreamSettings } from '../settings.ts'
 import { relayScope, relayTurnKey, streamRelay } from './streamRelay.ts'
@@ -302,15 +302,8 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   if (live || recoveringScope) seenLive.current = true
   const segments = useMemo(() => assistantTextSegments(node.data.blocks, groupPart), [node.data.blocks, groupPart])
   const source = projectionCache(segments).source
-  const [recoveryBacklog, setRecoveryBacklog] = useState(() => !reduced && node.data.status !== 'interrupted'
-    && recoveringScope && countChars(source) > LARGE_RECOVERY_BACKLOG_CHARS)
-  // A resumed seat must never auto-open its reasoning, whatever the backlog
-  // size. Latch the recovery scope (the shared recovery map is mutable, so a
-  // mid-drain snapshot can drop to `false`) together with any large recovery
-  // backlog, so fast-forwarding a collapsed block to "drained" cannot re-open
-  // it. The latch resets only when this seat unmounts (a new turn/step seat).
-  const recoveryDisclosure = useRef(reduced ? false : (recoveringScope || recoveryBacklog))
-  if (!reduced && (recoveringScope || recoveryBacklog)) recoveryDisclosure.current = true
+  const recoveryDisclosure = useRef(reduced ? false : recoveringScope)
+  if (!reduced && recoveringScope) recoveryDisclosure.current = true
   const root = useRef<HTMLDivElement>(null)
   const [collapsedReasoning, setCollapsedReasoning] = useState<readonly number[]>(() => !preferences.thinkAutoExpand
     ? node.data.blocks.flatMap((block, index) => block.kind === 'reasoning' ? [index] : []) : [])
@@ -381,7 +374,6 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
     resumeOnMount: restored !== undefined,
     skipRanges: skipPlan.ranges,
     canSkipRange,
-    onRecoveryBacklogChange: setRecoveryBacklog,
     inputComplete: !live || toolPresent || node.data.blocks.some(block => block.kind === 'tool-call')
       || (groupPart === 'reasoning' && node.data.blocks.at(-1)?.kind !== 'reasoning'),
     shouldHoldBack: () => hold.current,
@@ -427,8 +419,8 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
     || (live && !toolPresent && node.data.blocks.at(-1)?.kind === 'reasoning'))
   // Ordinary live reasoning keeps the usual auto-expand policy. A background
   // resume never auto-opens: the latch above stays set until this seat is
-  // replaced, so a collapsed block cannot reopen mid-catch-up. The disclosure
-  // hook still honours manual choices.
+  // replaced, so a synchronized snapshot cannot reopen a collapsed block. The
+  // disclosure hook still honours manual choices.
   const useDisclosure = useAutomaticDisclosure(owner.useDisclosure, preferences.thinkAutoExpand && !recoveryDisclosure.current, reasoningTyping && !blocked)
   // The Hook changes only with its policy/phase, so the official memo tree
   // observes completion even if the final text snapshot is unchanged. React

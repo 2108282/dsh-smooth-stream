@@ -1,10 +1,9 @@
 import { useLayoutEffect, useRef } from 'react'
-import type { BackgroundRecovery, StreamDebugTuning } from '../settings.ts'
+import type { BackgroundRecovery } from '../settings.ts'
 import { debugRuntime } from './debugRuntime.ts'
 
 /** A stalled WebView may not deliver visibility events; only a long frame gap is a fallback. */
 export const BACKGROUND_GAP_MS = 1000
-export const RECOVERY_MAX_CHARS = 16
 
 export type RecoveryPosition = readonly [step: number, order: number, part: number]
 interface RecoveryClient {
@@ -158,7 +157,7 @@ function detach(): void {
 }
 
 /** Shared lifecycle listeners, per-renderer playback progress and disposal. */
-export function useBackgroundRecovery(mode: BackgroundRecovery, onHidden: () => void, onResume: () => void,
+export function useBackgroundRecovery(_legacyMode: BackgroundRecovery, onHidden: () => void, onResume: () => void,
   scopeKey?: string, scopePosition?: RecoveryPosition, resumeOnMount = false, active = true) {
   const keyRef = useRef(scopeKey)
   keyRef.current = scopeKey
@@ -166,12 +165,13 @@ export function useBackgroundRecovery(mode: BackgroundRecovery, onHidden: () => 
   positionRef.current = scopePosition
   const callbacks = useRef({ onHidden, onResume })
   callbacks.current = { onHidden, onResume }
-  const state = useRef({ mode, recovering: false, resumed: false, wasHidden: false, waitingSync: false })
-  state.current.mode = mode
+  // Capture inheritance during render: an earlier sibling may retire its
+  // scope in layout before this new renderer's layout effects run.
+  const inherited = scopeKey !== undefined && isBackgroundRecoveryScope(scopeKey, scopePosition)
+  const state = useRef({ recovering: resumeOnMount || inherited, wasHidden: false, waitingSync: false })
   useLayoutEffect(() => {
     if (!active) {
       state.current.recovering = false
-      state.current.resumed = false
       state.current.wasHidden = false
       state.current.waitingSync = false
       return
@@ -191,17 +191,16 @@ export function useBackgroundRecovery(mode: BackgroundRecovery, onHidden: () => 
         state.current.wasHidden = false
         state.current.waitingSync = false
         state.current.recovering = true
-        state.current.resumed = true
         callbacks.current.onResume()
       },
       synchronized: () => { state.current.waitingSync = false; callbacks.current.onResume() },
     }
     clients.add(client)
-    // Late publications inherit the same turn's recovery until its queues drain.
+    // Late publications inherit recovery until the Session snapshot is accepted.
     // Historical rows in another turn do not inherit a recent foreground event.
     const key = keyRef.current
-    state.current.recovering = resumeOnMount || (key !== undefined && isBackgroundRecoveryScope(key, positionRef.current))
-    state.current.resumed = state.current.recovering
+    state.current.recovering = state.current.recovering || inherited
+    if (inherited) rememberScope(key, positionRef.current)
     if (key !== undefined) synchronization?.pending(key)
     if (background) {
       rememberScope(key, positionRef.current)
@@ -220,12 +219,9 @@ export function useBackgroundRecovery(mode: BackgroundRecovery, onHidden: () => 
   }, [scopeKey])
   return {
     hidden: (): boolean => background,
-    mode: (): BackgroundRecovery => state.current.mode,
     recovering: (): boolean => state.current.recovering,
-    resumed: (): boolean => state.current.resumed,
     cancel: (): void => {
       state.current.recovering = false
-      state.current.resumed = false
       state.current.wasHidden = false
       state.current.waitingSync = false
       retireScopes()
@@ -238,24 +234,14 @@ export function useBackgroundRecovery(mode: BackgroundRecovery, onHidden: () => 
       }
       state.current.waitingSync = false
       state.current.recovering = false
-      state.current.resumed = false
       retireScopes()
     },
     detectGap: (elapsed: number): void => {
       if (elapsed >= BACKGROUND_GAP_MS) {
         state.current.recovering = true
-        // A slow foreground frame can trigger bounded playback, but does not
+        // A long frame gap can trigger snapshot synchronization, but does not
         // count as a WebView foreground transition for disclosure policy.
       }
     },
   }
-}
-
-/** Per-frame fractional budget; the character cap is unchanged and long stalls never accrue whole-token debt. */
-export function recoveryBudget(backlog: number, elapsedMs: number, debt: number, tuning: StreamDebugTuning) {
-  if (backlog <= 0 || elapsedMs <= 0) return { chars: 0, debt: backlog <= 0 ? 0 : Math.max(0, debt) % 1 }
-  const cps = Math.min(400, Math.max(120, tuning.maxRevealCps * tuning.revealScale * 1.5))
-  const budget = cps * Math.min(elapsedMs, 80) / 1000 + Math.max(0, debt) % 1
-  const chars = Math.min(backlog, RECOVERY_MAX_CHARS, Math.floor(budget))
-  return { chars, debt: chars >= backlog ? 0 : budget % 1 }
 }

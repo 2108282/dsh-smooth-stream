@@ -2,7 +2,7 @@ import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { bindRecoverySynchronization } from '../src/client/recoverySynchronization.ts'
-import { isBackgroundRecoveryScope, RECOVERY_MAX_CHARS } from '../src/client/backgroundRecovery.ts'
+import { isBackgroundRecoveryScope } from '../src/client/backgroundRecovery.ts'
 import { useSmoothStreamContent } from '../src/client/useSmoothStreamContent.ts'
 
 const key = '["wire",1]'
@@ -68,7 +68,7 @@ describe('Session-owned recovery synchronization fence', () => {
     expect(source.retain).not.toHaveBeenCalled()
   })
 
-  it('preserves delayed resynchronization backlog until its text drains, then stops limiting future foreground input', async () => {
+  it('shows a delayed resynchronization snapshot immediately, then resumes normal foreground input', async () => {
     const source = wire()
     const view = render(<Probe />)
     await paint(30)
@@ -81,13 +81,9 @@ describe('Session-owned recovery synchronization fence', () => {
       view.rerender(<Probe text={'abc' + 'x'.repeat(1000)} complete />)
       source.baseline()
     })
-    const before = view.container.textContent!.length
-    await paint(3)
-    expect(view.container.textContent!.length - before).toBeGreaterThan(0)
-    expect(view.container.textContent!.length - before).toBeLessThanOrEqual(3 * RECOVERY_MAX_CHARS)
-    expect(isBackgroundRecoveryScope(key)).toBe(true)
-    await paint(300)
+    expect(view.container.textContent).toBe('abc' + 'x'.repeat(1000))
     expect(isBackgroundRecoveryScope(key)).toBe(false)
+    await paint(2)
     expect(view.container.textContent!.length).toBe(1003)
   })
 
@@ -107,23 +103,18 @@ describe('Session-owned recovery synchronization fence', () => {
     expect(isBackgroundRecoveryScope(key)).toBe(false)
   })
 
-  it('keeps the catch-up clock running when a normal Session snapshot is published before every frame', async () => {
+  it('shows the full foreground snapshot while the Session fence remains pending', async () => {
     const source = wire()
     const view = render(<Probe />)
     await paint(30)
     await signal(true)
+    await act(async () => { source.generation.set(undefined); source.state.set('connecting') })
     view.rerender(<Probe text={'abc' + 'x'.repeat(1000)} />)
     await signal(false)
-    await paint(1)
-    for (let index = 0; index < 10; index++) {
-      const before = view.container.textContent!.length
-      await act(async () => { source.session.set({ openState: 'open' }) })
-      await paint(1)
-      const added = view.container.textContent!.length - before
-      expect(added).toBeGreaterThan(0)
-      expect(added).toBeLessThanOrEqual(RECOVERY_MAX_CHARS)
-    }
+    expect(view.container.textContent).toBe('abc' + 'x'.repeat(1000))
     expect(isBackgroundRecoveryScope(key)).toBe(true)
+    await act(async () => { source.session.set({ openState: 'open' }) })
+    expect(view.container.textContent).toBe('abc' + 'x'.repeat(1000))
   })
 
   it('retires a terminal synchronization error instead of keeping an empty recovery scope forever', async () => {
