@@ -215,22 +215,28 @@ export function useProgressiveDomText(
     // new text, but that suffix belongs to the next batch on the same RAF.
     let activeBatch: Map<Text, number> | null = null
     let batchEpoch: number | undefined = initialRecoveryEpoch
-    const clearBatch = (): void => {
+    let nextBatchEpoch: number | undefined
+    const clearBatch = (preserveNextEpoch = false): void => {
+      const hadBatch = activeBatch !== null || batchEpoch !== undefined || (!preserveNextEpoch && nextBatchEpoch !== undefined)
+      if (preserveNextEpoch && batchEpoch !== undefined) nextBatchEpoch = batchEpoch + 1
       activeBatch = null
-      if (batchEpoch !== undefined) {
-        batchEpoch = undefined
-        callbacks.current.onRecoveryBatchChange?.(undefined)
-      }
+      batchEpoch = undefined
+      if (!preserveNextEpoch) nextBatchEpoch = undefined
+      if (hadBatch) callbacks.current.onRecoveryBatchChange?.(undefined)
     }
     const presentedCalls = new Set<HTMLElement>()
-    const freezeBatch = (): void => {
+    const freezeBatch = (nextEpoch?: number): void => {
       activeBatch = new Map()
       for (const node of pending) {
         const record = records.get(node)
         if (record !== undefined && record.shown < record.chars.length) activeBatch.set(node, record.chars.length)
       }
       if (activeBatch.size > 0) {
-        batchEpoch ??= streamRelay.recoveryEpoch(recoveryKey ?? '') ?? 0
+        const activeEpoch = streamRelay.recoveryEpoch(recoveryKey ?? '')
+        const receivingEpoch = activeEpoch === undefined || nextBatchEpoch === undefined ? undefined
+          : Math.max(nextBatchEpoch, activeEpoch + 1)
+        batchEpoch = nextEpoch ?? receivingEpoch ?? batchEpoch ?? activeEpoch ?? 0
+        nextBatchEpoch = undefined
         callbacks.current.onRecoveryBatchChange?.(batchEpoch)
       }
     }
@@ -243,8 +249,8 @@ export function useProgressiveDomText(
       if (activeBatch.size === 0 && pending.size > 0) {
         const nextEpoch = batchEpoch === undefined ? undefined : batchEpoch + 1
         activeBatch = null
-        batchEpoch = nextEpoch
-        freezeBatch()
+        batchEpoch = undefined
+        freezeBatch(nextEpoch)
       }
     }
     // Atomic Tool rows share this root's single budget. Keep later call chrome
@@ -305,7 +311,7 @@ export function useProgressiveDomText(
     const isEllipsisTailClipped = createEllipsisTailProbe(root)
 
     const announceSettled = (): void => {
-      clearBatch()
+      clearBatch(streamRelay.recoveryEpoch(recoveryKey ?? '') !== undefined)
       presentedCalls.clear()
       lastFrame = null
       debt = 0
@@ -377,6 +383,9 @@ export function useProgressiveDomText(
     }
 
     const scheduleFrame = (): void => {
+      const playback = recoveryRef.current
+      if (!playback.hidden() && activeBatch === null && pending.size > 0 && playback.mode() !== 'latest'
+        && (playback.recovering() || streamRelay.recoveryEpoch(recoveryKey ?? '') !== undefined)) freezeBatch()
       syncCallVisibility()
       if (stopped || pausedRef.current || recoveryRef.current.hidden() || pending.size === 0 || rafId !== 0) return
       rafId = requestAnimationFrame(frame)
@@ -406,8 +415,10 @@ export function useProgressiveDomText(
       playback.detectGap(elapsed)
       const catchingUp = playback.recovering() && playback.mode() === 'catch-up'
       if (playback.mode() === 'latest' && activeBatch !== null) clearBatch()
+      const activeRecoveryEpoch = streamRelay.recoveryEpoch(recoveryKey ?? '')
+      if (activeBatch === null && pending.size > 0 && playback.mode() !== 'latest'
+        && (playback.recovering() || activeRecoveryEpoch !== undefined)) freezeBatch()
       if (playback.recovering()) {
-        if (playback.mode() !== 'latest' && activeBatch === null) freezeBatch()
         debugRuntime.recordDiagnostic('raf', { event: 'text-recovery-frame', gapMs: elapsed, mode: playback.mode() })
       }
 
@@ -538,7 +549,11 @@ export function useProgressiveDomText(
         // later commits may update records but cannot extend this batch.
         const mutations = observer?.takeRecords()
         if (mutations !== undefined && mutations.length > 0) processMutations(mutations)
-        freezeBatch()
+        if (pending.size > 0) freezeBatch()
+        else if (recoveryRef.current.mode() !== 'latest') {
+          const activeEpoch = streamRelay.recoveryEpoch(recoveryKey ?? '')
+          if (activeEpoch !== undefined) nextBatchEpoch = activeEpoch + 1
+        }
       }
       if (pending.size === 0 && rafId === 0 && !stopped && !recoveryRef.current.hidden()) rafId = requestAnimationFrame(frame)
       else scheduleFrame()

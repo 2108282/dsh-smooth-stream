@@ -36,6 +36,13 @@ function Probe({ mode = 'catch-up', settled, pending, epoch, speed, paused = fal
     createElement('div', { 'data-chat-call-id': 'a' }, 'a'),
     createElement('div', { 'data-chat-call-id': 'b' }, 'b'.repeat(70)))
 }
+function IdleProbe({ epoch, paused = false }: { epoch: (value: number | undefined) => void; paused?: boolean }) {
+  const root = useRef<HTMLDivElement>(null)
+  const speed = useRef(35)
+  useProgressiveDomText(root, true, false, speed, undefined, undefined, paused, 'catch-up',
+    '["dom-idle-seat","1"]', [1, 10, 2], true, epoch)
+  return createElement('div', { ref: root }, 'a')
+}
 function setup(mode: BackgroundRecovery = 'catch-up') {
   const settled = vi.fn()
   const pending = vi.fn()
@@ -93,6 +100,36 @@ describe('recovery DOM playback batches', () => {
     expect(view.settled).toHaveBeenCalledTimes(1)
     expect(view.epoch.mock.calls.map(call => call[0])).toEqual([0, 1, 2, undefined])
     expect(frames.size).toBe(0)
+  })
+
+  it.each([false, true])('assigns idle foreground DOM text to the receiving batch with paused=%s', async paused => {
+    const token = streamRelay.acquire({ session: 'dom-idle-seat', turn: '1', step: 1, node: 'later', order: 20, recoveryEpoch: 0 }, 'tool')
+    const epoch = vi.fn()
+    const view = render(createElement(IdleProbe, { epoch }))
+    await paint(20)
+    await signal(true)
+    await signal(false)
+    await paint(5)
+    view.rerender(createElement(IdleProbe, { epoch, paused }))
+    await act(async () => { view.container.querySelector('div')!.firstChild!.textContent = 'a新'.repeat(20) })
+    expect(epoch.mock.calls).toEqual([[1]])
+    streamRelay.release(token)
+  })
+
+  it.each([0, 1, 2])('keeps idle DOM appends behind the current global epoch %s after its old batch settles', async activeEpoch => {
+    let token = streamRelay.acquire({ session: 'dom-idle-seat', turn: '1', step: 1, node: 'later', order: 20, recoveryEpoch: 0 }, 'tool')
+    const epoch = vi.fn()
+    const view = render(createElement(IdleProbe, { epoch }))
+    await signal(true)
+    await act(async () => { view.container.querySelector('div')!.firstChild!.textContent = 'a旧积压' })
+    await signal(false)
+    await paint(20)
+    expect(epoch.mock.calls).toEqual([[0], [undefined]])
+    streamRelay.release(token)
+    token = streamRelay.acquire({ session: 'dom-idle-seat', turn: '1', step: 1, node: 'later', order: 20, recoveryEpoch: activeEpoch }, 'tool')
+    await act(async () => { view.container.querySelector('div')!.firstChild!.textContent = 'a旧积压' + '新'.repeat(40) })
+    expect(epoch.mock.calls).toEqual([[0], [undefined], [activeEpoch + 1]])
+    streamRelay.release(token)
   })
 
   it('freezes a fresh source boundary after background reentry without replaying a replaced emoji suffix', async () => {

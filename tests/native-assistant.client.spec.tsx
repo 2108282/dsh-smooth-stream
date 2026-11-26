@@ -293,6 +293,33 @@ describe('native assistant wrapper', () => {
     expect(view.getByTestId('c').textContent).toBe('c'.repeat(100))
   })
 
+  it('releases the inherited epoch after a late latest snapshot finishes', async () => {
+    const first = owner('running', 'a'.repeat(100))
+    const later = owner('running', 'snapshot')
+    later.node = { ...later.node, key: 'assistant:2', anchorSeq: 2, data: { ...later.node.data, step: 2 } }
+    const settings = { ...preferences, backgroundRecovery: 'latest' as const }
+    const tree = (text?: string) => createElement('main', null,
+      createElement('section', { key: 'first' }, native(first, settings)),
+      text === undefined ? null : createElement('section', { key: 'later', 'data-testid': 'later' },
+        native({ ...later, node: { ...later.node, data: { ...later.node.data, blocks: [{ kind: 'text', text }] } } }, settings)))
+    const view = render(tree())
+    await paint(3)
+    await act(() => { window.dispatchEvent(new Event('dsha:background')) })
+    await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
+    view.rerender(tree('snapshot'))
+    await paint(10)
+    expect(view.getByTestId('later').textContent).toBe('snapshot')
+    const earlier = streamRelay.acquire({ ...relayScope(first.node, first.sessionId), node: 'earlier', order: 0 }, 'response')
+    view.rerender(tree('snapshot' + 'new'.repeat(30)))
+    await paint(5)
+    expect(streamRelay.recoveryEpoch(relayScope(later.node, later.sessionId))).toBeUndefined()
+    expect(view.getByTestId('later').textContent).toBe('snapshot')
+    expect(view.getByTestId('later').querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('waiting')
+    act(() => streamRelay.release(earlier))
+    await paint(100)
+    expect(view.getByTestId('later').textContent).toBe('snapshot' + 'new'.repeat(30))
+  })
+
   it('retires a recovery scope when a drained live seat settles without new text', async () => {
     const props = owner('running', 'short')
     const view = render(native(props))

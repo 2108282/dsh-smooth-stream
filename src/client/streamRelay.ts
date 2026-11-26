@@ -127,11 +127,6 @@ class StepActivity {
     }
   }
 
-  blocksOwnPart(scope: RelayScope, part: number): boolean {
-    const own = this.nodes.get(scope.node)
-    return own !== undefined && ((part >= 1 && own.counts[0] > 0) || (part >= 2 && own.counts[1] > 0))
-  }
-
   blocks(scope: RelayScope, part: number): boolean {
     const own = this.nodes.get(scope.node)
     if (own !== undefined && ((part >= 1 && own.counts[0] > 0) || (part >= 2 && own.counts[1] > 0))) return true
@@ -169,15 +164,6 @@ class TurnActivity {
       this.byStep.delete(lease.step)
       this.steps.splice(lowerBound(this.steps, value => value < lease.step), 1)
     }
-  }
-
-  blocksEarlierStep(scope: RelayScope): boolean {
-    const first = this.steps[0]
-    return first !== undefined && first < scope.step
-  }
-
-  blocksOwnPart(scope: RelayScope, part: RelayPart): boolean {
-    return this.byStep.get(scope.step)?.blocksOwnPart(scope, PART_ORDER[part]) ?? false
   }
 
   blocks(scope: RelayScope, part: RelayPart): boolean {
@@ -249,9 +235,6 @@ export class StreamRelay {
     const earliest = this.recoveryEpoch(scope)
     // Ordinary new input waits behind recovery. It cannot reclaim an earlier
     // source position after its own frozen batches have already drained.
-    const ordinary = batches.get(undefined)
-    if (scope.recoveryEpoch !== undefined
-      && (ordinary?.blocksEarlierStep(scope) || ordinary?.blocksOwnPart(scope, part))) return true
     if (earliest !== undefined && (scope.recoveryEpoch === undefined || earliest < scope.recoveryEpoch)) return true
     return batches.get(scope.recoveryEpoch)?.blocks(scope, part) ?? false
   }

@@ -388,7 +388,11 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
     canSkipRange,
     onRecoveryBacklogChange: setRecoveryBacklog,
     initialRecoveryEpoch: recoveryEpoch,
-    onRecoveryBatchChange: setRecoveryEpoch,
+    // Restoring a cached prefix also uses local playback, but only background
+    // recovery may promote that playback above ordinary predecessor leases.
+    onRecoveryBatchChange: epoch => setRecoveryEpoch(epoch === undefined
+      || isBackgroundRecoveryScope(recoveryKey, recoveryPosition)
+      || streamRelay.recoveryEpoch(recoveryKey) !== undefined ? epoch : undefined),
     inputComplete: !live || toolPresent || node.data.blocks.some(block => block.kind === 'tool-call')
       || (groupPart === 'reasoning' && node.data.blocks.at(-1)?.kind !== 'reasoning'),
     shouldHoldBack: () => hold.current,

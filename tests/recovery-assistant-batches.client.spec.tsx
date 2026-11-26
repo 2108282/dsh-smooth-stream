@@ -18,17 +18,23 @@ async function paint(count = 1) {
 async function background(hidden: boolean) {
   await act(async () => { window.dispatchEvent(new Event(hidden ? 'dsha:background' : 'dsha:foreground')) })
 }
-function Probe({ text, mode = 'catch-up', onBatch, onBacklog, enabled = true, hold }: {
+function Probe({ text, mode = 'catch-up', onBatch, onBacklog, enabled = true, hold, recoveryKey, recoveryPosition, inputComplete }: {
   text: string
   mode?: BackgroundRecovery
   onBatch?: (epoch: number | undefined) => void
   onBacklog?: (pending: boolean) => void
   enabled?: boolean
   hold?: () => boolean
+  recoveryKey?: string
+  recoveryPosition?: readonly [number, number, number]
+  inputComplete?: boolean
 }) {
   return <output>{useSmoothStreamContent(text, {
     enabled, backgroundRecovery: mode, onRecoveryBatchChange: onBatch,
     onRecoveryBacklogChange: onBacklog, shouldHoldBack: hold,
+    ...(recoveryKey === undefined ? {} : { recoveryKey }),
+    ...(recoveryPosition === undefined ? {} : { recoveryPosition }),
+    ...(inputComplete === undefined ? {} : { inputComplete }),
   })}</output>
 }
 beforeEach(() => {
@@ -87,6 +93,43 @@ describe('assistant recovery batches', () => {
     expect(view.container.textContent!.length).toBeGreaterThan(c.length)
     expect(view.container.textContent!.length).toBeLessThan(ordinary.length)
     expect(onBatch.mock.calls).toHaveLength(4)
+  })
+
+  it('assigns foreground text from an idle earlier seat to the receiving batch', async () => {
+    const key = JSON.stringify(['idle-seat', '1'])
+    const token = streamRelay.acquire({ session: 'idle-seat', turn: '1', step: 1, node: 'later', order: 20, recoveryEpoch: 0 }, 'response')
+    const onBatch = vi.fn()
+    const view = render(<Probe text="a" onBatch={onBatch} recoveryKey={key} recoveryPosition={[1, 10, 1]} />)
+    await paint(20)
+    await background(true)
+    await background(false)
+    await paint(5)
+    onBatch.mockClear()
+    view.rerender(<Probe text={'a' + '新'.repeat(40)} hold={() => true} onBatch={onBatch} recoveryKey={key} recoveryPosition={[1, 10, 1]} inputComplete />)
+    await paint(5)
+    expect(onBatch.mock.calls).toEqual([[1]])
+    streamRelay.release(token)
+  })
+
+  it.each([0, 1, 2])('keeps idle appends behind the current global epoch %s after its old batch settles', async activeEpoch => {
+    const key = JSON.stringify(['settled-seat', '1'])
+    let token = streamRelay.acquire({ session: 'settled-seat', turn: '1', step: 1, node: 'later', order: 20, recoveryEpoch: 0 }, 'response')
+    const onBatch = vi.fn()
+    const props = { onBatch, recoveryKey: key, recoveryPosition: [1, 10, 1] as const }
+    const view = render(<Probe text="a" {...props} />)
+    await paint(20)
+    await background(true)
+    onBatch.mockClear()
+    view.rerender(<Probe text="a旧积压" {...props} />)
+    await background(false)
+    await paint(20)
+    expect(onBatch.mock.calls).toEqual([[0], [undefined]])
+    streamRelay.release(token)
+    token = streamRelay.acquire({ session: 'settled-seat', turn: '1', step: 1, node: 'later', order: 20, recoveryEpoch: activeEpoch }, 'response')
+    view.rerender(<Probe text={'a旧积压' + '新'.repeat(40)} hold={() => true} {...props} />)
+    await paint(5)
+    expect(onBatch.mock.calls).toEqual([[0], [undefined], [activeEpoch + 1]])
+    streamRelay.release(token)
   })
 
   it('does not let incoming pressure accelerate the frozen replay batch', async () => {

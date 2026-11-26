@@ -9,10 +9,12 @@ import {
   type AssistantTextProjection,
 } from '../src/client/NativeAssistantNodeView.tsx'
 import { streamRelay } from '../src/client/streamRelay.ts'
+import { assistantProgress } from '../src/client/presentationProgress.ts'
 import { DEFAULT_STREAM_SETTINGS } from '../src/settings.ts'
 
 afterEach(() => {
   cleanup()
+  assistantProgress.clear()
   streamRelay.clearAll()
   vi.unstubAllGlobals()
 })
@@ -152,7 +154,14 @@ describe('assistant waiting presentation', () => {
       preferences: { ...DEFAULT_STREAM_SETTINGS, controlScroll: false, logarithmicFade: false,
         preset: 'balanced', keepStreamOnToolCall },
     }))
-    const root = view.container.querySelector<HTMLElement>('[data-smooth-stream-phase]')!
+    let root = view.container.querySelector<HTMLElement>('[data-smooth-stream-phase]')!
+    expect(root.dataset.smoothStreamPhase).toBe('waiting')
+    view.rerender(createElement(NativeAssistantNodeView, {
+      key: 'remounted', Inner, owner,
+      preferences: { ...DEFAULT_STREAM_SETTINGS, controlScroll: false, logarithmicFade: false,
+        preset: 'balanced', keepStreamOnToolCall },
+    }))
+    root = view.container.querySelector<HTMLElement>('[data-smooth-stream-phase]')!
     expect(root.dataset.smoothStreamPhase).toBe('waiting')
     expect(root.style.height).toBe('0px')
     expect(root.style.opacity).toBe('0')

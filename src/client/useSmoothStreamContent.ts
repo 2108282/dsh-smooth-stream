@@ -426,18 +426,28 @@ export function useSmoothStreamContent(
   // buffer until the cursor reaches that end and the buffers exchange roles.
   const recoveryBatchRef = useRef<{ end: number; epoch: number } | null>(null)
   const initialRecoveryEpochRef = useRef(initialRecoveryEpoch)
+  const nextRecoveryEpochRef = useRef<number | undefined>(undefined)
   const recoveryBatchCallbackRef = useRef(onRecoveryBatchChange)
   recoveryBatchCallbackRef.current = onRecoveryBatchChange
   const recoveryKeyRef = useRef(recoveryKey)
   recoveryKeyRef.current = recoveryKey
-  const clearRecoveryBatch = useCallback(() => {
-    if (recoveryBatchRef.current === null) return
+  const clearRecoveryBatch = useCallback((preserveNextEpoch = false) => {
+    if (recoveryBatchRef.current === null && initialRecoveryEpochRef.current === undefined
+      && (nextRecoveryEpochRef.current === undefined || preserveNextEpoch)) return
+    const published = recoveryBatchRef.current !== null || initialRecoveryEpochRef.current !== undefined
+    if (preserveNextEpoch && recoveryBatchRef.current !== null) nextRecoveryEpochRef.current = recoveryBatchRef.current.epoch + 1
+    initialRecoveryEpochRef.current = undefined
     recoveryBatchRef.current = null
-    recoveryBatchCallbackRef.current?.(undefined)
+    if (!preserveNextEpoch) nextRecoveryEpochRef.current = undefined
+    if (published) recoveryBatchCallbackRef.current?.(undefined)
   }, [])
   const freezeRecoveryBatch = useCallback((end: number, nextEpoch?: number) => {
-    const epoch = nextEpoch ?? initialRecoveryEpochRef.current ?? streamRelay.recoveryEpoch(recoveryKeyRef.current ?? '') ?? 0
+    const activeEpoch = streamRelay.recoveryEpoch(recoveryKeyRef.current ?? '')
+    const receivingEpoch = activeEpoch === undefined || nextRecoveryEpochRef.current === undefined ? undefined
+      : Math.max(nextRecoveryEpochRef.current, activeEpoch + 1)
+    const epoch = nextEpoch ?? initialRecoveryEpochRef.current ?? receivingEpoch ?? activeEpoch ?? 0
     initialRecoveryEpochRef.current = undefined
+    nextRecoveryEpochRef.current = undefined
     recoveryBatchRef.current = { end, epoch }
     recoveryBatchCallbackRef.current?.(epoch)
   }, [])
@@ -479,6 +489,10 @@ export function useSmoothStreamContent(
       lastFrameTsRef.current = null
       if (targetCountRef.current > displayedCountRef.current) {
         freezeRecoveryBatch(targetCountRef.current)
+      } else if (backgroundRecovery !== 'latest') {
+        const activeEpoch = streamRelay.recoveryEpoch(recoveryKeyRef.current ?? '')
+        nextRecoveryEpochRef.current = initialRecoveryEpochRef.current ?? (activeEpoch === undefined ? undefined : activeEpoch + 1)
+        initialRecoveryEpochRef.current = undefined
       }
     }
     observeRecoveryBacklog(visibleBacklog(
@@ -550,9 +564,12 @@ export function useSmoothStreamContent(
       }
       const sourceCount = targetCountRef.current
       const playback = recoveryRef.current
-      if (!playback.recovering()) clearRecoveryBatch()
-      if (playback.recovering() && playback.mode() !== 'latest' && recoveryBatchRef.current === null
-        && sourceCount > displayedCountRef.current) freezeRecoveryBatch(sourceCount)
+      if (!playback.recovering() && streamRelay.recoveryEpoch(recoveryKeyRef.current ?? '') === undefined) clearRecoveryBatch()
+      if (recoveryBatchRef.current === null && sourceCount > displayedCountRef.current
+        && playback.mode() !== 'latest'
+        && (playback.recovering() || streamRelay.recoveryEpoch(recoveryKeyRef.current ?? '') !== undefined)) {
+        freezeRecoveryBatch(sourceCount)
+      }
       const targetCount = Math.min(sourceCount, recoveryBatchRef.current?.end ?? sourceCount)
       let displayedCount = displayedCountRef.current
       // Skip only collapsed source ranges at the current ordered cursor. Visible
@@ -600,7 +617,7 @@ export function useSmoothStreamContent(
           displayedCountRef.current = sourceCount
           setDisplayedContent(targetContentRef.current)
         }
-        clearRecoveryBatch()
+        clearRecoveryBatch(streamRelay.recoveryEpoch(recoveryKeyRef.current ?? '') !== undefined)
         reportRecoveryBacklog(false)
         recoveryRef.current.finish()
         queueDebtRef.current = 0

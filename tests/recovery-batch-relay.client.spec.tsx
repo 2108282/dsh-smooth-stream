@@ -47,6 +47,18 @@ describe('recovery batch relay ordering', () => {
     expect(relay.recoveryEpoch(ordinary)).toBeUndefined()
   })
 
+  it('does not deadlock recovery behind earlier ordinary output from another step', () => {
+    const relay = new StreamRelay()
+    const ordinary = { ...scope('ordinary', 10), step: 1 }
+    const recovery = { ...scope('recovery', 20, 1), step: 2 }
+    relay.acquire(ordinary, 'response')
+    const token = relay.acquire(recovery, 'tool')
+    expect(relay.isBlocked(ordinary, 'response')).toBe(true)
+    expect(relay.isBlocked(recovery, 'tool')).toBe(false)
+    relay.release(token)
+    expect(relay.isBlocked(ordinary, 'response')).toBe(false)
+  })
+
   it('notifies batch promotion and isolates other turns and tool presence', () => {
     const relay = new StreamRelay()
     const later = scope('later', 20, 0)
