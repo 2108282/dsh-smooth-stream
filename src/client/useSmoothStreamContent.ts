@@ -602,6 +602,14 @@ export function useSmoothStreamContent(
       })
 
       if (drainBacklog <= 0) {
+        // A not-yet-admitted row may consist entirely of collapsed/signature
+        // ranges. Keep its cursor alive until the renderer can commit; stopping
+        // here would leave an empty prefix with nothing left to wake it.
+        if (displayedCount < targetCount && holdBackRef.current?.() === true) {
+          lastFrameTsRef.current = null
+          rafRef.current = requestAnimationFrame(tick)
+          return
+        }
         // Invisible ranges can exhaust A before its numeric cursor reaches its
         // end. Keep later visible input in B instead of stopping the only RAF.
         const batch = recoveryBatchRef.current

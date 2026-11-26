@@ -42,20 +42,20 @@ describe('ordered Agent output presentation', () => {
       row('tool-a', 1, 'tool-call', text), row('context', 2, 'context', text),
       row('todo', 3, 'future-todo', text), row('tool-b', 4, 'tool-call', text)))
     await paint(3)
-    const rows = [...view.container.querySelectorAll('article')]
-    expect(rows[0]!.textContent!.length).toBeGreaterThan(0)
-    expect(rows[0]!.textContent!.length).toBeLessThan(text.length)
-    for (const row of rows.slice(1)) {
-      expect(row.textContent).toBe('')
-      expect((row.closest('div[style]') as HTMLElement).style.opacity).toBe('0')
-    }
-    // The next row starts only after the previous committed all text.
+    const first = view.container.querySelector('article')!
+    expect(first.textContent!.length).toBeGreaterThan(0)
+    expect(first.textContent!.length).toBeLessThan(text.length)
+    expect(view.container.querySelectorAll('article')).toHaveLength(1)
+    // A queued renderer is created only after the previous committed all text.
     for (let frame = 0; frame < 160; frame++) {
       await paint()
+      const rows = [...view.container.querySelectorAll('article')]
       for (let index = 1; index < rows.length; index++) {
-        if (rows[index]!.textContent !== '') expect(rows[index - 1]!.textContent).toBe(text)
+        expect(rows[index - 1]!.textContent).toBe(text)
       }
     }
+    const rows = [...view.container.querySelectorAll('article')]
+    expect(rows).toHaveLength(4)
     for (const row of rows) expect(row.textContent).toBe(text)
   })
 
@@ -66,7 +66,7 @@ describe('ordered Agent output presentation', () => {
     await paint(3)
     expect(view.container.querySelector('[data-id="a"]')!.textContent!.length).toBeGreaterThan(0)
     expect(view.container.querySelector('[data-id="a"]')!.textContent!.length).toBeLessThan(text.length)
-    expect(view.container.querySelector('[data-id="b"]')!.textContent).toBe('')
+    expect(view.container.querySelector('[data-id="b"]')).toBeNull()
     await paint(120)
     expect(view.container.querySelector('[data-id="b"]')!.textContent).toBe(text)
   })
@@ -78,7 +78,7 @@ describe('ordered Agent output presentation', () => {
       row('b', 2, 'context', text), row('other', 3, 'tool-call', text, 'other-session'))
     const view = render(tree(true))
     await paint(3)
-    expect(view.container.querySelector('[data-id="b"]')!.textContent).toBe('')
+    expect(view.container.querySelector('[data-id="b"]')).toBeNull()
     expect(view.container.querySelector('[data-id="other"]')!.textContent!.length).toBeGreaterThan(0)
     view.rerender(tree(false))
     await paint(3)

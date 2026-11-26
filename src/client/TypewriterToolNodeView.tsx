@@ -1,7 +1,9 @@
 import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentType } from 'react'
 import type { BackgroundRecovery } from '../settings.ts'
 import { FollowHost } from './FollowHost.tsx'
-import { useProgressiveDomText } from './useProgressiveDomText.ts'
+import { useProgressiveDomText, type DeferredDomTextSource } from './useProgressiveDomText.ts'
+import { presentationOwnerKey, usePresentationAdmission } from './usePresentationAdmission.ts'
+import { projectToolTreeCallIds, toolTreeCallIds, toolTreeCallSources } from './toolTreePresentation.ts'
 import { relayScope, relayTurnKey, streamRelay } from './streamRelay.ts'
 import { isBackgroundRecoveryScope } from './backgroundRecovery.ts'
 import { hasRecentConversationFollow } from './teleprompterGlide.ts'
@@ -14,8 +16,8 @@ export type FollowWrapProps = {
 } & Record<string, unknown>
 
 /**
- * 严格判定卡片是否属于历史卡片或已结算卡片（含未成功加载、中断、执行完毕的卡片）。
- * 历史卡片与已结算卡片必须保持纯静态展示，绝不触发清空打字机或占用流式接力棒。
+ * 判定后端生命周期是否已结算（含未成功加载、中断、执行完毕的卡片）。
+ * 是否属于展示历史由独立的呈现记录判定；首次发布的已完成结果仍可能需要排队。
  */
 export function isSettledChatNode(node: unknown): boolean {
   if (node === null || typeof node !== 'object') return false
@@ -164,12 +166,30 @@ function liveAgentTailMode(root: HTMLElement): 'turn' | 'handoff' | null {
 }
 
 /** Presentation identity survives regrouping/session remounts without retaining DOM. */
-const presentedTools = new Map<string, true>()
+interface ToolPresentation {
+  calls: Set<string>
+  text: Map<string, string[]>
+}
+interface FrozenCall {
+  epoch: number
+  source: Record<string, unknown>
+  locked: boolean
+}
+const presentedTools = new Map<string, ToolPresentation>()
 const PRESENTED_TOOL_LIMIT = 512
 export function clearToolPresentationLedger(): void { presentedTools.clear() }
-function rememberTool(key: string): void {
+export function hasPresentedToolNode(node: unknown, sessionId?: unknown): boolean {
+  const scope = relayScope(node, sessionId)
+  return presentedTools.has(JSON.stringify([scope.session, scope.turn, scope.node]))
+}
+function sameCallPayload(left: Record<string, unknown>, right: Record<string, unknown>): boolean {
+  const keys = Object.keys(left).filter(key => key !== 'subCalls')
+  const other = Object.keys(right).filter(key => key !== 'subCalls')
+  return keys.length === other.length && keys.every(key => left[key] === right[key])
+}
+function rememberTool(key: string, presentation: ToolPresentation): void {
   presentedTools.delete(key)
-  presentedTools.set(key, true)
+  presentedTools.set(key, presentation)
   if (presentedTools.size > PRESENTED_TOOL_LIMIT) presentedTools.delete(presentedTools.keys().next().value!)
 }
 
@@ -192,18 +212,33 @@ export function wrapFollowNodeView(
     const growing = !isSettled && isGrowingChatNode(props.node)
     const baseScope = useMemo(() => relayScope(props.node, props.sessionId), [props.node, props.sessionId])
     const recoveryKey = relayTurnKey(baseScope)
+    const nodeKind = props.node !== null && typeof props.node === 'object' && 'kind' in props.node
+      ? props.node.kind : undefined
+    const toolPresence = nodeKind === 'tool-call'
+      || (props.node !== null && typeof props.node === 'object' && 'data' in props.node
+        && props.node.data !== null && typeof props.node.data === 'object' && 'root' in props.node.data)
+    const part = toolPresence ? 'tool' : 'output'
     const recoveryPosition = [baseScope.step, baseScope.order, 2] as const
     const recoveringScope = isBackgroundRecoveryScope(recoveryKey, recoveryPosition)
     const [recoveryEpoch, setRecoveryEpoch] = useState<number | undefined>(() => {
       const activeEpoch = streamRelay.recoveryEpoch(recoveryKey)
-      return recoveringScope ? (activeEpoch ?? 0) + 1 : undefined
+      return recoveringScope ? activeEpoch ?? 0 : undefined
     })
     const scope = useMemo(() => ({ ...baseScope, recoveryEpoch }), [baseScope, recoveryEpoch])
-    // A static result is not a new presentation queue merely because an
-    // earlier row is still typing. Mounted live rows retain their own pending
-    // work across completion, including updates within an open Agent step.
+    const presentationKey = scope.node === 'unknown' ? undefined : JSON.stringify([scope.session, scope.turn, scope.node])
+    const priorPresentation = useRef(presentationKey === undefined ? undefined : presentedTools.get(presentationKey)).current
+    const presentation = useRef<ToolPresentation>(priorPresentation ?? { calls: new Set(), text: new Map() }).current
+    const revealInitialRef = useRef(priorPresentation === undefined)
+    const revealDomInitial = useRef(revealInitialRef.current || presentation.text.size > 0).current
+    const queuedOnMount = useRef(revealInitialRef.current
+      && streamRelay.recoveryEpoch(recoveryKey) === undefined
+      && streamRelay.isBlocked(baseScope, part)).current
+    // A newly published result behind live text or inside recovery is new
+    // output even when its backend work has already finished. History stays static.
     const structurallyFollowable = isFollowableChatNode(props.node)
-      || (!isSettled && (openAgentLocation(props.node) || isBackgroundRecoveryScope(recoveryKey, recoveryPosition)))
+      || (!isSettled && openAgentLocation(props.node))
+      || (recoveringScope && revealInitialRef.current)
+      || queuedOnMount
     const structuralRef = useRef(structurallyFollowable)
     const [runtimeFollowable, setRuntimeFollowable] = useState(false)
     const runtimePersistentRef = useRef(false)
@@ -213,12 +248,41 @@ export function wrapFollowNodeView(
     const settledOpenGrowth = isSettled && seenFollowable.current && openAgentLocation(props.node)
     const followable = !isInterruptedChatNode(props.node)
       && (seenFollowable.current || (!isSettled && runtimeFollowable) || settledOpenGrowth)
-    const presentationKey = scope.node === 'unknown' ? undefined : JSON.stringify([scope.session, scope.turn, scope.node])
-    const revealInitialRef = useRef(presentationKey === undefined || !presentedTools.has(presentationKey))
     const [revealPending, setRevealPending] = useState(followable && revealInitialRef.current)
+    const sourceNode = props.node !== null && typeof props.node === 'object' ? props.node as Record<string, unknown> : undefined
+    const sourceData = sourceNode?.data !== null && typeof sourceNode?.data === 'object'
+      ? sourceNode.data as Record<string, unknown> : undefined
+    const sourceRoot = sourceData?.root
+    const sourceCallIds = useMemo(() => toolTreeCallIds(sourceRoot), [sourceRoot])
+    const sourceCalls = useMemo(() => toolTreeCallSources(sourceRoot), [sourceRoot])
+    const [visibleIds, setVisibleIds] = useState<ReadonlySet<string>>(() => new Set(presentation.calls))
+    const visibleCallIds = useMemo(() => new Set([...visibleIds, ...sourceCallIds.slice(0, 1)]), [visibleIds, sourceCallIds])
+    const projectCalls = followable && sourceCallIds.length > 0
+    const deferredIds = projectCalls ? sourceCallIds.filter(id => !visibleCallIds.has(id)) : []
+    const admittedRef = useRef(false)
+    const materializedRef = useRef(!followable || !revealInitialRef.current)
+    const waitingRef = useRef(true)
+    const frozenCalls = useRef(new Map<string, FrozenCall>())
+    const releasedCalls = useRef(new Map<string, number>())
+    const lockedSources = new Map<string, Record<string, unknown>>()
+    const changedPayloads: string[] = []
+    for (const [id, frozen] of frozenCalls.current) {
+      const current = sourceCalls.get(id)
+      if (!frozen.locked || frozen.epoch !== recoveryEpoch || current === undefined) continue
+      lockedSources.set(id, frozen.source)
+      if (!sameCallPayload(current, frozen.source)) changedPayloads.push(id)
+    }
+    const deferredCalls = deferredIds.length > 0 || changedPayloads.length > 0
+    const treeRef = useRef({ ids: sourceCallIds, visible: visibleCallIds, calls: sourceCalls, deferredIds, changedPayloads, deferred: deferredCalls })
+    treeRef.current = { ids: sourceCallIds, visible: visibleCallIds, calls: sourceCalls, deferredIds, changedPayloads, deferred: deferredCalls }
+    const previousLocks = useRef(lockedSources)
     useLayoutEffect(() => {
-      if (presentationKey !== undefined) rememberTool(presentationKey)
-    }, [presentationKey])
+      if (recoveryEpoch !== undefined) for (const [id, previous] of previousLocks.current) {
+        const current = sourceCalls.get(id)
+        if (!lockedSources.has(id) && current !== undefined && !sameCallPayload(current, previous)) releasedCalls.current.set(id, recoveryEpoch)
+      }
+      previousLocks.current = lockedSources
+    })
     const [entering, setEntering] = useState(structurallyFollowable)
     const [growthPulse, setGrowthPulse] = useState(false)
     const followableRef = useRef(false)
@@ -234,13 +298,10 @@ export function wrapFollowNodeView(
     entranceActiveRef.current = entering || growthPulse
 
     // 内存接力棒门禁：检查前序思考或正文是否仍在活跃输出中
-    const nodeKind = props.node !== null && typeof props.node === 'object' && 'kind' in props.node
-      ? props.node.kind : undefined
-    const toolPresence = nodeKind === 'tool-call'
-      || (props.node !== null && typeof props.node === 'object' && 'data' in props.node
-        && props.node.data !== null && typeof props.node.data === 'object' && 'root' in props.node.data)
-    const part = toolPresence ? 'tool' : 'output'
-    const participating = growing || revealPending || (!isSettled && followable)
+    const admitted = usePresentationAdmission(scope, part, followable,
+      revealPending || deferredCalls, hostRef, !revealInitialRef.current, presentationOwnerKey(baseScope, part))
+    admittedRef.current = admitted
+    const participating = growing || revealPending || deferredCalls || (!isSettled && followable)
     const subscribeBlocked = useCallback((listener: () => void) => participating
       ? streamRelay.subscribeBlocked(scope, part, listener) : () => {},
     [participating, scope.session, scope.turn, scope.step, scope.node, scope.order, scope.recoveryEpoch, part])
@@ -248,24 +309,32 @@ export function wrapFollowNodeView(
       [participating, scope.session, scope.turn, scope.step, scope.node, scope.order, scope.recoveryEpoch, part])
     const relayBlocked = useSyncExternalStore(subscribeBlocked, readBlocked, () => false)
     const lease = useRef<symbol | null>(null)
-    const pendingRef = useRef(revealPending)
-    const needsLease = participating
+    const pendingRef = useRef(revealPending || deferredCalls)
+    pendingRef.current = revealPending || deferredCalls
+    // Tool presence is observable before creation (keepStreamOnToolCall), but
+    // its text lease must stay inactive until presentation has been admitted.
+    const needsLease = participating && (admitted || part === 'tool')
     const updatePending = useCallback((pending: boolean) => {
-      pendingRef.current = pending
+      // Empty seats cannot retire work before their renderer has committed.
+      if (!admittedRef.current || !materializedRef.current) return
+      pendingRef.current = pending || treeRef.current.deferred
       setRevealPending(pending)
-      if (lease.current !== null) streamRelay.update(lease.current, pending)
+      if (lease.current !== null) streamRelay.update(lease.current, pendingRef.current)
     }, [])
     useLayoutEffect(() => {
       // Reserve in layout before any frame can reveal. Running backend work
       // does not retain the baton once its currently available text is drained.
       if (!needsLease) return
-      const token = streamRelay.acquire(scope, part, pendingRef.current)
+      const token = streamRelay.acquire(scope, part, admitted && pendingRef.current)
       lease.current = token
       return () => {
         streamRelay.release(token)
         if (lease.current === token) lease.current = null
       }
     }, [scope.session, scope.turn, scope.step, scope.node, scope.order, scope.recoveryEpoch, part, needsLease])
+    useLayoutEffect(() => {
+      if (lease.current !== null) streamRelay.update(lease.current, admitted && pendingRef.current)
+    }, [admitted, revealPending, deferredCalls])
 
     // DOM 前驱时序门禁：仅检查并监听紧邻的前驱卡片，切断全容器广播风暴
     const [precedingTyping, setPrecedingTyping] = useState(false)
@@ -331,22 +400,20 @@ export function wrapFollowNodeView(
 
     // Scoped leases release on drain/interruption/unmount. There is no elapsed
     // time that can prove the preceding text really committed to the screen.
-    const waiting = relayBlocked || (isUnsettled && precedingTyping)
+    const waiting = !admitted || relayBlocked || (isUnsettled && precedingTyping)
+    waitingRef.current = waiting
+    // The unmanaged predecessor DOM gate is discovered from the empty Host
+    // seat. Once created, preserve the actual Inner across subsequent pauses.
+    if (!waiting) materializedRef.current = true
+    useLayoutEffect(() => {
+      if (!materializedRef.current) return
+      for (const id of projectCalls ? visibleCallIds : sourceCallIds) presentation.calls.add(id)
+      if (presentationKey !== undefined) rememberTool(presentationKey, presentation)
+    }, [admitted, waiting, presentationKey, presentation, projectCalls, visibleCallIds, sourceCallIds])
 
-    // 前序完成后顺畅触发入场动画
-    const wasWaitingRef = useRef(waiting)
-    const presented = useRef(false)
-    // A resumed earlier batch may pause this row, but never retract text which
-    // the reader has already seen or replay its entrance on the next handoff.
-    if (!wasWaitingRef.current && hostRef.current?.textContent?.trim()) presented.current = true
-    const preserveRecoveryLayout = presented.current
-      && (recoveryEpoch !== undefined || streamRelay.recoveryEpoch(scope) !== undefined)
-    useEffect(() => {
-      if (wasWaitingRef.current && !waiting && !isSettled && !preserveRecoveryLayout) {
-        setEntering(true)
-      }
-      wasWaitingRef.current = waiting
-    }, [waiting, isSettled, preserveRecoveryLayout])
+    // The initial entrance remains armed while admission is pending. Starting
+    // it again after creation would race the child's onEntranceSettled callback
+    // and retain scroll ownership after a zero-height/short entrance drains.
 
     const finishRuntimeReveal = useCallback(() => {
       if (structuralRef.current || runtimePersistentRef.current) return
@@ -354,20 +421,66 @@ export function wrapFollowNodeView(
       setRuntimeFollowable(false)
     }, [])
 
+    const deferredSource = useMemo<DeferredDomTextSource>(() => ({
+      presentations: presentation.text,
+      hasPending(epoch) {
+        const tree = treeRef.current
+        return tree.deferred && (epoch === undefined
+          || [...tree.deferredIds, ...tree.changedPayloads].some(id => frozenCalls.current.get(id)?.epoch === epoch))
+      },
+      freeze(epoch) {
+        const tree = treeRef.current
+        for (const id of tree.ids) {
+          const source = tree.calls.get(id)
+          if (source !== undefined && !frozenCalls.current.has(id)) frozenCalls.current.set(id, {
+            epoch, source, locked: !materializedRef.current || !tree.visible.has(id),
+          })
+        }
+      },
+      epochForCall: id => frozenCalls.current.get(id)?.epoch,
+      adoptingEpoch: id => releasedCalls.current.get(id),
+      didObserve: () => { releasedCalls.current.clear() },
+      onDrained(epoch) {
+        const tree = treeRef.current
+        if (!tree.deferred || !admittedRef.current || waitingRef.current) return epoch
+        const id = epoch === undefined ? tree.deferredIds[0]
+          : tree.deferredIds.find(candidate => frozenCalls.current.get(candidate)?.epoch === epoch)
+        if (id === undefined && epoch !== undefined) return epoch + 1
+        if (id === undefined) return epoch
+        // Reserve the next commit before its text can be discovered by the
+        // observer, including an icon-only call with no Text nodes at all.
+        updatePending(true)
+        setVisibleIds(current => new Set([...current, id]))
+        return epoch
+      },
+    }), [presentation, updatePending])
+    const updateRecoveryEpoch = useCallback((epoch: number | undefined) => {
+      if (epoch === undefined) {
+        frozenCalls.current.clear()
+        releasedCalls.current.clear()
+      }
+      setRecoveryEpoch(epoch)
+    }, [])
+    const projectedRoot = projectCalls ? projectToolTreeCallIds(sourceRoot, visibleCallIds, lockedSources) : sourceRoot
+    const adapted = useMemo(() => projectedRoot === sourceRoot ? props : {
+      ...props, node: { ...sourceNode, data: { ...sourceData, root: projectedRoot } },
+    }, [props, projectedRoot, sourceRoot, sourceNode, sourceData])
+
     useProgressiveDomText(
       hostRef,
-      followable && (!isSettled || settledOpenGrowth || revealPending),
-      revealInitialRef.current,
+      followable && (!isSettled || settledOpenGrowth || revealPending || deferredCalls),
+      revealDomInitial,
       speedCpsRef,
       runtimeFollowable ? finishRuntimeReveal : undefined,
       updatePending,
       waiting,
       recoveryMode,
-      followable && (growing || revealPending) ? recoveryKey : undefined,
+      followable && (growing || revealPending || deferredCalls) ? recoveryKey : undefined,
       recoveryPosition,
-      growing || settledOpenGrowth || revealPending || (!isSettled && followable),
-      setRecoveryEpoch,
+      growing || settledOpenGrowth || revealPending || deferredCalls || (!isSettled && followable),
+      updateRecoveryEpoch,
       recoveryEpoch,
+      projectCalls ? deferredSource : undefined,
     )
 
     useLayoutEffect(() => {
@@ -439,7 +552,7 @@ export function wrapFollowNodeView(
     }, [isSettled, growing, entering, growthPulse, waiting, revealPending])
 
     return (
-      <div data-smooth-stream-phase={waiting ? 'waiting' : revealPending ? 'typing' : 'settled'} data-smooth-stream-typing={revealPending ? 'true' : undefined} style={waiting && !preserveRecoveryLayout ? { opacity: 0, pointerEvents: 'none', height: 0, overflow: 'hidden' } : { transition: 'opacity 0.15s ease' }}>
+      <div data-smooth-stream-phase={waiting ? 'waiting' : revealPending ? 'typing' : 'settled'} data-smooth-stream-typing={revealPending ? 'true' : undefined} style={{ transition: 'opacity 0.15s ease' }}>
         <FollowHost
           active={!waiting && revealPending}
           entrance={!waiting && (entering || growthPulse)}
@@ -453,7 +566,7 @@ export function wrapFollowNodeView(
           className={entranceCss.surface}
           entranceActive={!waiting && (entering || growthPulse)}
         >
-          {createElement(Inner, props)}
+          {materializedRef.current ? createElement(Inner, adapted) : null}
         </FollowHost>
       </div>
     )

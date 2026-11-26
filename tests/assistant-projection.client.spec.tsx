@@ -8,7 +8,8 @@ import {
   revealAssistantBlocks,
   type AssistantTextProjection,
 } from '../src/client/NativeAssistantNodeView.tsx'
-import { streamRelay } from '../src/client/streamRelay.ts'
+import { streamRelay, relayScope } from '../src/client/streamRelay.ts'
+import { presentationOwnerAdmitted, presentationOwnerKey } from '../src/client/usePresentationAdmission.ts'
 import { assistantProgress } from '../src/client/presentationProgress.ts'
 import { DEFAULT_STREAM_SETTINGS } from '../src/settings.ts'
 
@@ -135,7 +136,7 @@ describe('assistant source projection', () => {
 })
 
 describe('assistant waiting presentation', () => {
-  it.each([true, false])('hides official chrome behind an earlier tool with keepStreamOnToolCall=%s', keepStreamOnToolCall => {
+  it.each([true, false])('creates official chrome only after an earlier tool drains with keepStreamOnToolCall=%s', async keepStreamOnToolCall => {
     vi.stubGlobal('requestAnimationFrame', () => 1)
     vi.stubGlobal('cancelAnimationFrame', () => {})
     const scope = { session: 'session', turn: '1', step: 1, node: 'tool:1', order: 1 }
@@ -148,7 +149,7 @@ describe('assistant waiting presentation', () => {
       },
       useDisclosure: () => ({ expanded: false, setExpanded: () => {}, toggle: () => {} }),
     } as unknown as ChatNodeViewProps<'assistant-step'>
-    const Inner = () => createElement('aside', null, 'official chrome')
+    const Inner = vi.fn(() => createElement('aside', null, createElement('svg'), 'official chrome'))
     const view = render(createElement(NativeAssistantNodeView, {
       Inner, owner,
       preferences: { ...DEFAULT_STREAM_SETTINGS, controlScroll: false, logarithmicFade: false,
@@ -163,16 +164,23 @@ describe('assistant waiting presentation', () => {
     }))
     root = view.container.querySelector<HTMLElement>('[data-smooth-stream-phase]')!
     expect(root.dataset.smoothStreamPhase).toBe('waiting')
-    expect(root.style.height).toBe('0px')
-    expect(root.style.opacity).toBe('0')
+    await act(async () => {})
+    const assistantScope = relayScope(owner.node, owner.sessionId)
+    expect(presentationOwnerAdmitted(presentationOwnerKey(assistantScope, 'response'))).toBe(false)
+    expect(Inner).not.toHaveBeenCalled()
+    expect(view.container.querySelector('aside')).toBeNull()
+    expect(view.container.querySelector('svg')).toBeNull()
     expect(root.hasAttribute('data-smooth-stream-typing')).toBe(false)
     // A later tool presence must not reverse-block this assistant during handoff.
     let laterTool: symbol
     act(() => { laterTool = streamRelay.acquire({ ...scope, step: 2, node: 'tool:2', order: 3 }, 'tool', true) })
-    act(() => streamRelay.release(tool))
+    await act(async () => streamRelay.release(tool))
+    expect(streamRelay.isBlocked(assistantScope, 'response')).toBe(false)
+    expect(presentationOwnerAdmitted(presentationOwnerKey(assistantScope, 'response'))).toBe(true)
     expect(root.dataset.smoothStreamPhase).not.toBe('waiting')
-    expect(root.style.opacity).toBe('')
+    expect(Inner).toHaveBeenCalled()
     expect(view.getByText('official chrome')).toBeTruthy()
+    expect(view.container.querySelector('svg')).not.toBeNull()
     act(() => streamRelay.release(laterTool))
   })
 })

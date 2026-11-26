@@ -9,6 +9,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client'
 import { NativeAssistantNodeView } from './NativeAssistantNodeView.tsx'
 import { installRendererAdapter } from './rendererAdapter.ts'
+import { installFlowPresentationAdapter } from './flowPresentationAdapter.tsx'
 import { installConversationPipeline } from './conversationPipeline.ts'
 import { bindRecoverySynchronization } from './recoverySynchronization.ts'
 import { setForegroundRecoveryDelay } from './backgroundRecovery.ts'
@@ -310,6 +311,9 @@ export function apply(ctx: ClientContext): void {
       detachBinding()
     }
   })
+
+  ctx.slots.inject('conversation.chat.flow', () => installFlowPresentationAdapter(ctx, settings,
+    (key, component) => isWrappableComponent(component) && !SKIP_WRAP.has(key)))
 
   ctx.slots.inject('conversation.chat.node', () => {
     const release = installRendererAdapter(ctx, (key, original) => {

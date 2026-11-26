@@ -9,6 +9,7 @@ import { relayScope, relayTurnKey, streamRelay } from './streamRelay.ts'
 import { isBackgroundRecoveryScope } from './backgroundRecovery.ts'
 import { assistantProgress } from './presentationProgress.ts'
 import { STREAM_ORDER_DATA_KEY, type StreamOrderData } from './streamOrder.ts'
+import { usePresentationAdmission, presentationOwnerKey } from './usePresentationAdmission.ts'
 
 export interface NativeAssistantPreferences extends Pick<StreamSettings,
   'controlScroll' | 'motionPreference' | 'logarithmicFade' | 'thinkAutoExpand' | 'keepStreamOnToolCall'> {
@@ -124,6 +125,23 @@ export function revealAssistantBlocks(blocks: readonly AssistantBlock[], project
     next[blockIndex] = partial
   })
   return next ?? blocks
+}
+
+/** Keep future images/opaque blocks out of the renderer until their source position. */
+export function projectAssistantPresentation(blocks: readonly AssistantBlock[], projection: AssistantTextProjection, shown: string): readonly AssistantBlock[] {
+  const revealed = revealAssistantBlocks(blocks, projection, shown)
+  if (revealed === blocks) return blocks
+  const cache = projectionCache(projection)
+  for (const [segmentIndex, blockIndex] of projection.blockIndices.entries()) {
+    const source = projection.segments[segmentIndex]
+    const start = cache.offsets[segmentIndex]
+    if (source !== undefined && start !== undefined && shown.length < start + source.length) {
+      // A prefix slice preserves every original index/key already rendered.
+      // The current text block exists, but later structure has not been created.
+      return revealed.slice(0, blockIndex + 1)
+    }
+  }
+  return revealed
 }
 
 type DisclosureHook = AssistantProps['useDisclosure']
@@ -296,14 +314,16 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   const live = node.data.status === 'running'
   const baseScope = useMemo(() => relayScope(node, owner.sessionId), [node.key, node.anchorSeq, node.data.turn, node.data.step, owner.sessionId])
   const recoveryKey = relayTurnKey(baseScope)
+  const part = groupPart === 'reasoning' ? 'reasoning' : 'response'
   const recoveryPosition = [baseScope.step, baseScope.order, groupPart === 'reasoning' ? 0 : 1] as const
   const recoveringScope = isBackgroundRecoveryScope(recoveryKey, recoveryPosition)
   const [recoveryEpoch, setRecoveryEpoch] = useState<number | undefined>(() => {
     const activeEpoch = streamRelay.recoveryEpoch(recoveryKey)
-    return recoveringScope ? (activeEpoch ?? 0) + 1 : undefined
+    return recoveringScope ? activeEpoch ?? 0 : undefined
   })
   const scope = useMemo(() => ({ ...baseScope, recoveryEpoch }), [baseScope, recoveryEpoch])
-  const seenLive = useRef(live || recoveringScope)
+  const queuedOnMount = streamRelay.recoveryEpoch(recoveryKey) === undefined && streamRelay.isBlocked(baseScope, part)
+  const seenLive = useRef(live || recoveringScope || queuedOnMount)
   if (live || recoveringScope) seenLive.current = true
   const segments = useMemo(() => assistantTextSegments(node.data.blocks, groupPart), [node.data.blocks, groupPart])
   const source = projectionCache(segments).source
@@ -361,7 +381,6 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   const speed = useRef(35)
   const revealed = useRef(0)
   const scale = useRef(1)
-  const part = groupPart === 'reasoning' ? 'reasoning' : 'response'
   const presentationKey = JSON.stringify([scope.session, scope.turn, scope.step, scope.node, part])
   const [restored] = useState(() => assistantProgress.read(presentationKey, source))
   const committed = useRef(restored ?? (seenLive.current ? '' : source))
@@ -374,8 +393,9 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
     () => live && streamRelay.hasTool(scope), () => false)
   const toolHandoff = !preferences.keepStreamOnToolCall
     && (toolPresent || node.data.blocks.some(block => block.kind === 'tool-call'))
+  const admissionHold = useRef(animate)
   const hold = useRef(false)
-  hold.current = animate && source !== committed.current && streamRelay.isBlocked(scope, part)
+  hold.current = admissionHold.current || (animate && source !== committed.current && streamRelay.isBlocked(scope, part))
   const smoothed = useSmoothStreamContent(source, {
     enabled: animate,
     backgroundRecovery: preferences.backgroundRecovery,
@@ -406,15 +426,15 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   const pending = animate && !toolHandoff && shown !== source
   const sourceOrder = blockSourceOrder(node, groupPart, shown)
   const activeScope = useMemo(() => sourceOrder === undefined ? scope : { ...scope, sourceOrder }, [scope, sourceOrder])
+  const admitted = usePresentationAdmission(activeScope, part, animate, pending, root,
+    restored !== undefined && restored !== '', presentationOwnerKey(baseScope, part))
+  admissionHold.current = !admitted
   const subscribeBlocked = useCallback((listener: () => void) => pending
     ? streamRelay.subscribeBlocked(activeScope, part, listener) : () => {}, [pending, activeScope, part])
-  const blocked = useSyncExternalStore(subscribeBlocked,
+  const relayBlocked = useSyncExternalStore(subscribeBlocked,
     () => pending && streamRelay.isBlocked(activeScope, part), () => false)
+  const blocked = !admitted || relayBlocked
   hold.current = blocked
-  const presented = useRef(false)
-  useLayoutEffect(() => { if (!blocked && shown !== '') presented.current = true }, [blocked, shown])
-  const preserveRecoveryLayout = presented.current
-    && (recoveryEpoch !== undefined || streamRelay.recoveryEpoch(scope) !== undefined)
   const ownsLiveTail = live && !toolPresent && !node.data.blocks.some(block => block.kind === 'tool-call')
     && (groupPart !== 'reasoning' || node.data.blocks.at(-1)?.kind === 'reasoning')
   const typing = !toolHandoff && (ownsLiveTail || pending)
@@ -424,16 +444,16 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   }, [presentationKey, shown])
   const lease = useRef<symbol | null>(null)
   useLayoutEffect(() => {
-    if (!pending) return
+    if (!pending || !admitted) return
     const token = streamRelay.acquire(activeScope, part, true)
     lease.current = token
     return () => {
       streamRelay.release(token)
       if (lease.current === token) lease.current = null
     }
-  }, [activeScope, part, pending])
+  }, [activeScope, part, pending, admitted])
   const blocks = useMemo(() => animate && !toolHandoff
-    ? revealAssistantBlocks(node.data.blocks, segments, shown)
+    ? projectAssistantPresentation(node.data.blocks, segments, shown)
     : node.data.blocks, [animate, toolHandoff, node.data.blocks, segments, shown])
   useCollapsedReasoning(root, blocks, animate, disclosureRows, setCollapsedReasoning, setDetailsHidden)
   const reasoningPending = blocks.some((block, index) => block.kind === 'reasoning'
@@ -464,12 +484,11 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   }, [typing])
   return (
     <div ref={root}
-      style={blocked && !preserveRecoveryLayout ? { opacity: 0, pointerEvents: 'none', height: 0, overflow: 'hidden' } : undefined}
       data-smooth-stream-phase={blocked ? 'waiting' : typing ? 'typing' : 'settled'}
       data-smooth-stream-typing={!blocked && typing ? 'true' : undefined}>
       <FollowHost active={!blocked && typing && !reduced} speedCpsRef={speed} revealedCharsRef={revealed}
         revealScaleRef={scale} controlScroll={controlScroll} predictive={ownsLiveTail}>
-        {createElement(Inner, adapted)}
+        {admitted ? createElement(Inner, adapted) : null}
       </FollowHost>
     </div>
   )

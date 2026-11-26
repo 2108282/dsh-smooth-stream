@@ -1,6 +1,6 @@
 # dsh-smooth-stream
 
-> **Stable fix release 0.10.9 (main)**: Isolates background recovery playback batches so incoming text cannot rejoin an older batch, and fixes ordering when idle outputs receive new text, ordinary components remount, or `latest` recovery ends. Existing foreground recovery diagnostics and user tuning are preserved. See the [release record](docs/changes-0.10.9.md).
+> **Fix release 0.10.10 (`fix/backlog-replay-0.10.10`)**: Fixes text moving upward during backlog playback and creation ordering for assistant output, tool subcalls, group headers, and SVGs, with stronger background recovery ordering. See the [release record](docs/changes-0.10.10.md).
 
 > **Transform jumpy AI outputs into a calm, teleprompter-smooth reading experience.**  
 > Physics-based stream rendering and zero-reflow viewport tracking for the DeepSeek Harness (`dsh`) Web UI.

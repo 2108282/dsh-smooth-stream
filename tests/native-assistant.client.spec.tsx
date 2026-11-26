@@ -248,7 +248,7 @@ describe('native assistant wrapper', () => {
     expect(view.getByTestId('response-seat').textContent).toBe('final answer')
   })
 
-  it('shows a first completed tool immediately during recovery', async () => {
+  it('creates a first completed tool after its recovering predecessor drains', async () => {
     const props = { ...owner('running', 'r'.repeat(400), true), groupPart: 'reasoning' }
     const Tool = wrapFollowNodeView(() => createElement('aside', null, 'tool result '.repeat(30)), () => false)
     const tree = (result: boolean) => createElement('main', null,
@@ -264,9 +264,13 @@ describe('native assistant wrapper', () => {
     await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
     timestamp += 3000
     view.rerender(tree(true))
-    expect(view.getByTestId('closed-tool').textContent).toBe('tool result '.repeat(30))
-    expect(view.getByTestId('closed-tool').querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('settled')
-    await paint(400)
+    expect(view.getByTestId('closed-tool').querySelector('aside')).toBeNull()
+    for (let index = 0; index < 400; index++) {
+      await paint()
+      if (view.getByTestId('closed-tool').querySelector('aside') !== null) {
+        expect(view.container.querySelector('article')?.textContent).toBe('r'.repeat(400))
+      }
+    }
     expect(view.getByTestId('closed-tool').textContent).toBe('tool result '.repeat(30))
   })
 
@@ -518,16 +522,16 @@ describe('native assistant wrapper', () => {
       createElement('section', { 'data-chat-flow-key': 'assistant' }, native(props, settings, Official)),
       createElement('section', { 'data-chat-flow-key': 'tool' }, createElement(Tool, { node: toolNode, sessionId: props.sessionId }))))
     await act(async () => {})
-    const aside = view.container.querySelector('aside')!
-    const shell = aside.closest('[data-smooth-stream-phase]') as HTMLElement
     if (keep) {
-      expect(shell.style.opacity).toBe('0')
+      expect(view.container.querySelector('aside')).toBeNull()
       await act(() => vi.advanceTimersByTimeAsync(7000))
-      expect(shell.style.opacity).toBe('0')
+      expect(view.container.querySelector('aside')).toBeNull()
       expect(view.container.querySelector('[data-chat-flow-key="assistant"]')?.textContent).not.toBe('lead-in '.repeat(20))
       await paint(100)
     }
-    expect(shell.style.opacity).not.toBe('0')
+    await paint(2)
+    const aside = view.container.querySelector('aside')!
+    expect(aside).not.toBeNull()
     await paint(30)
     expect(aside.textContent).toBe('tool done')
     expect(view.container.querySelector('[data-chat-flow-key="assistant"]')?.textContent?.trim()).toBe('lead-in '.repeat(20).trim())
@@ -557,11 +561,11 @@ describe('native assistant wrapper', () => {
       createElement('section', { key: 'b', 'data-chat-flow-key': 'tool' }, tool))
     const view = render(tree(true))
     const shell = view.container.querySelector('[data-chat-flow-key="tool"] [data-smooth-stream-phase]') as HTMLElement
-    expect(shell.style.opacity).toBe('0')
+    expect(shell.querySelector('aside')).toBeNull()
     expect(shell.textContent).toBe('')
     view.rerender(tree(false))
     await act(async () => {})
-    expect(shell.style.opacity).not.toBe('0')
+    expect(shell.querySelector('aside')).not.toBeNull()
     await paint(30)
     expect(shell.textContent).toBe('finished tool')
   })
@@ -676,8 +680,10 @@ describe('native assistant wrapper', () => {
     const a = render(native(props))
     const b = render(native(props))
     const scope = relayScope(props.node, props.sessionId)
+    await act(async () => {})
     expect(streamRelay.isBlocked(scope, 'tool')).toBe(true)
     a.unmount()
+    await act(async () => {})
     expect(streamRelay.isBlocked(scope, 'tool')).toBe(true)
     b.rerender(native({ ...props, node: { ...props.node, data: { ...props.node.data, status: 'interrupted' } } }))
     expect(streamRelay.isBlocked(scope, 'tool')).toBe(false)

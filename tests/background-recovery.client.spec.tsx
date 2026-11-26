@@ -328,7 +328,7 @@ describe('background playback choices', () => {
     await background(false)
     await paint(2)
     if (mode === 'latest') expect(view.container.querySelector('[data-id="a"]')!.textContent).toBe('x'.repeat(200))
-    else expect(view.container.querySelector('[data-id="b"]')!.textContent).toBe('')
+    else expect(view.container.querySelector('[data-id="b"]')).toBeNull()
     await paint(300)
     expect(view.container.querySelector('[data-id="b"]')!.textContent).toBe('x'.repeat(200))
   })

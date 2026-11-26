@@ -241,7 +241,10 @@ describe('hidden Tool details', () => {
     expect(title.textContent!.length).toBeGreaterThan('visible summary'.length)
   })
 
-  it('does not enroll static history merely because an earlier row is active', () => {
+  it('does not enroll already presented static history merely because an earlier row is active', () => {
+    const history = render(<Tool text="historical summary" sessionId="tools" node={toolNode('complete')} />)
+    expect(history.getByText('historical summary')).toBeTruthy()
+    history.unmount()
     streamRelay.acquire({ session: 'tools', turn: '7', step: 1, node: 'earlier', order: 1 }, 'response', true)
     const subscribe = vi.spyOn(streamRelay, 'subscribeBlocked')
     const acquire = vi.spyOn(streamRelay, 'acquire')

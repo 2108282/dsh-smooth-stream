@@ -3322,6 +3322,7 @@ describe('client plugin lifecycle', () => {
     const view = render(createElement(entry?.component as FunctionComponent<{ node: { data: { root: object } } }>, {
       node: { data: { root: { callId: '1', name: 'bash' } } },
     }))
+    await act(async () => {})
     expect(view.container.querySelector(`.${css.follow}`)).not.toBeNull()
     expect(view.container.querySelector(`.${css.follow} > div`)).not.toBeNull()
 
@@ -3440,6 +3441,7 @@ describe('client plugin lifecycle', () => {
     const view = render(createElement(entry?.component as FunctionComponent<{ node: { data: { root: object } } }>, {
       node: { data: { root: { callId: '2', name: 'read' } } },
     }))
+    await act(async () => {})
     expect(view.container.querySelector(`.${css.follow}`)).not.toBeNull()
     expect(view.container.querySelector(`.${css.follow} > div`)).not.toBeNull()
     await fiber.dispose()
@@ -3778,6 +3780,7 @@ describe('isGrowingChatNode', () => {
       </div>,
     )
 
+    await act(async () => {})
     expect(view.container.textContent).not.toContain('Context injection is ready')
     await act(() => vi.advanceTimersByTimeAsync(48))
     const partial = view.container.querySelector(`.${css.follow}`)?.textContent ?? ''
@@ -3810,6 +3813,7 @@ describe('isGrowingChatNode', () => {
         </div>
       </div>,
     )
+    await act(async () => {})
     const surface = view.container.querySelector(`.${entranceCss.surface}`) as HTMLElement
     expect(surface).not.toBeNull()
     expect(surface.getAttribute('data-entrance')).toBe('active')
@@ -3850,6 +3854,7 @@ describe('isGrowingChatNode', () => {
     }
     const Wrapped = wrapFollowNodeView(Inner as never)
     const view = render(<Wrapped node={{ location, data: { label: 'Bash command' } }} />)
+    await act(async () => {})
     await act(() => vi.advanceTimersByTimeAsync(400))
     expect(view.container.textContent).toBe('Bash command')
 
@@ -4093,6 +4098,7 @@ describe('isGrowingChatNode', () => {
         { contentRect: { height } } as ResizeObserverEntry,
       ], {} as ResizeObserver)
     }
+    await act(async () => {})
     act(() => { notify() })
     await act(() => vi.advanceTimersByTimeAsync(32))
     const initialText = view.container.querySelector(`.${css.follow}`)?.textContent ?? ''
@@ -4157,6 +4163,7 @@ describe('isGrowingChatNode', () => {
         { contentRect: { height } } as ResizeObserverEntry,
       ], {} as ResizeObserver)
     }
+    await act(async () => {})
     act(() => { notify() })
     await act(() => vi.advanceTimersByTimeAsync(80))
 
@@ -4319,13 +4326,15 @@ describe('isGrowingChatNode', () => {
     expect(view.container.querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('settled')
   })
 
-  it('hosts follow only while the wrapped node is growing', () => {
+  it('hosts follow only while the wrapped node is growing', async () => {
     function Inner({ node }: { node: { data: { root: object } } }) {
       return <span>{'kind' in node.data.root ? 'done' : 'live'}</span>
     }
     const Wrapped = wrapFollowNodeView(Inner as never)
     const live = render(<Wrapped node={{ data: { root: { callId: '1' } } }} />)
     expect(live.container.querySelector(`.${css.follow}`)).not.toBeNull()
+    expect(live.container.querySelector('span')).toBeNull()
+    await act(async () => {})
     expect(live.container.querySelector('span')).not.toBeNull()
     const done = render(<Wrapped node={{ data: { root: { kind: 'tool-result', callId: '1' } } }} />)
     expect(done.container.textContent).toBe('done')

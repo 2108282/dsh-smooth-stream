@@ -1,4 +1,4 @@
-import { cleanup, render } from '@testing-library/react'
+import { act, cleanup, render } from '@testing-library/react'
 import { Context } from '@deepseek-ai/cordis'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
@@ -102,6 +102,7 @@ describe('assistant renderer locale routing', () => {
     expect(entry.children).toBeDefined()
     expect(entry.inject).toBeDefined()
     const view = render(createElement(component, assistantProps(chatT(locale))))
+    await act(async () => {})
 
     expect(view.getByText('Harness 思考')).toBeTruthy()
     expect(view.container.textContent).not.toContain('message.think')

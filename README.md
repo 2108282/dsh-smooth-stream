@@ -1,6 +1,6 @@
 # dsh-smooth-stream
 
-> **正式修复版 0.10.9（main）**：包含后台恢复积压回放的批次隔离与顺序修复，避免恢复期间的新文本混入旧批次，并修复空闲输出追加、普通重挂载和 `latest` 模式结束后的排序边界。保留既有前台恢复诊断与用户参数。详见 [版本记录](docs/changes-0.10.9.md)。
+> **修复版本 0.10.10（`fix/backlog-replay-0.10.10`）**：修复恢复积压回放时文字上移及助手、工具子调用、分组标题和 SVG 的创建顺序问题，并补强后台恢复批次顺序。详见 [版本记录](docs/changes-0.10.10.md)。
 
 > **让 AI 的长篇生成如提词器般温润流淌。**  
 > 为 DeepSeek Harness（`dsh`）打造的二阶弹簧物理流式渲染与零重排跟随引擎。
@@ -157,14 +157,14 @@ Host 日志中显示 `[dsh-smooth-stream] plugin loaded!` 即表示已成功加�
 不联网构建时，可直接安装仓库里已构建好的安装包（见 [`dist/`](dist/README.md)）：
 
 ```sh
-npm install https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.9.tgz
+npm install https://raw.githubusercontent.com/2108282/dsh-smooth-stream/fix/backlog-replay-0.10.10/dist/dsh-smooth-stream-0.10.10.tgz
 ```
 
 装进 DSH profile 时先下载再用本地路径：
 
 ```sh
-curl -L -O https://raw.githubusercontent.com/2108282/dsh-smooth-stream/main/dist/dsh-smooth-stream-0.10.9.tgz
-pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.10.9.tgz
+curl -L -O https://raw.githubusercontent.com/2108282/dsh-smooth-stream/fix/backlog-replay-0.10.10/dist/dsh-smooth-stream-0.10.10.tgz
+pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.10.10.tgz
 ```
 
 卸载命令：`pnpm dsh plugin --profile web remove dsh-smooth-stream`。

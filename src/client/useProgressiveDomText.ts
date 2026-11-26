@@ -16,6 +16,18 @@ import { debugRuntime } from './debugRuntime.ts'
 import { createEllipsisTailProbe } from './ellipsisTail.ts'
 import { streamRelay } from './streamRelay.ts'
 
+/** Source calls omitted from the DOM until their preceding visible work drains. */
+export interface DeferredDomTextSource {
+  /** Presented prefixes only; no retained DOM or unpresented source suffixes. */
+  presentations?: Map<string, string[]>
+  adoptingEpoch?(callId: string): number | undefined
+  didObserve?(): void
+  hasPending(epoch?: number): boolean
+  freeze(epoch: number): void
+  epochForCall(callId: string): number | undefined
+  onDrained(epoch: number | undefined): number | undefined
+}
+
 interface TextRevealRecord {
   chars: readonly string[]
   full: string
@@ -116,7 +128,10 @@ export function useProgressiveDomText(
   observeChanges = enabled,
   onRecoveryBatchChange?: ((epoch: number | undefined) => void) | undefined,
   initialRecoveryEpoch?: number,
+  deferredSource?: DeferredDomTextSource,
 ): void {
+  const deferredRef = useRef(deferredSource)
+  deferredRef.current = deferredSource
   const callbacks = useRef({ onSettled, onPendingChange, onRecoveryBatchChange })
   callbacks.current = { onSettled, onPendingChange, onRecoveryBatchChange }
   const pausedRef = useRef(paused)
@@ -128,7 +143,8 @@ export function useProgressiveDomText(
     recoveryKey, recoveryPosition, false, enabled || observeChanges)
   const recoveryRef = useRef(recovery)
   recoveryRef.current = recovery
-  useLayoutEffect(() => { if (!paused) wake.current?.() }, [paused])
+  const hasDeferredSource = deferredSource?.hasPending() === true
+  useLayoutEffect(() => { if (!paused) wake.current?.() }, [paused, hasDeferredSource])
   useLayoutEffect(() => {
     const root = rootRef.current
     if (root === null || typeof document === 'undefined') return
@@ -144,11 +160,13 @@ export function useProgressiveDomText(
     }
 
     const callRows = new Set<HTMLElement>()
+    const newlyRegisteredCalls = new Set<HTMLElement>()
     let orderedCalls: HTMLElement[] = []
     let callOrderDirty = true
     const registerCall = (element: HTMLElement): void => {
       if (callRows.has(element)) return
       callRows.add(element)
+      newlyRegisteredCalls.add(element)
       callOrderDirty = true
     }
     const forEachText = (from: Node, callback: (text: Text) => void): void => {
@@ -175,10 +193,59 @@ export function useProgressiveDomText(
       }
     }
 
+    const textSlots = new WeakMap<Text, { callId: string; index: number }>()
+    const indexCallText = (call: HTMLElement): readonly Text[] => {
+      const callId = call.getAttribute('data-chat-call-id')
+      if (!callId || !visibleWithin(call, root)) return []
+      const texts: Text[] = []
+      const walker = document.createTreeWalker(call, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+        acceptNode: node => {
+          if (!(node instanceof Element)) return NodeFilter.FILTER_ACCEPT
+          // A child call owns its own ledger and must not shift this call's slots.
+          if (node.hasAttribute('data-chat-call-id') || excludedElement(node) || hiddenElement(node)) return NodeFilter.FILTER_REJECT
+          return NodeFilter.FILTER_SKIP
+        },
+      })
+      let node = walker.nextNode()
+      while (node !== null) {
+        const text = node as Text
+        textSlots.set(text, { callId, index: texts.length })
+        texts.push(text)
+        node = walker.nextNode()
+      }
+      return texts
+    }
+    const textSlot = (text: Text) => {
+      const known = textSlots.get(text)
+      if (known !== undefined) return known
+      const call = text.parentElement?.closest<HTMLElement>('[data-chat-call-id]')
+      if (call === null || call === undefined) return undefined
+      indexCallText(call)
+      return textSlots.get(text)
+    }
+    const rememberText = (text: Text, record: TextRevealRecord): void => {
+      records.set(text, record)
+      const saved = deferredRef.current?.presentations
+      const slot = saved === undefined ? undefined : textSlot(text)
+      if (saved !== undefined && slot !== undefined) {
+        const values = saved.get(slot.callId) ?? []
+        values[slot.index] = record.chars.slice(0, record.shown).join('')
+        saved.set(slot.callId, values)
+      }
+    }
+    const restoreText = (text: Text): TextRevealRecord | undefined => {
+      const saved = deferredRef.current?.presentations
+      const slot = saved === undefined ? undefined : textSlot(text)
+      const prefix = slot === undefined ? undefined : saved?.get(slot.callId)?.[slot.index]
+      if (prefix === undefined) return undefined
+      const chars = [...prefix]
+      return { chars, full: prefix, shown: chars.length }
+    }
+
     const settle = (text: Text): void => {
       if (!revealable(text, root)) return
       const chars = [...text.data]
-      records.set(text, { chars, full: text.data, shown: chars.length })
+      rememberText(text, { chars, full: text.data, shown: chars.length })
     }
 
     const snapshotVisible = (): void => {
@@ -211,6 +278,7 @@ export function useProgressiveDomText(
     }
 
     const pending = new Set<Text>()
+    let structuralPending = false
     // Only recovery playback freezes endpoints. Source records keep accepting
     // new text, but that suffix belongs to the next batch on the same RAF.
     let activeBatch: Map<Text, number> | null = null
@@ -231,12 +299,13 @@ export function useProgressiveDomText(
         const record = records.get(node)
         if (record !== undefined && record.shown < record.chars.length) activeBatch.set(node, record.chars.length)
       }
-      if (activeBatch.size > 0) {
+      if (activeBatch.size > 0 || deferredRef.current?.hasPending() === true) {
         const activeEpoch = streamRelay.recoveryEpoch(recoveryKey ?? '')
         const receivingEpoch = activeEpoch === undefined || nextBatchEpoch === undefined ? undefined
           : Math.max(nextBatchEpoch, activeEpoch + 1)
         batchEpoch = nextEpoch ?? receivingEpoch ?? batchEpoch ?? activeEpoch ?? 0
         nextBatchEpoch = undefined
+        deferredRef.current?.freeze(batchEpoch)
         callbacks.current.onRecoveryBatchChange?.(batchEpoch)
       }
     }
@@ -246,7 +315,7 @@ export function useProgressiveDomText(
         const record = records.get(node)
         if (!pending.has(node) || record === undefined || record.shown >= end) activeBatch.delete(node)
       }
-      if (activeBatch.size === 0 && pending.size > 0) {
+      if (activeBatch.size === 0 && pending.size > 0 && deferredRef.current?.hasPending(batchEpoch) !== true) {
         const nextEpoch = batchEpoch === undefined ? undefined : batchEpoch + 1
         activeBatch = null
         batchEpoch = undefined
@@ -257,7 +326,9 @@ export function useProgressiveDomText(
     // hidden as well, so icons/running effects cannot all appear before text.
     const concealed = new Map<HTMLElement, { visibility: string; priority: string }>()
     const syncCallVisibility = (): void => {
-      if (callRows.size === 0) return
+      // Known Tool trees gate creation at their source. Retain the legacy
+      // concealment only for opaque renderers without a projectable call tree.
+      if (deferredRef.current !== undefined || callRows.size === 0) return
       if (callOrderDirty) {
         // Structural mutations can move an existing call without changing its
         // identity. Rebuild this small visible-call order only on those commits.
@@ -310,7 +381,28 @@ export function useProgressiveDomText(
     const streamId = `dom-${Math.random().toString(36).slice(2)}`
     const isEllipsisTailClipped = createEllipsisTailProbe(root)
 
-    const announceSettled = (): void => {
+    const announceSettled = (advanceDeferred = false): void => {
+      const deferred = deferredRef.current
+      if (structuralPending && !advanceDeferred) {
+        callbacks.current.onPendingChange?.(true)
+        scheduleFrame()
+        return
+      }
+      if (deferred?.hasPending() === true) {
+        // An empty DOM frontier is not a drained source. Admit at most one new
+        // call per frame, keeping same-snapshot deferred calls in this batch.
+        if (advanceDeferred && !pausedRef.current && !recoveryRef.current.hidden()) {
+          const nextEpoch = deferred.onDrained(batchEpoch)
+          if (nextEpoch !== undefined && nextEpoch !== batchEpoch) {
+            activeBatch = null
+            batchEpoch = undefined
+            freezeBatch(nextEpoch)
+          }
+        }
+        callbacks.current.onPendingChange?.(true)
+        scheduleFrame()
+        return
+      }
       clearBatch(streamRelay.recoveryEpoch(recoveryKey ?? '') !== undefined)
       presentedCalls.clear()
       lastFrame = null
@@ -339,6 +431,7 @@ export function useProgressiveDomText(
         internalWrites.delete(node)
         return
       }
+      preserve ??= restoreText(node)
       const chars = [...full]
       const prefix = preserve === undefined ? 0 : commonPrefix(preserve.chars, chars)
       const preserved = preserve === undefined ? 0 : Math.min(preserve.shown, prefix)
@@ -349,7 +442,17 @@ export function useProgressiveDomText(
         activeBatch!.set(node, Math.min(boundary, prefix))
       }
       const record = { chars, full, shown: preserved }
-      records.set(node, record)
+      const call = node.parentElement?.closest<HTMLElement>('[data-chat-call-id]')
+      const callId = call?.getAttribute('data-chat-call-id')
+      if (activeBatch !== null && batchEpoch !== undefined && call !== null && call !== undefined
+        && callId !== null && callId !== undefined
+        && ((newlyRegisteredCalls.has(call) && deferredRef.current?.epochForCall(callId) === batchEpoch)
+          || deferredRef.current?.adoptingEpoch?.(callId) === batchEpoch)) {
+        // This call existed in the frozen source snapshot, but its renderer is
+        // only now being created. New text in an existing call never extends it.
+        activeBatch.set(node, chars.length)
+      }
+      rememberText(node, record)
       if (preserved < chars.length) {
         pending.add(node)
         announcedSettled = false
@@ -372,6 +475,8 @@ export function useProgressiveDomText(
         }
         settle(text)
       })
+      if (newlyRegisteredCalls.size > 0 && deferredRef.current !== undefined) structuralPending = true
+      newlyRegisteredCalls.clear()
     }
 
     const forget = (from: Node): void => {
@@ -384,10 +489,11 @@ export function useProgressiveDomText(
 
     const scheduleFrame = (): void => {
       const playback = recoveryRef.current
-      if (!playback.hidden() && activeBatch === null && pending.size > 0 && playback.mode() !== 'latest'
+      const hasDeferred = deferredRef.current?.hasPending() === true
+      if (!playback.hidden() && activeBatch === null && (pending.size > 0 || hasDeferred) && playback.mode() !== 'latest'
         && (playback.recovering() || streamRelay.recoveryEpoch(recoveryKey ?? '') !== undefined)) freezeBatch()
       syncCallVisibility()
-      if (stopped || pausedRef.current || recoveryRef.current.hidden() || pending.size === 0 || rafId !== 0) return
+      if (stopped || pausedRef.current || recoveryRef.current.hidden() || (pending.size === 0 && !hasDeferred && !structuralPending) || rafId !== 0) return
       rafId = requestAnimationFrame(frame)
     }
 
@@ -399,8 +505,9 @@ export function useProgressiveDomText(
       // source shortened to exactly our current prefix (no data mismatch).
       const mutations = observer?.takeRecords()
       if (mutations !== undefined && mutations.length > 0) processMutations(mutations)
+      structuralPending = false
       if (pending.size === 0) {
-        announceSettled()
+        announceSettled(true)
         return
       }
       if (pausedRef.current) { lastFrame = null; return }
@@ -454,6 +561,10 @@ export function useProgressiveDomText(
         backlog += Math.max(0, item.end - item.record.shown)
         return item.end > item.record.shown
       })
+      if (orderedPending.length === 0 && deferredRef.current?.hasPending(batchEpoch) === true) {
+        announceSettled(true)
+        return
+      }
       const activeBatchChars = activeBatch === null ? undefined : backlog
       const incomingBatchChars = activeBatch === null ? undefined
         : candidates.reduce((sum, item) => sum + item.record.chars.length - item.record.shown, 0) - backlog
@@ -474,14 +585,14 @@ export function useProgressiveDomText(
         const { node, record, end } = orderedPending[index]!
         backlog -= end - record.shown
         write(node, record.chars.slice(0, end).join(''))
-        records.set(node, { ...record, shown: end })
+        rememberText(node, { ...record, shown: end })
         if (end >= record.chars.length) pending.delete(node)
       }
       if (clippedCount > 0) orderedPending.splice(0, clippedCount)
       if (playback.recovering() && playback.mode() === 'latest') {
         for (const { node, record } of orderedPending) {
           write(node, record.full)
-          records.set(node, { ...record, shown: record.chars.length })
+          rememberText(node, { ...record, shown: record.chars.length })
         }
         pending.clear()
         syncCallVisibility()
@@ -501,7 +612,7 @@ export function useProgressiveDomText(
         const amount = Math.min(remaining, end - record.shown)
         const shown = record.shown + amount
         const next = { ...record, shown }
-        records.set(node, next)
+        rememberText(node, next)
         write(node, next.chars.slice(0, shown).join(''))
         remaining -= amount
         if (shown >= next.chars.length) pending.delete(node)
@@ -538,11 +649,19 @@ export function useProgressiveDomText(
       })
       advanceBatch()
       syncCallVisibility()
-      if (pending.size === 0) announceSettled()
+      if (pending.size === 0) announceSettled(true)
+      else if (activeBatch?.size === 0 && deferredRef.current?.hasPending(batchEpoch) === true) announceSettled(true)
       else scheduleFrame()
     }
 
-    wake.current = () => { scheduleFrame() }
+    wake.current = () => {
+      // An empty seat can report settled before admission, when its owner must
+      // ignore it. A resumed commit still needs one acknowledgement frame,
+      // including renderers that create only icons or return no DOM at all.
+      announcedSettled = false
+      structuralPending = true
+      scheduleFrame()
+    }
     resume.current = () => {
       if (recoveryRef.current.recovering() && recoveryRef.current.mode() !== 'latest' && activeBatch === null) {
         // Include native commits already queued at the foreground boundary;
@@ -589,6 +708,14 @@ export function useProgressiveDomText(
           .some(control => control.getAttribute('aria-controls')?.split(/\s+/).includes(node.id))))
 
     const processMutations = (mutations: MutationRecord[]): void => {
+      const presentations = deferredRef.current?.presentations
+      const changedCalls = new Map<HTMLElement, readonly Text[]>()
+      if (presentations !== undefined) for (const mutation of mutations) {
+        if (mutation.type !== 'childList') continue
+        const target = mutation.target instanceof Element ? mutation.target : mutation.target.parentElement
+        const call = target?.closest<HTMLElement>('[data-chat-call-id]')
+        if (call !== null && call !== undefined && !changedCalls.has(call)) changedCalls.set(call, indexCallText(call))
+      }
       // Attribute reveals are snapshots, even when child insertion arrived
       // in the same React commit. Dedupe roots so nested mutations don't
       // repeatedly scan the same newly visible details.
@@ -647,6 +774,19 @@ export function useProgressiveDomText(
         if ([...snapshots].some(other => other !== snapshot && other.contains(snapshot))) continue
         visit(snapshot, false)
       }
+      if (presentations !== undefined) for (const [call, texts] of changedCalls) {
+        const callId = call.getAttribute('data-chat-call-id')
+        if (!callId || !root.contains(call)) continue
+        // Replace stale slots only after new Text nodes have restored their
+        // positional prefix from the preceding committed structure.
+        const prefixes: string[] = []
+        texts.forEach((text, index) => {
+          const record = records.get(text)
+          if (record !== undefined) prefixes[index] = record.chars.slice(0, record.shown).join('')
+        })
+        presentations.set(callId, prefixes)
+      }
+      deferredRef.current?.didObserve?.()
       syncCallVisibility()
       if (pending.size === 0) announceSettled()
       else scheduleFrame()
