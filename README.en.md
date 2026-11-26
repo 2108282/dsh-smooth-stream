@@ -1,6 +1,6 @@
 # dsh-smooth-stream
 
-> **Stable fix release 0.10.7 (main)**: Includes the WebView resynchronization, folded-content gates and ellipsis-tail fixes from 0.10.4, plus opt-in foreground recovery diagnostics. The current development code removes background text replay and synchronizes the latest snapshot on return. Diagnostics report RAF callback intervals, callback duration, queue size and Long Tasks; they are not compositor FPS. See the [release record](docs/changes-0.10.7.md).
+> **0.10.8 (fix/remove-background-text-backlog branch)**: Removes background text queuing and recovery replay. Returning to the page displays the complete received snapshot immediately; newly arriving text keeps normal streaming. Settings no longer offer three recovery modes. See the [release record](docs/changes-0.10.8.md).
 
 > **Transform jumpy AI outputs into a calm, teleprompter-smooth reading experience.**  
 > Physics-based stream rendering and zero-reflow viewport tracking for the DeepSeek Harness (`dsh`) Web UI.
