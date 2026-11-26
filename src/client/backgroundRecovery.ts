@@ -7,6 +7,8 @@ export const BACKGROUND_GAP_MS = 1000
 export const RECOVERY_MAX_CHARS = 16
 
 export type RecoveryPosition = readonly [step: number, order: number, part: number]
+type ForegroundWaitEnd = 'hidden' | 'resume' | 'dispose'
+type ForegroundWaitCleanup = (reason: ForegroundWaitEnd) => void
 interface RecoveryClient {
   hidden: () => void
   resume: () => void
@@ -15,6 +17,7 @@ interface RecoveryClient {
   recovering: () => boolean
   waitingForSync: () => boolean
   synchronized: () => void
+  foregroundWaiting: () => void
 }
 
 /** Optional Host synchronization fence; no elapsed timeout can prove a baseline arrived. */
@@ -44,6 +47,7 @@ let background = false
 let nativeBackground = false
 let foregroundDelayMs = 0
 let foregroundPending = false
+let foregroundSequence = 0
 let foregroundTimer: ReturnType<typeof setTimeout> | undefined
 
 /** Set the user-owned delay used only for native dsha:foreground signals. */
@@ -105,6 +109,8 @@ function show(delayMs = 0, native = false): void {
   foregroundPending = false
   if (delayMs > 0) {
     foregroundPending = true
+    foregroundSequence++
+    for (const client of [...clients]) client.foregroundWaiting()
     foregroundTimer = setTimeout(() => {
       foregroundTimer = undefined
       if (!foregroundPending) return
@@ -141,6 +147,11 @@ function attach(): void {
   window.addEventListener('dsha:foreground', nativeForeground)
 }
 function detach(): void {
+  // React can replace the last arm within one commit. Keep its native delay
+  // through that synchronous gap, but still dispose unused listeners promptly.
+  queueMicrotask(detachIfUnused)
+}
+function detachIfUnused(): void {
   if (!attached || clients.size !== 0) return
   document.removeEventListener('visibilitychange', visibility)
   window.removeEventListener('pagehide', pageHide)
@@ -159,13 +170,14 @@ function detach(): void {
 
 /** Shared lifecycle listeners, per-renderer playback progress and disposal. */
 export function useBackgroundRecovery(mode: BackgroundRecovery, onHidden: () => void, onResume: () => void,
-  scopeKey?: string, scopePosition?: RecoveryPosition, resumeOnMount = false, active = true) {
+  scopeKey?: string, scopePosition?: RecoveryPosition, resumeOnMount = false, active = true,
+  onForegroundWaiting?: (sequence: number) => void | ForegroundWaitCleanup) {
   const keyRef = useRef(scopeKey)
   keyRef.current = scopeKey
   const positionRef = useRef(scopePosition)
   positionRef.current = scopePosition
-  const callbacks = useRef({ onHidden, onResume })
-  callbacks.current = { onHidden, onResume }
+  const callbacks = useRef({ onHidden, onResume, onForegroundWaiting })
+  callbacks.current = { onHidden, onResume, onForegroundWaiting }
   const state = useRef({ mode, recovering: false, resumed: false, wasHidden: false, waitingSync: false })
   state.current.mode = mode
   useLayoutEffect(() => {
@@ -177,17 +189,24 @@ export function useBackgroundRecovery(mode: BackgroundRecovery, onHidden: () => 
       return
     }
     attach()
+    let stopForegroundWaiting: ForegroundWaitCleanup | undefined
+    const releaseForegroundWaiting = (reason: ForegroundWaitEnd): void => {
+      stopForegroundWaiting?.(reason)
+      stopForegroundWaiting = undefined
+    }
     const client: RecoveryClient = {
       key: () => keyRef.current,
       position: () => positionRef.current,
       recovering: () => state.current.recovering || state.current.wasHidden,
       waitingForSync: () => state.current.waitingSync,
       hidden: () => {
+        releaseForegroundWaiting('hidden')
         state.current.wasHidden = true
         state.current.waitingSync = false
         callbacks.current.onHidden()
       },
       resume: () => {
+        releaseForegroundWaiting('resume')
         state.current.wasHidden = false
         state.current.waitingSync = false
         state.current.recovering = true
@@ -195,6 +214,10 @@ export function useBackgroundRecovery(mode: BackgroundRecovery, onHidden: () => 
         callbacks.current.onResume()
       },
       synchronized: () => { state.current.waitingSync = false; callbacks.current.onResume() },
+      foregroundWaiting: () => {
+        const stop = callbacks.current.onForegroundWaiting?.(foregroundSequence)
+        if (typeof stop === 'function') stopForegroundWaiting = stop
+      },
     }
     clients.add(client)
     // Late publications inherit the same turn's recovery until its queues drain.
@@ -206,8 +229,10 @@ export function useBackgroundRecovery(mode: BackgroundRecovery, onHidden: () => 
     if (background) {
       rememberScope(key, positionRef.current)
       client.hidden()
+      if (foregroundPending) client.foregroundWaiting()
     }
     return () => {
+      releaseForegroundWaiting('dispose')
       clients.delete(client)
       retireScopes()
       detach()

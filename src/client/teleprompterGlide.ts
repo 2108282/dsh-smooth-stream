@@ -1338,6 +1338,153 @@ interface FollowSuspension {
 const followSuspensions = new WeakMap<HTMLElement, FollowSuspension>()
 const followRecoveryTimes = new WeakMap<HTMLElement, number>()
 
+interface ForegroundScrollHold {
+  readonly sequence: number
+  readonly owners: Set<object>
+  readonly stop: () => void
+}
+const foregroundScrollHolds = new WeakMap<HTMLElement, ForegroundScrollHold>()
+const foregroundReaderReleases = new WeakMap<HTMLElement, number>()
+
+function releaseForegroundScrollHold(port: HTMLElement, owner: object, defer = false): void {
+  const hold = foregroundScrollHolds.get(port)
+  if (hold === undefined) return
+  hold.owners.delete(owner)
+  const stopIfUnused = (): void => {
+    if (foregroundScrollHolds.get(port) !== hold || hold.owners.size !== 0) return
+    foregroundScrollHolds.delete(port)
+    hold.stop()
+  }
+  // Preserve compensation space through an in-place React arm replacement.
+  if (defer) queueMicrotask(stopIfUnused)
+  else stopIfUnused()
+}
+
+/** Native foreground delay pauses Host scroll motion as well as our reveal clock. */
+function holdForegroundScroll(port: HTMLElement, owner: object, sequence: number): void {
+  const previous = foregroundScrollHolds.get(port)
+  if (previous?.sequence === sequence) { previous.owners.add(owner); return }
+  previous?.stop()
+  const owners = new Set([owner])
+  const overflowAnchor = port.style.overflowAnchor
+  const scrollBehavior = port.style.scrollBehavior
+  let top = port.scrollTop
+  const readingAnchor = (): HTMLElement | null => {
+    const rows = [...port.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')]
+    const viewport = port.getBoundingClientRect()
+    return rows.find(row => {
+      const rect = row.getBoundingClientRect()
+      return rect.height > 0 && rect.bottom > viewport.top && rect.top < viewport.bottom
+    }) ?? rows.at(-1) ?? readingAnchorOf(port)
+  }
+  let anchor = readingAnchor()
+  let anchorTop = port.clientHeight > 0 && anchor !== null
+    ? anchor.getBoundingClientRect().top - port.getBoundingClientRect().top
+    : null
+  let frame = 0
+  let restoring = false
+  let readerReleased = foregroundReaderReleases.get(port) === sequence
+  let touchStartY: number | null = null
+  let heldPad = 0
+  const releasePad = (): void => {
+    if (heldPad <= 0) return
+    setFlowPad(port, Math.max(0, flowPadOf(port) - heldPad))
+    heldPad = 0
+  }
+  port.style.overflowAnchor = 'none'
+  port.style.scrollBehavior = 'auto'
+  // A smooth scroll already dispatched by the Host owns a browser clock that
+  // is independent of requestAnimationFrame and must be canceled explicitly.
+  if (!readerReleased) {
+    port.scrollTo?.({ top, behavior: 'instant' })
+    port.setAttribute(FOLLOW_OWNED_ATTR, String(top))
+  }
+  const rememberReader = (): void => {
+    const suspended = followSuspensions.get(port)
+    if (suspended !== undefined) {
+      suspended.following = false
+      suspended.readerTop = port.scrollTop
+    }
+    followReaderHolds.set(port, { atMs: performance.now() })
+  }
+  const restore = (): void => {
+    if (restoring) return
+    if (readerReleased) { rememberReader(); return }
+    if (port.clientHeight <= 0) return
+    // Preserve a reading surface across chrome/viewport layout changes too;
+    // holding only scrollTop still lets a stable line drift on screen.
+    if (anchor !== null && port.contains(anchor) && anchorTop !== null) {
+      top = port.scrollTop + anchor.getBoundingClientRect().top - port.getBoundingClientRect().top - anchorTop
+    } else {
+      anchor = readingAnchor()
+      anchorTop = anchor === null ? null : anchor.getBoundingClientRect().top - port.getBoundingClientRect().top
+    }
+    const missingExtent = top - Math.max(0, port.scrollHeight - port.clientHeight)
+    if (missingExtent > 0.01) {
+      const previousPad = flowPadOf(port)
+      setFlowPad(port, previousPad + missingExtent)
+      heldPad += Math.max(0, flowPadOf(port) - previousPad)
+    }
+    top = Math.max(0, Math.min(top, Math.max(0, port.scrollHeight - port.clientHeight)))
+    restoring = true
+    if (Math.abs(port.scrollTop - top) > 0.01) port.scrollTop = top
+    const ownedTop = String(port.scrollTop)
+    if (port.getAttribute(FOLLOW_OWNED_ATTR) !== ownedTop) port.setAttribute(FOLLOW_OWNED_ATTR, ownedTop)
+    const suspended = followSuspensions.get(port)
+    if (suspended !== undefined && !suspended.following) suspended.readerTop = port.scrollTop
+    restoring = false
+  }
+  const releaseToReader = (event: Event): void => {
+    if (event.type === 'touchstart') {
+      touchStartY = (event as TouchEvent).touches[0]?.clientY ?? null
+      return
+    }
+    if (event.type === 'touchend' || event.type === 'touchcancel') { touchStartY = null; return }
+    if (readerReleased) return
+    if (event.type === 'wheel') {
+      const delta = (event as WheelEvent).deltaY
+      if (!Number.isFinite(delta) || delta === 0) return
+    } else if (event.type === 'touchmove') {
+      const y = (event as TouchEvent).touches[0]?.clientY
+      if (y === undefined || touchStartY === null || Math.abs(y - touchStartY) <= 1) return
+    } else if (event instanceof KeyboardEvent) {
+      if (!['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) return
+      if (event.target instanceof Element && event.target.closest('input, textarea, select, button, a, [role="button"], [contenteditable]:not([contenteditable="false"])') !== null) return
+    } else return
+    readerReleased = true
+    foregroundReaderReleases.set(port, sequence)
+    releasePad()
+    port.removeAttribute(FOLLOW_OWNED_ATTR)
+    rememberReader()
+  }
+  const tick = (): void => {
+    if (!port.isConnected) { foregroundScrollHolds.delete(port); stop(); return }
+    restore()
+    frame = requestAnimationFrame(tick)
+  }
+  const unsubscribeCommit = subscribeFollowCommit(port, restore)
+  const resize = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(restore)
+  resize?.observe(port)
+  const flow = flowElementOf(port)
+  if (flow !== null) resize?.observe(flow)
+  if (anchor !== null && anchor !== flow) resize?.observe(anchor)
+  const stop = (): void => {
+    cancelAnimationFrame(frame)
+    unsubscribeCommit()
+    resize?.disconnect()
+    releasePad()
+    port.removeEventListener('scroll', restore, true)
+    for (const name of GESTURE_EVENTS) port.removeEventListener(name, releaseToReader)
+    if (port.style.overflowAnchor === 'none') port.style.overflowAnchor = overflowAnchor
+    if (port.style.scrollBehavior === 'auto') port.style.scrollBehavior = scrollBehavior
+    if (!readerReleased && port.getAttribute(FOLLOW_OWNED_ATTR) === String(top)) port.removeAttribute(FOLLOW_OWNED_ATTR)
+  }
+  foregroundScrollHolds.set(port, { sequence, owners, stop })
+  port.addEventListener('scroll', restore, { capture: true, passive: true })
+  for (const name of GESTURE_EVENTS) port.addEventListener(name, releaseToReader, { passive: true })
+  frame = requestAnimationFrame(tick)
+}
+
 /** Drop stale paint geometry while retaining the reader and Host ownership. */
 function suspendFollowPort(port: HTMLElement): void {
   const previous = followSuspensions.get(port)
@@ -1741,7 +1888,13 @@ export function useConversationFollow(
     const port = rootRef.current?.closest<HTMLElement>('[data-conversation-scroll]')
     if (port !== undefined && port !== null) resumeFollowPort(port)
     setLifecycleVersion(version => version + 1)
-  }, undefined, undefined, false, controlScroll && (active || settlingOwner !== null))
+  }, undefined, undefined, false, controlScroll && (active || settlingOwner !== null), sequence => {
+    const port = rootRef.current?.closest<HTMLElement>('[data-conversation-scroll]')
+    if (!controlScrollRef.current || port === undefined || port === null) return
+    const owner = {}
+    holdForegroundScroll(port, owner, sequence)
+    return reason => releaseForegroundScrollHold(port, owner, reason === 'dispose' && controlScrollRef.current)
+  })
   const lifecycleRef = useRef(lifecycle)
   lifecycleRef.current = lifecycle
 
