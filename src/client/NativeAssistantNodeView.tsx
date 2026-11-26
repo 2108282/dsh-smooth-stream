@@ -294,10 +294,15 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   const { preset, controlScroll, logarithmicFade, motionPreference } = preferences
   const reduced = useReducedMotion(motionPreference)
   const live = node.data.status === 'running'
-  const scope = useMemo(() => relayScope(node, owner.sessionId), [node.key, node.anchorSeq, node.data.turn, node.data.step, owner.sessionId])
-  const recoveryKey = relayTurnKey(scope)
-  const recoveryPosition = [scope.step, scope.order, groupPart === 'reasoning' ? 0 : 1] as const
+  const baseScope = useMemo(() => relayScope(node, owner.sessionId), [node.key, node.anchorSeq, node.data.turn, node.data.step, owner.sessionId])
+  const recoveryKey = relayTurnKey(baseScope)
+  const recoveryPosition = [baseScope.step, baseScope.order, groupPart === 'reasoning' ? 0 : 1] as const
   const recoveringScope = isBackgroundRecoveryScope(recoveryKey, recoveryPosition)
+  const [recoveryEpoch, setRecoveryEpoch] = useState<number | undefined>(() => {
+    const activeEpoch = streamRelay.recoveryEpoch(recoveryKey)
+    return recoveringScope ? (activeEpoch ?? 0) + 1 : undefined
+  })
+  const scope = useMemo(() => ({ ...baseScope, recoveryEpoch }), [baseScope, recoveryEpoch])
   const seenLive = useRef(live || recoveringScope)
   if (live || recoveringScope) seenLive.current = true
   const segments = useMemo(() => assistantTextSegments(node.data.blocks, groupPart), [node.data.blocks, groupPart])
@@ -382,6 +387,8 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
     skipRanges: skipPlan.ranges,
     canSkipRange,
     onRecoveryBacklogChange: setRecoveryBacklog,
+    initialRecoveryEpoch: recoveryEpoch,
+    onRecoveryBatchChange: setRecoveryEpoch,
     inputComplete: !live || toolPresent || node.data.blocks.some(block => block.kind === 'tool-call')
       || (groupPart === 'reasoning' && node.data.blocks.at(-1)?.kind !== 'reasoning'),
     shouldHoldBack: () => hold.current,
@@ -400,6 +407,10 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   const blocked = useSyncExternalStore(subscribeBlocked,
     () => pending && streamRelay.isBlocked(activeScope, part), () => false)
   hold.current = blocked
+  const presented = useRef(false)
+  useLayoutEffect(() => { if (!blocked && shown !== '') presented.current = true }, [blocked, shown])
+  const preserveRecoveryLayout = presented.current
+    && (recoveryEpoch !== undefined || streamRelay.recoveryEpoch(scope) !== undefined)
   const ownsLiveTail = live && !toolPresent && !node.data.blocks.some(block => block.kind === 'tool-call')
     && (groupPart !== 'reasoning' || node.data.blocks.at(-1)?.kind === 'reasoning')
   const typing = !toolHandoff && (ownsLiveTail || pending)
@@ -449,7 +460,7 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   }, [typing])
   return (
     <div ref={root}
-      style={blocked ? { opacity: 0, pointerEvents: 'none', height: 0, overflow: 'hidden' } : undefined}
+      style={blocked && !preserveRecoveryLayout ? { opacity: 0, pointerEvents: 'none', height: 0, overflow: 'hidden' } : undefined}
       data-smooth-stream-phase={blocked ? 'waiting' : typing ? 'typing' : 'settled'}
       data-smooth-stream-typing={!blocked && typing ? 'true' : undefined}>
       <FollowHost active={!blocked && typing && !reduced} speedCpsRef={speed} revealedCharsRef={revealed}

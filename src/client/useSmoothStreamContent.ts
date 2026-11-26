@@ -17,6 +17,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { DEFAULT_STREAM_DEBUG_TUNING, type StreamDebugTuning, type BackgroundRecovery } from '../settings.ts'
 import { debugRuntime } from './debugRuntime.ts'
 import { recoveryBudget, useBackgroundRecovery, type RecoveryPosition } from './backgroundRecovery.ts'
+import { streamRelay } from './streamRelay.ts'
 
 export type StreamSmoothingPreset = 'realtime' | 'balanced' | 'silky'
 
@@ -121,6 +122,7 @@ export function computeAdaptiveQueueStep(
   debt: number,
   revealScale = 1,
   tuning: StreamDebugTuning = DEFAULT_STREAM_DEBUG_TUNING,
+  retainDebt = false,
 ): AdaptiveQueueStep {
   if (backlog <= 0 || dtMs <= 0) return { revealChars: 0, debt: 0, speedCps: 0 }
   const speedCps = Math.min(
@@ -139,7 +141,7 @@ export function computeAdaptiveQueueStep(
   const accumulated = fractionalDebt + frameBudget
   const wholeBudget = Math.floor(accumulated)
   const revealChars = Math.min(backlog, maxClamp, wholeBudget)
-  return { revealChars, debt: revealChars >= backlog ? 0 : accumulated - wholeBudget, speedCps }
+  return { revealChars, debt: revealChars >= backlog && !retainDebt ? 0 : accumulated - wholeBudget, speedCps }
 }
 
 /** Counts user-perceived characters (code points), not UTF-16 units. */
@@ -275,6 +277,10 @@ export interface UseSmoothStreamContentOptions {
   recoveryPosition?: RecoveryPosition | undefined
   /** Latches large recovery backlogs until their pending text has drained. */
   onRecoveryBacklogChange?: ((pending: boolean) => void) | undefined
+  /** Recovery batch selected when this seat mounts during an existing recovery. */
+  initialRecoveryEpoch?: number | undefined
+  /** Ordered recovery generation: incoming text waits in the next frozen batch. */
+  onRecoveryBatchChange?: ((epoch: number | undefined) => void) | undefined
   /** Restore only a previously committed source prefix on renderer remount. */
   initialDisplayedContent?: string | undefined
   /** Apply the selected recovery policy to newly accumulated remount backlog. */
@@ -330,6 +336,8 @@ export function useSmoothStreamContent(
     recoveryKey,
     recoveryPosition,
     onRecoveryBacklogChange,
+    initialRecoveryEpoch,
+    onRecoveryBatchChange,
     initialDisplayedContent,
     resumeOnMount = false,
     skipRanges,
@@ -413,6 +421,26 @@ export function useSmoothStreamContent(
   const inputCompleteRef = useRef(inputComplete)
   inputCompleteRef.current = inputComplete
   const streamIdRef = useRef(`stream-${Math.random().toString(36).slice(2)}`)
+  // Two logical buffers share the authoritative source and one display cursor.
+  // The active end is immutable; everything beyond it belongs to the receiving
+  // buffer until the cursor reaches that end and the buffers exchange roles.
+  const recoveryBatchRef = useRef<{ end: number; epoch: number } | null>(null)
+  const initialRecoveryEpochRef = useRef(initialRecoveryEpoch)
+  const recoveryBatchCallbackRef = useRef(onRecoveryBatchChange)
+  recoveryBatchCallbackRef.current = onRecoveryBatchChange
+  const recoveryKeyRef = useRef(recoveryKey)
+  recoveryKeyRef.current = recoveryKey
+  const clearRecoveryBatch = useCallback(() => {
+    if (recoveryBatchRef.current === null) return
+    recoveryBatchRef.current = null
+    recoveryBatchCallbackRef.current?.(undefined)
+  }, [])
+  const freezeRecoveryBatch = useCallback((end: number, nextEpoch?: number) => {
+    const epoch = nextEpoch ?? initialRecoveryEpochRef.current ?? streamRelay.recoveryEpoch(recoveryKeyRef.current ?? '') ?? 0
+    initialRecoveryEpochRef.current = undefined
+    recoveryBatchRef.current = { end, epoch }
+    recoveryBatchCallbackRef.current?.(epoch)
+  }, [])
 
   useEffect(() => {
     holdBackRef.current = shouldHoldBack
@@ -439,12 +467,20 @@ export function useSmoothStreamContent(
 
   const startFrameLoopRef = useRef<() => void>(() => {})
   const recovery = useBackgroundRecovery(backgroundRecovery, () => {
+    clearRecoveryBatch()
     stopFrameLoop()
   }, () => {
-    queueDebtRef.current = 0
-    settleCpsRef.current = null
-    lastDrainCpsRef.current = 0
-    lastFrameTsRef.current = null
+    // A synchronization acknowledgement can wake an already playing batch.
+    // It must not move its frozen end or reset its fractional reveal budget.
+    if (recoveryBatchRef.current === null) {
+      queueDebtRef.current = 0
+      settleCpsRef.current = null
+      lastDrainCpsRef.current = 0
+      lastFrameTsRef.current = null
+      if (targetCountRef.current > displayedCountRef.current) {
+        freezeRecoveryBatch(targetCountRef.current)
+      }
+    }
     observeRecoveryBacklog(visibleBacklog(
       replacementPendingRef.current ? 0 : displayedCountRef.current,
       targetCountRef.current,
@@ -458,6 +494,7 @@ export function useSmoothStreamContent(
   const syncImmediate = useCallback(
     (nextContent: string) => {
       stopFrameLoop()
+      clearRecoveryBatch()
       replacementPendingRef.current = false
       const chars = [...nextContent]
       const now = performance.now()
@@ -479,7 +516,7 @@ export function useSmoothStreamContent(
       lastInputCountRef.current = chars.length
       reportRecoveryBacklog(false)
     },
-    [reportRecoveryBacklog, seedCps, stopFrameLoop],
+    [clearRecoveryBatch, reportRecoveryBacklog, seedCps, stopFrameLoop],
   )
 
   // Producer completion used to publish the accumulated source in one commit
@@ -511,7 +548,12 @@ export function useSmoothStreamContent(
         displayedCountRef.current = 0
         setDisplayedContent('')
       }
-      const targetCount = targetCountRef.current
+      const sourceCount = targetCountRef.current
+      const playback = recoveryRef.current
+      if (!playback.recovering()) clearRecoveryBatch()
+      if (playback.recovering() && playback.mode() !== 'latest' && recoveryBatchRef.current === null
+        && sourceCount > displayedCountRef.current) freezeRecoveryBatch(sourceCount)
+      const targetCount = Math.min(sourceCount, recoveryBatchRef.current?.end ?? sourceCount)
       let displayedCount = displayedCountRef.current
       // Skip only collapsed source ranges at the current ordered cursor. Visible
       // text before/after them still consumes its own normal reveal budget.
@@ -534,9 +576,31 @@ export function useSmoothStreamContent(
       // that has not been reached by the cursor yet is hidden, not pending, so
       // fast-forwarding it later must not be the thing that ends recovery.
       const drainBacklog = visibleBacklog(displayedCount, targetCount)
-      debugRuntime.recordDiagnostic('text-queue', { backlogChars: backlog, mode: 'assistant' })
+      debugRuntime.recordDiagnostic('text-queue', {
+        backlogChars: sourceCount - displayedCount,
+        activeBatchChars: recoveryBatchRef.current === null ? undefined : backlog,
+        incomingBatchChars: recoveryBatchRef.current === null ? undefined : sourceCount - targetCount,
+        recoveryEpoch: recoveryBatchRef.current?.epoch,
+        mode: 'assistant',
+      })
 
       if (drainBacklog <= 0) {
+        // Invisible ranges can exhaust A before its numeric cursor reaches its
+        // end. Keep later visible input in B instead of stopping the only RAF.
+        const batch = recoveryBatchRef.current
+        if (batch !== null && sourceCount > targetCount) {
+          if (visibleBacklog(displayedCount, sourceCount) > 0) {
+            freezeRecoveryBatch(sourceCount, batch.epoch + 1)
+            rafRef.current = requestAnimationFrame(tick)
+            return
+          }
+          // The receiving buffer contains only collapsed source. Adopt it
+          // without inventing an invisible playback batch.
+          displayedContentRef.current = targetContentRef.current
+          displayedCountRef.current = sourceCount
+          setDisplayedContent(targetContentRef.current)
+        }
+        clearRecoveryBatch()
         reportRecoveryBacklog(false)
         recoveryRef.current.finish()
         queueDebtRef.current = 0
@@ -559,11 +623,11 @@ export function useSmoothStreamContent(
       }
 
       const frameIntervalMs = Math.max(0, now - lastFrameTsRef.current)
-      const playback = recoveryRef.current
       debugRuntime.recordDiagnosticFrame(`${streamIdRef.current}:text`, now, performance.now() - frameStartedAt)
       playback.detectGap(frameIntervalMs)
       const recovering = playback.recovering()
-      if (playback.resumed()) observeRecoveryBacklog(drainBacklog)
+      if (recovering && playback.mode() !== 'latest' && recoveryBatchRef.current === null) freezeRecoveryBatch(sourceCount)
+      if (playback.resumed()) observeRecoveryBacklog(visibleBacklog(displayedCount, sourceCount))
       const recoveryMode = playback.mode()
       // A latest snapshot is still ordered behind its predecessor; only its
       // character animation is skipped, never the conversation relay.
@@ -586,13 +650,13 @@ export function useSmoothStreamContent(
       let revealSpeedCps: number
       let nextQueueDebt = 0
       if (recovering && recoveryMode === 'catch-up') {
-        const step = recoveryBudget(backlog, frameIntervalMs, queueDebtRef.current, debugTuning)
+        const step = recoveryBudget(backlog, frameIntervalMs, queueDebtRef.current, debugTuning, true)
         revealChars = step.chars
         nextQueueDebt = step.debt
         revealSpeedCps = revealChars * 1000 / Math.max(1, frameIntervalMs)
       } else if (recovering) {
         const step = computeAdaptiveQueueStep(backlog, Math.min(frameIntervalMs, 32), queueDebtRef.current,
-          revealScaleOutRef.current?.current ?? 1, debugTuning)
+          revealScaleOutRef.current?.current ?? 1, debugTuning, true)
         revealChars = step.revealChars
         revealSpeedCps = step.speedCps
         nextQueueDebt = step.debt
@@ -654,9 +718,9 @@ export function useSmoothStreamContent(
       }
 
       debugRuntime.reportStream(streamIdRef.current, {
-        backlog,
+        backlog: sourceCount - displayedCount,
         speedCps: revealSpeedCps,
-        targetChars: targetCount,
+        targetChars: sourceCount,
         displayedChars: displayedCount,
         active: !producerComplete,
       })
@@ -691,13 +755,17 @@ export function useSmoothStreamContent(
         displayedCountRef.current = targetCount
         setDisplayedContent(targetContentRef.current)
       }
-      if (visibleBacklog(displayedCountRef.current, targetCount) <= 0) reportRecoveryBacklog(false)
+      if (visibleBacklog(displayedCountRef.current, sourceCount) <= 0) reportRecoveryBacklog(false)
+      const batch = recoveryBatchRef.current
+      if (batch !== null && displayedCountRef.current >= batch.end && sourceCount > batch.end) {
+        freezeRecoveryBatch(sourceCount, batch.epoch + 1)
+      }
 
       rafRef.current = requestAnimationFrame(tick)
     }
 
     rafRef.current = requestAnimationFrame(tick)
-  }, [config, observeRecoveryBacklog, reportRecoveryBacklog, seedCps, stopFrameLoop, steadyCps, syncImmediate, visibleBacklog])
+  }, [clearRecoveryBatch, config, freezeRecoveryBatch, observeRecoveryBacklog, reportRecoveryBacklog, seedCps, stopFrameLoop, steadyCps, syncImmediate, visibleBacklog])
 
   // Run AFTER the commit's DOM mutations, before paint: the follower's
   // same-task correction hook.
@@ -717,6 +785,7 @@ export function useSmoothStreamContent(
     previousEnabledRef.current = enabled
     if (!enabled) {
       recoveryRef.current.cancel()
+      clearRecoveryBatch()
       // Only an unchanged target can finish draining an existing queue.
       if (content === targetContentRef.current && displayedCountRef.current < targetCountRef.current) {
         startFrameLoop()
@@ -739,6 +808,11 @@ export function useSmoothStreamContent(
         targetCharsRef.current = [...content]
         targetCountRef.current = targetCharsRef.current.length
         replacementPendingRef.current = true
+        if (recoveryBatchRef.current !== null) {
+          // A replacement invalidates the old source offsets, unlike append.
+          // Keep the epoch reservation but never replay its superseded suffix.
+          recoveryBatchRef.current.end = targetCountRef.current
+        }
         if (recoveryRef.current.resumed()) observeRecoveryBacklog(visibleBacklog(0, targetCountRef.current))
         startFrameLoop()
         return
@@ -754,7 +828,9 @@ export function useSmoothStreamContent(
     targetContentRef.current = content
     targetCharsRef.current.push(...appendedChars)
     targetCountRef.current += appendedCount
-    settleCpsRef.current = null
+    if (recoveryRef.current.recovering() && !recoveryRef.current.hidden() && backgroundRecovery !== 'latest'
+      && recoveryBatchRef.current === null) freezeRecoveryBatch(targetCountRef.current)
+    if (recoveryBatchRef.current === null) settleCpsRef.current = null
 
     const hadSample = lastInputTsRef.current > 0
     const deltaChars = targetCountRef.current - lastInputCountRef.current
@@ -779,7 +855,7 @@ export function useSmoothStreamContent(
       targetCountRef.current,
     ))
     startFrameLoop()
-  }, [content, enabled, replayOnEnable, config, observeRecoveryBacklog, startFrameLoop, syncImmediate, visibleBacklog])
+  }, [backgroundRecovery, clearRecoveryBatch, content, enabled, freezeRecoveryBatch, replayOnEnable, config, observeRecoveryBacklog, startFrameLoop, syncImmediate, visibleBacklog])
 
   useEffect(() => {
     if (enabled && skipRanges !== undefined) startFrameLoop()

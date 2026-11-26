@@ -8,6 +8,8 @@ export interface RelayScope {
   order: number
   /** Source event position of the currently pending block, when available. */
   sourceOrder?: number | undefined
+  /** Frozen recovery batch; lower epochs drain before later batches in this turn. */
+  recoveryEpoch?: number | undefined
 }
 export type RelayPart = 'reasoning' | 'response' | 'tool' | 'output'
 interface Lease {
@@ -16,6 +18,7 @@ interface Lease {
   node: string
   order: number
   sourceOrder?: number | undefined
+  recoveryEpoch?: number | undefined
   part: RelayPart
   active: boolean
 }
@@ -124,6 +127,11 @@ class StepActivity {
     }
   }
 
+  blocksOwnPart(scope: RelayScope, part: number): boolean {
+    const own = this.nodes.get(scope.node)
+    return own !== undefined && ((part >= 1 && own.counts[0] > 0) || (part >= 2 && own.counts[1] > 0))
+  }
+
   blocks(scope: RelayScope, part: number): boolean {
     const own = this.nodes.get(scope.node)
     if (own !== undefined && ((part >= 1 && own.counts[0] > 0) || (part >= 2 && own.counts[1] > 0))) return true
@@ -163,6 +171,15 @@ class TurnActivity {
     }
   }
 
+  blocksEarlierStep(scope: RelayScope): boolean {
+    const first = this.steps[0]
+    return first !== undefined && first < scope.step
+  }
+
+  blocksOwnPart(scope: RelayScope, part: RelayPart): boolean {
+    return this.byStep.get(scope.step)?.blocksOwnPart(scope, PART_ORDER[part]) ?? false
+  }
+
   blocks(scope: RelayScope, part: RelayPart): boolean {
     const first = this.steps[0]
     if (first === undefined || !(first <= scope.step)) return false
@@ -179,7 +196,7 @@ interface Subscription {
 /** Every mounted renderer owns a token; another viewport cannot release its work. */
 export class StreamRelay {
   private readonly leases = new Map<symbol, Lease>()
-  private readonly activeTurns = new Map<string, TurnActivity>()
+  private readonly activeTurns = new Map<string, Map<number | undefined, TurnActivity>>()
   private readonly tools = new Map<string, Map<number, number>>()
   private readonly blockedListeners = new Map<string, Set<Subscription>>()
   private readonly toolListeners = new Map<string, Map<number, Set<Subscription>>>()
@@ -191,7 +208,7 @@ export class StreamRelay {
 
   acquire(scope: RelayScope, part: RelayPart, active = true): symbol {
     const token = Symbol(part)
-    const lease = { turnKey: relayTurnKey(scope), step: scope.step, node: scope.node, order: scope.order, sourceOrder: scope.sourceOrder, part, active }
+    const lease = { turnKey: relayTurnKey(scope), step: scope.step, node: scope.node, order: scope.order, sourceOrder: scope.sourceOrder, recoveryEpoch: scope.recoveryEpoch, part, active }
     this.leases.set(token, lease)
     if (part === 'tool') this.changeTool(lease, 1)
     if (active) this.changeActive(lease, true)
@@ -216,8 +233,27 @@ export class StreamRelay {
     this.flushNotifications()
   }
 
+  /** Lowest mounted active recovery batch; new recovery seats join that batch. */
+  recoveryEpoch(scope: RelayScope | string): number | undefined {
+    const batches = this.activeTurns.get(typeof scope === 'string' ? scope : relayTurnKey(scope))
+    let earliest: number | undefined
+    if (batches !== undefined) for (const epoch of batches.keys()) {
+      if (epoch !== undefined && (earliest === undefined || epoch < earliest)) earliest = epoch
+    }
+    return earliest
+  }
+
   isBlocked(scope: RelayScope, part: RelayPart): boolean {
-    return this.activeTurns.get(relayTurnKey(scope))?.blocks(scope, part) ?? false
+    const batches = this.activeTurns.get(relayTurnKey(scope))
+    if (batches === undefined) return false
+    const earliest = this.recoveryEpoch(scope)
+    // Ordinary new input waits behind recovery. It cannot reclaim an earlier
+    // source position after its own frozen batches have already drained.
+    const ordinary = batches.get(undefined)
+    if (scope.recoveryEpoch !== undefined
+      && (ordinary?.blocksEarlierStep(scope) || ordinary?.blocksOwnPart(scope, part))) return true
+    if (earliest !== undefined && (scope.recoveryEpoch === undefined || earliest < scope.recoveryEpoch)) return true
+    return batches.get(scope.recoveryEpoch)?.blocks(scope, part) ?? false
   }
 
   hasTool(scope: RelayScope): boolean {
@@ -228,7 +264,7 @@ export class StreamRelay {
     const key = relayTurnKey(scope)
     const position = { ...scope }
     return this.subscribeTo(this.blockedListeners, key, listener,
-      () => this.activeTurns.get(key)?.blocks(position, part) ?? false)
+      () => this.isBlocked(position, part))
   }
 
   subscribeTool(scope: RelayScope, listener: Listener): () => void {
@@ -257,10 +293,13 @@ export class StreamRelay {
 
   private changeActive(lease: Lease, active: boolean): void {
     if (Number.isNaN(lease.step)) return
-    const turn = this.activeTurns.get(lease.turnKey) ?? new TurnActivity()
+    const batches = this.activeTurns.get(lease.turnKey) ?? new Map<number | undefined, TurnActivity>()
+    const turn = batches.get(lease.recoveryEpoch) ?? new TurnActivity()
     turn.change(lease, active)
-    if (turn.empty) this.activeTurns.delete(lease.turnKey)
-    else this.activeTurns.set(lease.turnKey, turn)
+    if (turn.empty) batches.delete(lease.recoveryEpoch)
+    else batches.set(lease.recoveryEpoch, turn)
+    if (batches.size === 0) this.activeTurns.delete(lease.turnKey)
+    else this.activeTurns.set(lease.turnKey, batches)
     this.enqueue(this.blockedListeners.get(lease.turnKey))
   }
 

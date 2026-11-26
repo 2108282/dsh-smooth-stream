@@ -252,10 +252,10 @@ export function useBackgroundRecovery(mode: BackgroundRecovery, onHidden: () => 
 }
 
 /** Per-frame fractional budget; the character cap is unchanged and long stalls never accrue whole-token debt. */
-export function recoveryBudget(backlog: number, elapsedMs: number, debt: number, tuning: StreamDebugTuning) {
+export function recoveryBudget(backlog: number, elapsedMs: number, debt: number, tuning: StreamDebugTuning, retainDebt = false) {
   if (backlog <= 0 || elapsedMs <= 0) return { chars: 0, debt: backlog <= 0 ? 0 : Math.max(0, debt) % 1 }
   const cps = Math.min(400, Math.max(120, tuning.maxRevealCps * tuning.revealScale * 1.5))
   const budget = cps * Math.min(elapsedMs, 80) / 1000 + Math.max(0, debt) % 1
   const chars = Math.min(backlog, RECOVERY_MAX_CHARS, Math.floor(budget))
-  return { chars, debt: chars >= backlog ? 0 : budget % 1 }
+  return { chars, debt: chars >= backlog && !retainDebt ? 0 : budget % 1 }
 }
