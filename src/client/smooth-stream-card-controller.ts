@@ -228,7 +228,7 @@ export class SmoothStreamCardController {
         if (saved) Object.assign(fallback, JSON.parse(saved))
       } catch {}
       this.loaded = {
-        version: '0.10.3',
+        version: '0.10.9',
         installation: 'development',
         writable: true,
         enabled: fallback.enabled,
