@@ -12,6 +12,45 @@ import { debugRuntime } from '../src/client/debugRuntime.ts'
 afterEach(() => { cleanup(); debugRuntime.resetRuntime(); localStorage.clear() })
 
 describe('live entry settings', () => {
+  it.each([undefined, true, false])('retains takeover while settings load (cached enabled: %s)', async cachedEnabled => {
+    if (cachedEnabled !== undefined) localStorage.setItem('dsh-smooth-stream:settings', JSON.stringify({
+      ...DEFAULT_STREAM_SETTINGS, enabled: cachedEnabled,
+    }))
+    let resolveSettings!: (value: unknown) => void
+    const settingsRead = new Promise(resolve => { resolveSettings = resolve })
+    const ctx = new Context()
+    await ctx.plugin(SlotRegistry).await()
+    ctx.provide('locale', new LocaleRuntime(ctx))
+    ctx.provide('connection', { rpc: { call: async (_channel: string, endpoint: string) => ({
+      ok: true,
+      value: endpoint === 'settings.read' ? await settingsRead : { debugEnabled: false, tuning: DEFAULT_STREAM_DEBUG_TUNING },
+    }) } } as never)
+    ctx.slots.register({ name: 'root', children: {
+      'settings.section': { kind: 'list', scope: 'root' },
+      'conversation.chat.node': { kind: 'keyed', scope: 'session' },
+    } } as never, () => null)
+    function OfficialTool() { return createElement('output', null, 'tool result') }
+    ctx.slots.register({ name: 'conversation.chat.node', key: 'tool-call' }, OfficialTool)
+    const fiber = ctx.plugin({ inject: [...inject], apply })
+    await fiber.await()
+    const entry = ctx.slots.entries('conversation.chat.node')[0]!
+    const props = { node: { data: { root: { kind: 'tool-result' } } } }
+    const view = render(createElement(entry.component as ComponentType<typeof props>, props))
+    try {
+      await act(async () => { await Promise.resolve() })
+      expect(view.getByText('tool result')).toBeTruthy()
+      expect(view.container.querySelector('[data-entrance]') !== null).toBe(cachedEnabled !== false)
+      await act(async () => {
+        resolveSettings({ ...DEFAULT_STREAM_SETTINGS, enabled: cachedEnabled ?? true,
+          installation: 'development', writable: true, version: '0.11.0', canUpgrade: false })
+        await settingsRead
+      })
+      expect(view.container.querySelector('[data-entrance]') !== null).toBe(cachedEnabled !== false)
+    } finally {
+      await act(async () => { await fiber.dispose() })
+    }
+  })
+
   it('changes preferences without remounting tool state and restores official output when disabled', async () => {
     const ctx = new Context()
     await ctx.plugin(SlotRegistry).await()

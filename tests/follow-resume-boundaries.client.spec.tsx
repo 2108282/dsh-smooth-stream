@@ -130,8 +130,8 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-describe('follow recovery boundary regressions', () => {
-  it('keeps the original follow intent across hide-show-hide before a measurable RAF', async () => {
+describe('follow ownership boundary regressions', () => {
+  it('keeps the ordinary owner while layout is temporarily unmeasured', async () => {
     const modelRef = { current: null as Model | null }
     const view = render(<Surface modelRef={modelRef} active />)
     const model = modelRef.current!
@@ -141,7 +141,7 @@ describe('follow recovery boundary regressions', () => {
     await lifecycle(true)
     model.measurable = false
     await lifecycle(false)
-    // Hide again before any resumed animation frame can establish new geometry.
+    // No measured frame has run yet; lifecycle events do not reset the owner.
     model.base += 120
     await lifecycle(true)
     model.base += 160

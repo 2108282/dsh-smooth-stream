@@ -12,6 +12,7 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionPlaybackFlow, SessionPlaybackNode, useSessionPlayback } from '../src/client/sessionPlaybackReact.tsx'
+import { installEntryBaselineSource, type EntryBaselineBinding, type EntryBaselineWindow } from '../src/client/entryBaseline.ts'
 import * as followHost from '../src/client/FollowHost.tsx'
 import type { SettingsSource } from '../src/client/flowPresentationAdapter.tsx'
 import { apply, inject } from '../src/client/index.ts'
@@ -30,6 +31,7 @@ type ProbeOwner = AssistantOwner & {
 let frames: Map<number, FrameRequestCallback>
 let timestamp: number
 let nextFrame: number
+const baselineDisposers: (() => void)[] = []
 
 beforeEach(() => {
   frames = new Map()
@@ -48,6 +50,7 @@ beforeEach(() => {
 afterEach(async () => {
   cleanup()
   await Promise.resolve()
+  for (const dispose of baselineDisposers.splice(0).reverse()) dispose()
   localStorage.clear()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
@@ -171,7 +174,7 @@ function assistant(key: string, text: string, options: {
         data: new Map([[STREAM_ORDER_DATA_KEY, {
           blockSeqs: new Map(blocks.map((_, index) => [wireIndices[index]!, options.seqs?.[index] ?? anchorSeq + index])),
           sealedBlocks: new Set((options.sealed ?? []).flatMap((sealed, index) => sealed ? [wireIndices[index]!] : [])),
-          blockIndices: wireIndices, attemptId: options.attempt ?? 'attempt:1',
+          blockIndices: wireIndices, attemptId: options.attempt ?? `${key}:attempt:1`,
           revision: { reason: 'start', seq: 1 }, settled: false, settledSeq: undefined,
         } satisfies StreamOrderData]]) },
     },
@@ -190,8 +193,68 @@ function entry(key: string, groupPart?: string): Entry {
 }
 
 /** Only the shipped Inner renderers are replaced; all admission, projection and clocks are real. */
-function fixture(options: { expanded?: boolean; strict?: boolean; ready?: boolean; markdown?: boolean; children?: boolean; settings?: Partial<StreamSettings> } = {}) {
+function fixture(options: { expanded?: boolean; strict?: boolean; ready?: boolean; markdown?: boolean; children?: boolean; cold?: boolean; settings?: Partial<StreamSettings> } = {}) {
   const source = cell(new Map<string, SourceNode>())
+  let sessionId = 'single-clock-session'
+  type WireEntry = EntryBaselineWindow['entries'][number]
+  const windows = new Map<string, {
+    session: ReturnType<typeof cell<{ openState: 'cold' | 'loading' | 'open' | 'error' }>>
+    eventSource: ReturnType<typeof cell<EntryBaselineWindow>>
+    nodes: readonly SourceNode[]
+    seats: readonly Entry[]
+  }>()
+  const windowFor = (id: string) => {
+    let value = windows.get(id)
+    if (value === undefined) {
+      value = { session: cell({ openState: options.cold ? 'cold' : 'open' }),
+        eventSource: cell<EntryBaselineWindow>({ entries: [], revision: 0, change: { kind: 'replace', entries: [] } }),
+        nodes: [], seats: [] }
+      windows.set(id, value)
+    }
+    return value
+  }
+  const sessions = { binding: (id: string): EntryBaselineBinding => windowFor(id) }
+  baselineDisposers.push(installEntryBaselineSource(sessions))
+  const wireEvents = (values: readonly SourceNode[], previous: readonly SourceNode[]): WireEntry[] => {
+    const events: WireEntry[] = []
+    const emit = (type: string, seq: number, data: unknown) => events.push({
+      type: type === 'assistant/live-chunk' ? 'transient' : 'event', event: { type, seq, data },
+    })
+    for (const node of values) {
+      const prior = previous.find(candidate => candidate.key === node.key)
+      if (node.kind !== 'assistant-step') {
+        if (prior === undefined) emit('tool/call', node.anchorSeq, node.data)
+        continue
+      }
+      if (node.location.kind !== 'step') continue
+      const order = node.location.step.data.get(STREAM_ORDER_DATA_KEY) as StreamOrderData | undefined
+      if (order?.attemptId === undefined) continue
+      const oldOrder = prior?.location.kind === 'step'
+        ? prior.location.step.data.get(STREAM_ORDER_DATA_KEY) as StreamOrderData | undefined : undefined
+      const assistantNode = node as AssistantOwner['node']
+      for (const [dense, block] of assistantNode.data.blocks.entries()) {
+        if (block.kind !== 'text' && block.kind !== 'reasoning') continue
+        const index = order.blockIndices[dense]!
+        const seq = order.blockSeqs.get(index)!
+        const oldDense = oldOrder?.attemptId === order.attemptId ? oldOrder.blockIndices.indexOf(index) ?? -1 : -1
+        const oldBlock = prior?.kind === 'assistant-step' && oldDense >= 0
+          ? (prior as AssistantOwner['node']).data.blocks[oldDense] : undefined
+        const oldText = oldBlock?.kind === block.kind ? oldBlock.text : undefined
+        const data = { turn: node.location.step.turn, step: node.location.step.step, attemptId: order.attemptId }
+        const chunk = (part: unknown, offset: number) => emit('assistant/live-chunk', seq + offset, { ...data, chunk: part })
+        if (oldText === undefined || !block.text.startsWith(oldText)) {
+          chunk({ type: 'block-start', index, blockType: block.kind }, 0)
+          chunk({ type: block.kind === 'text' ? 'text-delta' : 'reasoning-delta', index, text: block.text }, 0.0001)
+        } else if (oldText !== block.text) {
+          chunk({ type: block.kind === 'text' ? 'text-delta' : 'reasoning-delta', index, text: block.text.slice(oldText.length) }, 0.0001)
+        }
+        if (order.sealedBlocks.has(index) && (!oldOrder?.sealedBlocks.has(index) || oldText !== block.text)) {
+          chunk({ type: 'block-end', index, block: { type: block.kind, text: block.text } }, 0.0002)
+        }
+      }
+    }
+    return events.sort((a, b) => a.event.seq - b.event.seq)
+  }
   const groupSource = cell(new Map<string, Group>())
   let builder = { get: (key: string) => source.getSnapshot().get(key) }
   const chat = { nodes: builder }
@@ -283,7 +346,7 @@ function fixture(options: { expanded?: boolean; strict?: boolean; ready?: boolea
   const extras = { renderSlot: slot, renderFactorySlot: () => null, t,
     openFile: vi.fn(), forkAt: vi.fn(), loadImage: Object.assign(async () => '', { peek: () => undefined }) }
   function props(): ChatFlowSlotProps {
-    return { sessionId: 'single-clock-session', entries, useChatNode, useChatGroup, useChat, useGroupAction,
+    return { sessionId, entries, useChatNode, useChatGroup, useChat, useGroupAction,
       useGroupHeaderAction: () => {}, ...extras } as unknown as ChatFlowSlotProps
   }
   let FlowRenderer: ComponentType<ChatFlowSlotProps> | undefined
@@ -295,14 +358,50 @@ function fixture(options: { expanded?: boolean; strict?: boolean; ready?: boolea
     return options.strict ? createElement(StrictMode, null, flow) : flow
   }
   return {
-    tree, props, preferences, ready, seenNodes, seenFlows, mounts, slot, t, extras, FlowInner, NodeInner,
+    tree, props, preferences, ready, seenNodes, seenFlows, mounts, slot, t, extras, FlowInner, NodeInner, sessions,
     replaceBuilder() {
       builder = { get: (key: string) => source.getSnapshot().get(key) }
       chat.nodes = builder
     },
-    set(values: SourceNode[], nextEntries: readonly Entry[] = values.map(node => entry(node.key))) {
+    set(values: SourceNode[], nextEntries: readonly Entry[] = values.map(node => entry(node.key)),
+      kind: EntryBaselineWindow['change']['kind'] = 'append') {
+      const window = windowFor(sessionId)
+      const previous = window.eventSource.getSnapshot()
+      const additions = kind === 'replace' ? wireEvents(values, []) : wireEvents(values, window.nodes)
+      const next = kind === 'replace' ? additions : kind === 'prepend'
+        ? [...additions, ...previous.entries] : [...previous.entries, ...additions]
+      window.nodes = values
+      window.seats = nextEntries
+      window.eventSource.set({ entries: next, revision: previous.revision + 1,
+        change: { kind, entries: kind === 'settle-assistant' ? [] : additions } })
       entries = nextEntries
       source.set(new Map(values.map(node => [node.key, node])))
+    },
+    retire(attemptId: string, node: SourceNode, values: SourceNode[] = [node]) {
+      if (node.kind !== 'assistant-step') throw new Error('expected durable Assistant')
+      const assistantNode = node as AssistantOwner['node']
+      const window = windowFor(sessionId)
+      const previous = window.eventSource.getSnapshot()
+      const order = node.location.kind === 'step' ? node.location.step.data.get(STREAM_ORDER_DATA_KEY) as StreamOrderData | undefined : undefined
+      const durable: WireEntry = { type: 'event', event: { type: 'assistant/message', surfaceOp: 'append',
+        seq: order?.settledSeq ?? node.anchorSeq,
+        data: { turn: assistantNode.data.turn, step: assistantNode.data.step, message: { content: assistantNode.data.blocks.map(block => ({
+          type: block.kind, ...('text' in block ? { text: block.text } : {}),
+        })) } } } }
+      const retained = previous.entries.filter(entry => (entry.event.data as { attemptId?: string }).attemptId !== attemptId)
+      window.eventSource.set({ entries: [...retained, durable], revision: previous.revision + 1,
+        change: { kind: 'settle-assistant', attemptId, entry: durable } })
+      window.nodes = values
+      window.seats = values.map(value => entry(value.key))
+      entries = window.seats
+      source.set(new Map(values.map(value => [value.key, value])))
+    },
+    open() { windowFor(sessionId).session.set({ openState: 'open' }) },
+    switchSession(id: string) {
+      sessionId = id
+      const window = windowFor(id)
+      entries = window.seats
+      source.set(new Map(window.nodes.map(node => [node.key, node])))
     },
     group(key: string, members: (string | { key: string; groupPart: string })[]) {
       groupSource.set(new Map([[key, { key, data: { closed: false }, members: members.map(value => ({ kind: 'node', ...(typeof value === 'string' ? { key: value } : value) })) } as unknown as Group]]))
@@ -353,7 +452,6 @@ describe('session playback injected into the official flow and keyed renderers',
     expect(view.getByText('loading')).toBeTruthy()
     await act(async () => { await Promise.resolve() })
     playback.upsert('lifetime-check', [{ id: 'lifetime-check', order: [1], text: 'still alive', sealed: true }], false)
-    playback.resume()
     playback.setEnabled(false)
     await act(async () => { await Promise.resolve() })
     expect(playback.read('lifetime-check').text).toBe('still alive')
@@ -562,7 +660,7 @@ describe('session playback injected into the official flow and keyed renderers',
     expect(before.length).toBeGreaterThan(0)
     expect(before.length).toBeLessThan('live answer '.repeat(50).length)
     await act(async () => {
-      f.set([assistant('assistant:-1', 'older page', { closed: true }), history, live])
+      f.set([assistant('assistant:-1', 'older page', { closed: true }), history, live], undefined, 'prepend')
       view.rerender(f.tree())
     })
     expect(text(view.container, 'assistant:-1')).toBe('older page')
@@ -660,104 +758,51 @@ describe('session playback injected into the official flow and keyed renderers',
     expect(row(view.container, 'assistant:1')?.querySelector('[data-block="1"]')?.hasAttribute('hidden')).toBe(false)
   })
 
-  it.each(['replay', 'catch-up', 'latest'] as const)('suspends background presentation and applies a finite %s recovery frontier', async mode => {
-    const f = fixture({ settings: { backgroundRecovery: mode, logarithmicFade: false,
+  it.each(['visibility', 'native'] as const)('keeps the ordinary queue moving across %s events and bounds a long frame gap', async channel => {
+    const f = fixture({ settings: { logarithmicFade: false,
       debugTuningEnabled: true, debugTuning: { ...DEFAULT_STREAM_SETTINGS.debugTuning,
         revealScale: 1, maxRevealCps: 600, cadenceClamp: 4, queuePressure: 0.85 } } })
     const view = render(f.tree())
-    const answer = 'before background '.repeat(12)
+    const answer = 'ordinary queue before background events '.repeat(20)
     const publish = async (value: string, sealed = false) => act(async () => {
       f.set([assistant('assistant:1', value, { status: 'running', sealed: [sealed] }), tool('tool:1')])
       view.rerender(f.tree())
+    })
+    const visibility = vi.spyOn(document, 'visibilityState', 'get')
+    const signal = async (hidden: boolean) => act(async () => {
+      if (channel === 'visibility') {
+        visibility.mockReturnValue(hidden ? 'hidden' : 'visible')
+        document.dispatchEvent(new Event('visibilitychange'))
+      } else window.dispatchEvent(new Event(hidden ? 'dsha:background' : 'dsha:foreground'))
     })
     await publish(answer)
     await paint(5)
     const prefix = text(view.container, 'assistant:1')!
     expect(prefix.length).toBeGreaterThan(0)
     expect(prefix.length).toBeLessThan(answer.length)
-    await act(async () => { window.dispatchEvent(new Event('dsha:background')) })
-    expect(text(view.container, 'assistant:1')).toBe(prefix)
-    const backlog = `${answer} accepted while hidden `.repeat(2)
+    await signal(true)
+    const backlog = `${answer}${' appended through the same live source '.repeat(12)}`
     await publish(backlog)
-    await paint(30)
     expect(text(view.container, 'assistant:1')).toBe(prefix)
+    await paint(12)
+    const hiddenProgress = text(view.container, 'assistant:1')!
+    expect(hiddenProgress.startsWith(prefix)).toBe(true)
+    expect(hiddenProgress.length).toBeGreaterThan(prefix.length)
+    expect(hiddenProgress.length).toBeLessThan(backlog.length)
     expect(row(view.container, 'tool:1')).toBeNull()
-    await act(async () => { window.dispatchEvent(new Event('dsha:foreground')) })
-    expect(text(view.container, 'assistant:1')).toBe(mode === 'latest' ? backlog : prefix)
-    const latest = `${backlog} new live suffix `.repeat(2)
-    await publish(latest)
-    expect(text(view.container, 'assistant:1')).toBe(mode === 'latest' ? backlog : prefix)
-    let previous = text(view.container, 'assistant:1')!.length
-    let accelerated = false
-    await until(() => text(view.container, 'assistant:1')!.length >= backlog.length, () => {
-      const current = text(view.container, 'assistant:1')!.length
-      const growth = current - previous
-      expect(growth).toBeGreaterThanOrEqual(0)
-      expect(growth).toBeLessThanOrEqual(mode === 'catch-up' ? 16 : 4)
-      accelerated ||= growth > 4
-      if (mode === 'catch-up') expect(current).toBeLessThanOrEqual(backlog.length)
-      expect(row(view.container, 'tool:1')).toBeNull()
-      previous = current
-    })
-    if (mode === 'catch-up') expect(accelerated).toBe(true)
-    if (mode !== 'replay') expect(text(view.container, 'assistant:1')).toBe(backlog)
-    previous = text(view.container, 'assistant:1')!.length
-    for (let index = 0; index < 8; index++) {
-      await paint()
-      const current = text(view.container, 'assistant:1')!.length
-      expect(current - previous).toBeLessThanOrEqual(4)
-      expect(current).toBeLessThan(latest.length)
-      previous = current
-    }
-    await until(() => text(view.container, 'assistant:1') === latest)
+    await signal(false)
+    expect(text(view.container, 'assistant:1')).toBe(hiddenProgress)
+    timestamp += 60_000
+    await paint()
+    const afterGap = text(view.container, 'assistant:1')!
+    expect(afterGap.startsWith(hiddenProgress)).toBe(true)
+    expect(afterGap.length - hiddenProgress.length).toBeGreaterThan(0)
+    expect(afterGap.length - hiddenProgress.length).toBeLessThanOrEqual(4)
+    expect(afterGap.length).toBeLessThan(backlog.length)
+    await until(() => text(view.container, 'assistant:1') === backlog)
     expect(row(view.container, 'tool:1')).toBeNull()
-    await publish(latest, true)
+    await publish(backlog, true)
     await until(() => row(view.container, 'tool:1') !== null)
-  })
-
-  it.each(['replay', 'catch-up', 'latest'] as const)('retains a suspended live prefix when a baseline replaces the builder before %s recovery', async mode => {
-    const f = fixture({ settings: { backgroundRecovery: mode, logarithmicFade: false,
-      debugTuningEnabled: true, debugTuning: { ...DEFAULT_STREAM_SETTINGS.debugTuning,
-        revealScale: 1, maxRevealCps: 600, cadenceClamp: 4, queuePressure: 0.85 } } })
-    const view = render(f.tree())
-    const initial = 'live before baseline replacement '.repeat(8)
-    await act(async () => {
-      f.set([assistant('assistant:1', initial, { status: 'running', sealed: [false] })])
-      view.rerender(f.tree())
-    })
-    await paint(8)
-    const prefix = text(view.container, 'assistant:1')!
-    expect(prefix.length).toBeGreaterThan(0)
-    expect(prefix.length).toBeLessThan(initial.length)
-    await act(async () => { window.dispatchEvent(new Event('dsha:background')) })
-    const baseline = `${initial}${' settled while the app was hidden '.repeat(12)}`
-    await act(async () => {
-      f.set([assistant('assistant:1', baseline, { status: 'settled', sealed: [true] }), tool('tool:1')])
-      f.replaceBuilder()
-      view.rerender(f.tree())
-    })
-    expect(text(view.container, 'assistant:1')).toBe(prefix)
-    expect(row(view.container, 'tool:1')).toBeNull()
-    await paint(30)
-    expect(text(view.container, 'assistant:1')).toBe(prefix)
-    expect(row(view.container, 'tool:1')).toBeNull()
-    await act(async () => { window.dispatchEvent(new Event('dsha:foreground')) })
-    expect(text(view.container, 'assistant:1')).toBe(mode === 'latest' ? baseline : prefix)
-    if (mode !== 'latest') expect(row(view.container, 'tool:1')).toBeNull()
-    let previous = text(view.container, 'assistant:1')!.length
-    let accelerated = false
-    await until(() => text(view.container, 'assistant:1') === baseline, () => {
-      const current = text(view.container, 'assistant:1')!
-      const growth = current.length - previous
-      expect(current.startsWith(prefix)).toBe(true)
-      expect(growth).toBeGreaterThanOrEqual(0)
-      expect(growth).toBeLessThanOrEqual(mode === 'catch-up' ? 16 : 4)
-      accelerated ||= growth > 4
-      if (current !== baseline) expect(row(view.container, 'tool:1')).toBeNull()
-      previous = current.length
-    })
-    if (mode === 'catch-up') expect(accelerated).toBe(true)
-    expect(row(view.container, 'tool:1')?.textContent).toBe('complete tool:1official action')
   })
 
   it('interleaves two text blocks from the same assistant with the tool protocol event between them', async () => {
@@ -885,8 +930,8 @@ describe('session playback injected into the official flow and keyed renderers',
     expect(text(view.container, 'assistant:1')!.length).toBeLessThan(reasoning.length)
   })
 
-  it('keeps automatically opened reasoning folded after recovery until a manual expansion survives later chunks', async () => {
-    const f = fixture({ expanded: false, settings: { thinkAutoExpand: true, backgroundRecovery: 'catch-up', logarithmicFade: false } })
+  it('keeps automatically opened reasoning and its progress unchanged by background signals', async () => {
+    const f = fixture({ expanded: false, settings: { thinkAutoExpand: true, logarithmicFade: false } })
     const view = render(f.tree())
     const reasoning = 'automatically opened running reasoning '.repeat(80)
     const publish = async (value: string) => act(async () => {
@@ -896,30 +941,26 @@ describe('session playback injected into the official flow and keyed renderers',
     const output = () => row(view.container, 'assistant:1')?.querySelector('[data-block="0"]')
     await publish(reasoning)
     await paint(8)
+    const prefix = text(view.container, 'assistant:1')!
     expect(output()?.hasAttribute('hidden')).toBe(false)
-    expect(text(view.container, 'assistant:1')!.length).toBeGreaterThan(0)
-    expect(text(view.container, 'assistant:1')!.length).toBeLessThan(reasoning.length)
     await act(async () => { window.dispatchEvent(new Event('dsha:background')) })
-    const receivedWhileHidden = `${reasoning} received while the app was hidden`
-    await publish(receivedWhileHidden)
-    await paint(8)
-    await act(async () => { window.dispatchEvent(new Event('dsha:foreground')) })
-    await paint(8)
-    expect(output()?.hasAttribute('hidden')).toBe(true)
-    await paint(12)
-    expect(output()?.hasAttribute('hidden')).toBe(true)
-    fireEvent.click(view.getByRole('button', { name: 'toggle assistant:1' }))
-    expect(output()?.hasAttribute('hidden')).toBe(false)
-    expect(text(view.container, 'assistant:1')).toBe(receivedWhileHidden)
-    const latest = `${receivedWhileHidden}${' manual expansion should stay open '.repeat(20)}`
+    const latest = `${reasoning}${' subsequent source chunks keep normal playback '.repeat(20)}`
     await publish(latest)
-    expect(output()?.hasAttribute('hidden')).toBe(false)
+    expect(text(view.container, 'assistant:1')).toBe(prefix)
     await paint(8)
+    const progressed = text(view.container, 'assistant:1')!
+    expect(progressed.startsWith(prefix)).toBe(true)
+    expect(progressed.length).toBeGreaterThan(prefix.length)
+    await act(async () => { window.dispatchEvent(new Event('dsha:foreground')) })
     expect(output()?.hasAttribute('hidden')).toBe(false)
-    expect(text(view.container, 'assistant:1')!.startsWith(receivedWhileHidden)).toBe(true)
-    await until(() => text(view.container, 'assistant:1') === latest, () => {
+    expect(text(view.container, 'assistant:1')).toBe(progressed)
+    for (let index = 0; index < 12; index++) {
+      await paint()
       expect(output()?.hasAttribute('hidden')).toBe(false)
-    })
+      expect(text(view.container, 'assistant:1')!.startsWith(progressed)).toBe(true)
+    }
+    expect(text(view.container, 'assistant:1')!.length).toBeGreaterThan(progressed.length)
+    expect(text(view.container, 'assistant:1')!.length).toBeLessThan(latest.length)
   })
 
   it('preserves reveal progress when a sparse wire block moves to a different dense renderer index', async () => {
@@ -949,26 +990,111 @@ describe('session playback injected into the official flow and keyed renderers',
     expect(text(view.container, 'assistant:1', 1)!.length).toBeLessThan(answer.length)
   })
 
-  it('treats an initially mounted running assistant as a live barrier ahead of later tools', async () => {
-    const f = fixture()
+  it('shows an initially mounted running prefix and existing tools immediately, then paces only appended text', async () => {
+    const f = fixture({ settings: { logarithmicFade: false } })
     const history = assistant('assistant:0', 'existing closed history', { closed: true })
-    const answer = 'initial live assistant '.repeat(24)
-    f.set([history, assistant('assistant:1', answer, { status: 'running' }), tool('tool:1')])
+    const answer = 'initial running prefix '.repeat(24)
+    const initial = assistant('assistant:1', answer, { status: 'running' })
+    f.set([history, initial, tool('tool:1')])
     const view = render(f.tree())
-    await paint(5)
+    // The shared source ledger publishes in a microtask, before any animation frame.
+    await act(async () => {})
     expect(text(view.container, 'assistant:0')).toBe('existing closed history')
-    const prefix = text(view.container, 'assistant:1')!
-    expect(prefix.length).toBeGreaterThan(0)
-    expect(prefix.length).toBeLessThan(answer.length)
-    expect(row(view.container, 'tool:1')).toBeNull()
-    await until(() => text(view.container, 'assistant:1') === answer)
-    await paint(20)
-    expect(row(view.container, 'tool:1')).toBeNull()
+    expect(text(view.container, 'assistant:1')).toBe(answer)
+    expect(row(view.container, 'tool:1')).not.toBeNull()
+    await paint(5)
+    expect(text(view.container, 'assistant:1')).toBe(answer)
+    const latest = `${answer}${'new live suffix '.repeat(30)}`
     await act(async () => {
-      f.set([history, assistant('assistant:1', answer, { status: 'running', sealed: [true] }), tool('tool:1')])
+      f.set([history, assistant('assistant:1', latest, { status: 'running' }), tool('tool:1'), tool('tool:2')])
       view.rerender(f.tree())
     })
-    await until(() => row(view.container, 'tool:1') !== null)
+    expect(text(view.container, 'assistant:1')).toBe(answer)
+    expect(row(view.container, 'tool:1')).not.toBeNull()
+    expect(row(view.container, 'tool:2')).toBeNull()
+    await paint(8)
+    const prefix = text(view.container, 'assistant:1')!
+    expect(prefix.startsWith(answer)).toBe(true)
+    expect(prefix.length).toBeGreaterThan(answer.length)
+    expect(prefix.length).toBeLessThan(latest.length)
+    await until(() => text(view.container, 'assistant:1') === latest)
+    expect(row(view.container, 'tool:2')).toBeNull()
+    await act(async () => {
+      f.set([history, assistant('assistant:1', latest, { status: 'running', sealed: [true] }), tool('tool:1'), tool('tool:2')])
+      view.rerender(f.tree())
+    })
+    await until(() => row(view.container, 'tool:2') !== null)
+  })
+
+  it('adopts a first cold history replacement that arrives after an empty mount, including running text and tools', async () => {
+    const f = fixture({ cold: true, settings: { logarithmicFade: false } })
+    const view = render(f.tree())
+    expect(view.container.querySelector('[data-node]')).toBeNull()
+    const existing = 'running history received after entry '.repeat(24)
+    await act(async () => {
+      f.set([assistant('assistant:1', existing, { status: 'running' }), tool('tool:1')], undefined, 'replace')
+      f.open()
+      view.rerender(f.tree())
+    })
+    expect(text(view.container, 'assistant:1')).toBe(existing)
+    expect(row(view.container, 'tool:1')).not.toBeNull()
+    await paint(8)
+    expect(text(view.container, 'assistant:1')).toBe(existing)
+    const latest = `${existing}${' live after cold load '.repeat(20)}`
+    await act(async () => {
+      f.set([assistant('assistant:1', latest, { status: 'running' }), tool('tool:1')])
+      view.rerender(f.tree())
+    })
+    expect(text(view.container, 'assistant:1')).toBe(existing)
+    await paint(8)
+    expect(text(view.container, 'assistant:1')!.startsWith(existing)).toBe(true)
+    expect(text(view.container, 'assistant:1')!.length).toBeGreaterThan(existing.length)
+    expect(text(view.container, 'assistant:1')!.length).toBeLessThan(latest.length)
+  })
+
+  it('keeps a live suffix animated when the first cold baseline and append share one React commit', async () => {
+    const f = fixture({ cold: true, settings: { logarithmicFade: false } })
+    const view = render(f.tree())
+    const baseline = 'baseline prefix before the same React commit '
+    const latest = `${baseline}${'live suffix received before rendering '.repeat(30)}`
+    await act(async () => {
+      f.set([assistant('assistant:1', baseline, { status: 'running' }), tool('tool:1')], undefined, 'replace')
+      f.open()
+      f.set([assistant('assistant:1', latest, { status: 'running' }), tool('tool:1'), tool('tool:2')])
+      view.rerender(f.tree())
+    })
+    expect(text(view.container, 'assistant:1')).toBe(baseline)
+    expect(row(view.container, 'tool:1')).not.toBeNull()
+    expect(row(view.container, 'tool:2')).toBeNull()
+    await paint(8)
+    const prefix = text(view.container, 'assistant:1')!
+    expect(prefix.startsWith(baseline)).toBe(true)
+    expect(prefix.length).toBeGreaterThan(baseline.length)
+    expect(prefix.length).toBeLessThan(latest.length)
+  })
+
+  it('captures a fresh baseline when leaving A for B and returning to A', async () => {
+    const f = fixture({ settings: { logarithmicFade: false } })
+    const view = render(f.tree())
+    const answer = 'session A queued before departure '.repeat(40)
+    await act(async () => { f.set([assistant('assistant:1', answer, { status: 'running' })]); view.rerender(f.tree()) })
+    await paint(8)
+    expect(text(view.container, 'assistant:1')!.length).toBeLessThan(answer.length)
+    await act(async () => {
+      f.switchSession('session-B')
+      f.set([assistant('assistant:2', 'session B existing output', { status: 'running' }), tool('tool:2')], undefined, 'replace')
+      view.rerender(f.tree())
+    })
+    expect(text(view.container, 'assistant:2')).toBe('session B existing output')
+    expect(row(view.container, 'tool:2')).not.toBeNull()
+    await act(async () => { f.switchSession('single-clock-session'); view.rerender(f.tree()) })
+    expect(text(view.container, 'assistant:1')).toBe(answer)
+    const latest = `${answer}${' resumed A live suffix '.repeat(20)}`
+    await act(async () => { f.set([assistant('assistant:1', latest, { status: 'running' })]); view.rerender(f.tree()) })
+    expect(text(view.container, 'assistant:1')).toBe(answer)
+    await paint(8)
+    expect(text(view.container, 'assistant:1')!.length).toBeGreaterThan(answer.length)
+    expect(text(view.container, 'assistant:1')!.length).toBeLessThan(latest.length)
   })
 
   it.each(['complete', 'prefix'] as const)('preserves %s playback through actual official attempt retirement and durable settlement', async progress => {
@@ -994,7 +1120,7 @@ describe('session playback injected into the official flow and keyed renderers',
       expect(durable.key).toBe(live.key)
       expect(durable.kind).toBe('assistant-step')
       expect((durable as AssistantOwner['node']).data.status).toBe('settled')
-      f.set([durable, tool('tool:1')])
+      f.set([durable, tool('tool:1')], undefined, 'settle-assistant')
       view.rerender(f.tree())
     })
     expect(text(view.container, live.key)).toBe(before)
@@ -1014,6 +1140,58 @@ describe('session playback injected into the official flow and keyed renderers',
     if (progress === 'prefix') expect(previous).toBeGreaterThan(before.length)
     await until(() => text(view.container, live.key) === answer)
     expect(row(view.container, 'tool:1')).not.toBeNull()
+  })
+
+  it('paces an actual official attempt retired before React ever publishes its live node', async () => {
+    const f = fixture({ settings: { logarithmicFade: false } })
+    const view = render(f.tree())
+    const answer = 'official coalesced retirement '.repeat(30)
+    const official = retiringAssistant(answer)
+    let key = ''
+    await act(async () => {
+      const live = official.node()
+      key = live.key
+      f.set([live])
+      const durable = official.settle()
+      f.retire('retiring-attempt', durable)
+      view.rerender(f.tree())
+    })
+    expect(text(view.container, key) ?? '').toBe('')
+    await paint(8)
+    expect(text(view.container, key)!.length).toBeGreaterThan(0)
+    expect(text(view.container, key)!.length).toBeLessThan(answer.length)
+    await until(() => text(view.container, key) === answer)
+  })
+
+  it.each([false, true])('preserves a live suffix retired before its first React publication (existing prefix: %s)', async existing => {
+    const f = fixture({ settings: { logarithmicFade: false } })
+    const answer = 'coalesced official retirement '.repeat(30)
+    const initial = existing ? 'already visible prefix ' : ''
+    const live = assistant('assistant:1', initial, { status: 'running', wireIndices: [8], seqs: [100], attempt: 'coalesced' })
+    if (existing) f.set([live])
+    const view = render(f.tree())
+    await act(async () => {})
+    if (existing) expect(text(view.container, live.key)).toBe(initial)
+    const final = `${initial}${answer}`
+    await act(async () => {
+      const running = assistant(live.key, final, { status: 'running', wireIndices: [8], seqs: [100], attempt: 'coalesced' }) as AssistantOwner['node']
+      f.set([running])
+      const durable = { ...running, data: { ...running.data, status: 'settled' }, location: {
+        ...running.location, step: { ...(running.location as any).step, data: new Map([[STREAM_ORDER_DATA_KEY, {
+          blockSeqs: new Map(), sealedBlocks: new Set(), blockIndices: [undefined], attemptId: undefined,
+          revision: { reason: 'settlement', seq: 200 }, settled: true, settledSeq: 200,
+        }]]) },
+      } } as SourceNode
+      f.retire('coalesced', durable)
+      view.rerender(f.tree())
+    })
+    expect(text(view.container, live.key) ?? '').toBe(initial)
+    await paint(8)
+    const displayed = text(view.container, live.key)!
+    expect(displayed.startsWith(initial)).toBe(true)
+    expect(displayed.length).toBeGreaterThan(initial.length)
+    expect(displayed.length).toBeLessThan(final.length)
+    await until(() => text(view.container, live.key) === final)
   })
 
   it('restarts a same-prefix retry instead of carrying progress across attempt identities', async () => {
@@ -1057,7 +1235,7 @@ describe('session playback injected into the official flow and keyed renderers',
       f.set([assistant('assistant:-1', '', { closed: true, status: 'interrupted', terminalReason: 'interrupted', blocks: [
         { kind: 'reasoning', text: 'older interrupted reasoning' },
       ] }), assistant('assistant:0', 'cancelled old history updated', { closed: true, status: 'interrupted', terminalReason: 'error' }),
-      live, tool('tool:1')])
+      live, tool('tool:1')], undefined, 'prepend')
       view.rerender(f.tree())
     })
     expect(text(view.container, 'assistant:-1')).toBe('older interrupted reasoning')
@@ -1307,7 +1485,7 @@ describe('session playback injected into the official flow and keyed renderers',
     await until(() => row(view.container, 'tool:1') !== null)
   })
 
-  it.each(['acknowledged', 'latest-recovery'] as const)('keeps atomic entrance gated until %s without reviving a retired entrance', async completion => {
+  it('keeps atomic entrance gated until acknowledgement without reviving a retired entrance', async () => {
     type HostProps = Parameters<typeof followHost.FollowHost>[0]
     const gates = new Map<string, HostProps>()
     // This tests the real playback-to-FollowHost acknowledgement contract. The
@@ -1326,7 +1504,7 @@ describe('session playback injected into the official flow and keyed renderers',
     port.setAttribute('data-conversation-scroll', '')
     Object.defineProperty(port, 'clientHeight', { configurable: true, value: 500 })
     document.body.appendChild(port)
-    const f = fixture({ settings: { controlScroll: true, logarithmicFade: false, backgroundRecovery: 'latest' } })
+    const f = fixture({ settings: { controlScroll: true, logarithmicFade: false } })
     const view = render(f.tree(), { container: port })
     try {
       const answer = 'text after both native cards finish entering '.repeat(20)
@@ -1342,25 +1520,13 @@ describe('session playback injected into the official flow and keyed renderers',
       expect(row(view.container, 'tool:2')).toBeNull()
       expect(row(view.container, 'assistant:3')).toBeNull()
       const firstFinished = gates.get('tool:1')!.onEntranceSettled!
-      if (completion === 'latest-recovery') {
-        await act(async () => { window.dispatchEvent(new Event('dsha:background')) })
-        expect(gates.get('tool:1')?.entrance).toBe(false)
-        await paint(12)
-        expect(row(view.container, 'tool:2')).toBeNull()
-        expect(row(view.container, 'assistant:3')).toBeNull()
-        await act(async () => { window.dispatchEvent(new Event('dsha:foreground')) })
-        await paint(8)
-        expect(row(view.container, 'tool:2')).not.toBeNull()
-        expect(text(view.container, 'assistant:3')).toBe(answer)
-        expect(gates.get('tool:1')?.entrance).toBe(false)
-        expect(gates.get('tool:2')?.entrance).toBe(false)
-        await act(async () => { firstFinished() })
-        await paint(12)
-        expect(text(view.container, 'assistant:3')).toBe(answer)
-        expect(gates.get('tool:1')?.entrance).toBe(false)
-        expect(gates.get('tool:2')?.entrance).toBe(false)
-        return
-      }
+      await act(async () => { window.dispatchEvent(new Event('dsha:background')) })
+      await paint(12)
+      expect(gates.get('tool:1')?.entrance).toBe(true)
+      expect(row(view.container, 'tool:2')).toBeNull()
+      await act(async () => { window.dispatchEvent(new Event('dsha:foreground')) })
+      expect(gates.get('tool:1')?.entrance).toBe(true)
+      expect(row(view.container, 'assistant:3')).toBeNull()
       await act(async () => { firstFinished() })
       expect(row(view.container, 'tool:2')).not.toBeNull()
       expect(gates.get('tool:2')?.entrance).toBe(true)
@@ -1397,6 +1563,7 @@ describe('session playback injected into the official flow and keyed renderers',
     const node = ctx.slots.entries('conversation.chat.node')[0]!
     const flowOptions = flow.options
     const nodeOptions = node.options
+    ctx.provide('sessions', f.sessions as never)
     const plugin = ctx.plugin({ inject: [...inject], apply })
     try {
       await plugin.await()

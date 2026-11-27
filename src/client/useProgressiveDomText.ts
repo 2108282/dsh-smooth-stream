@@ -10,11 +10,8 @@
 
 import { useLayoutEffect, useRef, type RefObject } from 'react'
 import { computeAdaptiveQueueStep } from './useSmoothStreamContent.ts'
-import type { BackgroundRecovery } from '../settings.ts'
-import { recoveryBudget, useBackgroundRecovery, type RecoveryPosition } from './backgroundRecovery.ts'
 import { debugRuntime } from './debugRuntime.ts'
 import { createEllipsisTailProbe } from './ellipsisTail.ts'
-import { streamRelay } from './streamRelay.ts'
 
 interface TextRevealRecord {
   chars: readonly string[]
@@ -110,24 +107,13 @@ export function useProgressiveDomText(
   onSettled?: (() => void) | undefined,
   onPendingChange?: ((pending: boolean) => void) | undefined,
   paused = false,
-  backgroundRecovery: BackgroundRecovery = 'catch-up',
-  recoveryKey?: string,
-  recoveryPosition?: RecoveryPosition,
   observeChanges = enabled,
-  onRecoveryBatchChange?: ((epoch: number | undefined) => void) | undefined,
-  initialRecoveryEpoch?: number,
 ): void {
-  const callbacks = useRef({ onSettled, onPendingChange, onRecoveryBatchChange })
-  callbacks.current = { onSettled, onPendingChange, onRecoveryBatchChange }
+  const callbacks = useRef({ onSettled, onPendingChange })
+  callbacks.current = { onSettled, onPendingChange }
   const pausedRef = useRef(paused)
   pausedRef.current = paused
-  const resume = useRef<(() => void) | null>(null)
   const wake = useRef<(() => void) | null>(null)
-  const suspend = useRef<(() => void) | null>(null)
-  const recovery = useBackgroundRecovery(backgroundRecovery, () => suspend.current?.(), () => resume.current?.(),
-    recoveryKey, recoveryPosition, false, enabled || observeChanges)
-  const recoveryRef = useRef(recovery)
-  recoveryRef.current = recovery
   useLayoutEffect(() => { if (!paused) wake.current?.() }, [paused])
   useLayoutEffect(() => {
     const root = rootRef.current
@@ -211,48 +197,6 @@ export function useProgressiveDomText(
     }
 
     const pending = new Set<Text>()
-    // Only recovery playback freezes endpoints. Source records keep accepting
-    // new text, but that suffix belongs to the next batch on the same RAF.
-    let activeBatch: Map<Text, number> | null = null
-    let batchEpoch: number | undefined = initialRecoveryEpoch
-    let nextBatchEpoch: number | undefined
-    const clearBatch = (preserveNextEpoch = false): void => {
-      const hadBatch = activeBatch !== null || batchEpoch !== undefined || (!preserveNextEpoch && nextBatchEpoch !== undefined)
-      if (preserveNextEpoch && batchEpoch !== undefined) nextBatchEpoch = batchEpoch + 1
-      activeBatch = null
-      batchEpoch = undefined
-      if (!preserveNextEpoch) nextBatchEpoch = undefined
-      if (hadBatch) callbacks.current.onRecoveryBatchChange?.(undefined)
-    }
-    const presentedCalls = new Set<HTMLElement>()
-    const freezeBatch = (nextEpoch?: number): void => {
-      activeBatch = new Map()
-      for (const node of pending) {
-        const record = records.get(node)
-        if (record !== undefined && record.shown < record.chars.length) activeBatch.set(node, record.chars.length)
-      }
-      if (activeBatch.size > 0) {
-        const activeEpoch = streamRelay.recoveryEpoch(recoveryKey ?? '')
-        const receivingEpoch = activeEpoch === undefined || nextBatchEpoch === undefined ? undefined
-          : Math.max(nextBatchEpoch, activeEpoch + 1)
-        batchEpoch = nextEpoch ?? receivingEpoch ?? batchEpoch ?? activeEpoch ?? 0
-        nextBatchEpoch = undefined
-        callbacks.current.onRecoveryBatchChange?.(batchEpoch)
-      }
-    }
-    const advanceBatch = (): void => {
-      if (activeBatch === null) return
-      for (const [node, end] of activeBatch) {
-        const record = records.get(node)
-        if (!pending.has(node) || record === undefined || record.shown >= end) activeBatch.delete(node)
-      }
-      if (activeBatch.size === 0 && pending.size > 0) {
-        const nextEpoch = batchEpoch === undefined ? undefined : batchEpoch + 1
-        activeBatch = null
-        batchEpoch = undefined
-        freezeBatch(nextEpoch)
-      }
-    }
     // Atomic Tool rows share this root's single budget. Keep later call chrome
     // hidden as well, so icons/running effects cannot all appear before text.
     const concealed = new Map<HTMLElement, { visibility: string; priority: string }>()
@@ -267,8 +211,6 @@ export function useProgressiveDomText(
       }
       const pendingCalls = new Set<Element>()
       for (const text of pending) {
-        const record = records.get(text)
-        if (activeBatch !== null && (record === undefined || record.shown >= (activeBatch.get(text) ?? record.shown))) continue
         const call = text.parentElement?.closest('[data-chat-call-id]')
         if (call) pendingCalls.add(call)
       }
@@ -286,9 +228,7 @@ export function useProgressiveDomText(
           continue
         }
         const hasPending = pendingCalls.has(call)
-        const holdVisibility = activeBatch !== null && presentedCalls.has(call)
-        const hide = (pausedRef.current || waitingForEarlier) && !holdVisibility
-        if (activeBatch !== null && !hide) presentedCalls.add(call)
+        const hide = pausedRef.current || waitingForEarlier
         if (hide && !concealed.has(call)) {
           concealed.set(call, { visibility: call.style.getPropertyValue('visibility'), priority: call.style.getPropertyPriority('visibility') })
           call.style.setProperty('visibility', 'hidden')
@@ -311,13 +251,10 @@ export function useProgressiveDomText(
     const isEllipsisTailClipped = createEllipsisTailProbe(root)
 
     const announceSettled = (): void => {
-      clearBatch(streamRelay.recoveryEpoch(recoveryKey ?? '') !== undefined)
-      presentedCalls.clear()
       lastFrame = null
       debt = 0
       speedCpsRef.current = 35
       debugRuntime.reportStream(streamId, null)
-      recoveryRef.current.finish()
       if (announcedSettled) return
       announcedSettled = true
       callbacks.current.onPendingChange?.(false)
@@ -342,12 +279,6 @@ export function useProgressiveDomText(
       const chars = [...full]
       const prefix = preserve === undefined ? 0 : commonPrefix(preserve.chars, chars)
       const preserved = preserve === undefined ? 0 : Math.min(preserve.shown, prefix)
-      // Replacements invalidate the old frozen suffix. Keep only its common
-      // prefix in this batch; the authoritative replacement joins the next.
-      const boundary = activeBatch?.get(node)
-      if (boundary !== undefined && preserve !== undefined && !full.startsWith(preserve.full)) {
-        activeBatch!.set(node, Math.min(boundary, prefix))
-      }
       const record = { chars, full, shown: preserved }
       records.set(node, record)
       if (preserved < chars.length) {
@@ -383,18 +314,15 @@ export function useProgressiveDomText(
     }
 
     const scheduleFrame = (): void => {
-      const playback = recoveryRef.current
-      if (!playback.hidden() && activeBatch === null && pending.size > 0 && playback.mode() !== 'latest'
-        && (playback.recovering() || streamRelay.recoveryEpoch(recoveryKey ?? '') !== undefined)) freezeBatch()
       syncCallVisibility()
-      if (stopped || pausedRef.current || recoveryRef.current.hidden() || pending.size === 0 || rafId !== 0) return
+      if (stopped || pausedRef.current || pending.size === 0 || rafId !== 0) return
       rafId = requestAnimationFrame(frame)
     }
 
     const frame = (now: number): void => {
       const frameStartedAt = performance.now()
       rafId = 0
-      if (stopped || recoveryRef.current.hidden()) { lastFrame = null; return }
+      if (stopped) { lastFrame = null; return }
       // Drain queued native commits before the ellipsis decision, including a
       // source shortened to exactly our current prefix (no data mismatch).
       const mutations = observer?.takeRecords()
@@ -411,17 +339,6 @@ export function useProgressiveDomText(
         return
       }
       const elapsed = Math.max(0, now - lastFrame)
-      const playback = recoveryRef.current
-      playback.detectGap(elapsed)
-      const catchingUp = playback.recovering() && playback.mode() === 'catch-up'
-      if (playback.mode() === 'latest' && activeBatch !== null) clearBatch()
-      const activeRecoveryEpoch = streamRelay.recoveryEpoch(recoveryKey ?? '')
-      if (activeBatch === null && pending.size > 0 && playback.mode() !== 'latest'
-        && (playback.recovering() || activeRecoveryEpoch !== undefined)) freezeBatch()
-      if (playback.recovering()) {
-        debugRuntime.recordDiagnostic('raf', { event: 'text-recovery-frame', gapMs: elapsed, mode: playback.mode() })
-      }
-
       const candidates: Array<{ node: Text; record: TextRevealRecord; end: number }> = []
       let backlog = 0
       for (const node of pending) {
@@ -448,15 +365,10 @@ export function useProgressiveDomText(
         }
         candidates.push({ node, record, end: record.chars.length })
       }
-      advanceBatch()
       const orderedPending = candidates.filter(item => {
-        item.end = activeBatch === null ? item.record.chars.length : Math.min(item.record.chars.length, activeBatch.get(item.node) ?? item.record.shown)
         backlog += Math.max(0, item.end - item.record.shown)
         return item.end > item.record.shown
       })
-      const activeBatchChars = activeBatch === null ? undefined : backlog
-      const incomingBatchChars = activeBatch === null ? undefined
-        : candidates.reduce((sum, item) => sum + item.record.chars.length - item.record.shown, 0) - backlog
       // Earlier nodes can re-enter the queue, and nodes can move while queued.
       orderedPending.sort((left, right) => (
         (left.node.compareDocumentPosition(right.node) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 ? -1 : 1
@@ -478,24 +390,12 @@ export function useProgressiveDomText(
         if (end >= record.chars.length) pending.delete(node)
       }
       if (clippedCount > 0) orderedPending.splice(0, clippedCount)
-      if (playback.recovering() && playback.mode() === 'latest') {
-        for (const { node, record } of orderedPending) {
-          write(node, record.full)
-          records.set(node, { ...record, shown: record.chars.length })
-        }
-        pending.clear()
-        syncCallVisibility()
-        announceSettled()
-        playback.finish()
-        return
-      }
       lastFrame = now
       const tuning = debugRuntime.activeTuning()
-      const step = computeAdaptiveQueueStep(backlog, Math.min(elapsed, 32), debt, 1, tuning, activeBatch !== null)
-      const budget = catchingUp ? recoveryBudget(backlog, elapsed, debt, tuning, true) : { chars: step.revealChars, debt: step.debt }
-      debt = budget.debt
-      speedCpsRef.current = catchingUp ? budget.chars * 1000 / Math.max(1, elapsed) : step.speedCps
-      let remaining = budget.chars
+      const step = computeAdaptiveQueueStep(backlog, Math.min(elapsed, 32), debt, 1, tuning)
+      debt = step.debt
+      speedCpsRef.current = step.speedCps
+      let remaining = step.revealChars
       for (const { node, record, end } of orderedPending) {
         if (remaining <= 0) break
         const amount = Math.min(remaining, end - record.shown)
@@ -521,12 +421,9 @@ export function useProgressiveDomText(
       }
       debugRuntime.recordDiagnostic('text-queue', {
         backlogChars: nextBacklog,
-        activeBatchChars,
-        incomingBatchChars,
-        recoveryEpoch: batchEpoch,
         pendingNodes: pending.size,
         records: records.size,
-        mode: catchingUp ? 'catch-up' : playback.recovering() ? playback.mode() : 'normal',
+        mode: 'normal',
       })
       debugRuntime.recordDiagnosticFrame(streamId, now, performance.now() - frameStartedAt)
       debugRuntime.reportStream(streamId, {
@@ -536,40 +433,12 @@ export function useProgressiveDomText(
         displayedChars,
         active: pending.size > 0,
       })
-      advanceBatch()
       syncCallVisibility()
       if (pending.size === 0) announceSettled()
       else scheduleFrame()
     }
 
     wake.current = () => { scheduleFrame() }
-    resume.current = () => {
-      if (recoveryRef.current.recovering() && recoveryRef.current.mode() !== 'latest' && activeBatch === null) {
-        // Include native commits already queued at the foreground boundary;
-        // later commits may update records but cannot extend this batch.
-        const mutations = observer?.takeRecords()
-        if (mutations !== undefined && mutations.length > 0) processMutations(mutations)
-        if (pending.size > 0) freezeBatch()
-        else if (recoveryRef.current.mode() !== 'latest') {
-          const activeEpoch = streamRelay.recoveryEpoch(recoveryKey ?? '')
-          if (activeEpoch !== undefined) nextBatchEpoch = activeEpoch + 1
-        }
-      }
-      if (pending.size === 0 && rafId === 0 && !stopped && !recoveryRef.current.hidden()) rafId = requestAnimationFrame(frame)
-      else scheduleFrame()
-    }
-    suspend.current = () => {
-      cancelAnimationFrame(rafId)
-      rafId = 0
-      lastFrame = null
-      debt = 0
-      clearBatch()
-      // A native background update can queue an earlier call before resume.
-      // Remember already presented chrome so recovery does not hide it again.
-      for (const call of callRows) {
-        if (!concealed.has(call)) presentedCalls.add(call)
-      }
-    }
     visit(root, revealInitial)
 
     const releaseSubtree = (from: Node): void => {
@@ -678,16 +547,12 @@ export function useProgressiveDomText(
         attributeFilter: ['hidden', 'style', 'class', 'open'], attributeOldValue: true,
       })
     }
-    if (recoveryRef.current.recovering() && !recoveryRef.current.hidden() && recoveryRef.current.mode() !== 'latest') freezeBatch()
     if (pending.size === 0) announceSettled()
     else scheduleFrame()
 
     return () => {
       stopped = true
-      resume.current = null
       wake.current = null
-      suspend.current = null
-      clearBatch()
       callbacks.current.onPendingChange?.(false)
       cancelAnimationFrame(rafId)
       observer?.disconnect()

@@ -12,8 +12,7 @@ import { SessionPlaybackNode, useSessionPlayback } from './sessionPlaybackReact.
 import { installRendererAdapter } from './rendererAdapter.ts'
 import { installFlowPresentationAdapter } from './flowPresentationAdapter.tsx'
 import { installConversationPipeline } from './conversationPipeline.ts'
-import { bindRecoverySynchronization } from './recoverySynchronization.ts'
-import { setForegroundRecoveryDelay } from './backgroundRecovery.ts'
+import { installEntryBaselineSource } from './entryBaseline.ts'
 import { streamOrderDefinition } from './streamOrder.ts'
 import { wrapFollowNodeView, type FollowWrapProps } from './TypewriterToolNodeView.tsx'
 import { SmoothStreamCard } from './SmoothStreamCard.tsx'
@@ -23,7 +22,7 @@ import { DebugPanel } from './DebugPanel.tsx'
 import { debugRuntime } from './debugRuntime.ts'
 import { NS as SETTINGS_NS, en, zh } from './locales.ts'
 import { DEFAULT_STREAM_CONFIG, STREAM_BOOT_GLOBAL, type StreamConfig } from '../config.ts'
-import { DEFAULT_STREAM_SETTINGS, type BackgroundRecovery, type StreamSettings } from '../settings.ts'
+import { DEFAULT_STREAM_SETTINGS, type StreamSettings } from '../settings.ts'
 
 /**
  * Cordis services required by the browser half. Only `slots` is load-bearing
@@ -94,11 +93,18 @@ class SettingsCell {
     const val = { ...DEFAULT_STREAM_SETTINGS }
     try {
       const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('dsh-smooth-stream:settings') : null
-      if (saved) Object.assign(val, JSON.parse(saved))
+      if (saved) {
+        const cached: unknown = JSON.parse(saved)
+        if (cached !== null && typeof cached === 'object'
+          && typeof (cached as StreamSettings).enabled === 'boolean'
+          && typeof (cached as StreamSettings).controlScroll === 'boolean'
+          && ['auto', 'force-reduced', 'force-smooth'].includes((cached as StreamSettings).motionPreference)) {
+          Object.assign(val, Object.fromEntries(Object.entries(cached).filter(([key]) => key in DEFAULT_STREAM_SETTINGS)))
+        }
+      }
     } catch {}
     return val
   })()
-  private pending = false
 
   /** Re-point the cell at the plugin-owned settings controller. */
   attach(card: SmoothStreamCardController): () => void {
@@ -121,14 +127,10 @@ class SettingsCell {
 
   private refresh(): void {
     const next = this.read()
-    const pending = this.card?.getSnapshot().status === 'loading'
     if (
-      pending === this.pending
-      && next.enabled === this.value.enabled
+      next.enabled === this.value.enabled
       && next.controlScroll === this.value.controlScroll
       && next.motionPreference === this.value.motionPreference
-      && next.backgroundRecovery === this.value.backgroundRecovery
-       && next.foregroundRecoveryDelayMs === this.value.foregroundRecoveryDelayMs
       && next.thinkAutoExpand === this.value.thinkAutoExpand
       && next.logarithmicFade === this.value.logarithmicFade
       && next.fastFold === this.value.fastFold
@@ -138,14 +140,13 @@ class SettingsCell {
       && next.debugTuningEnabled === this.value.debugTuningEnabled
       && next.debugTuning === this.value.debugTuning
     ) return
-    this.pending = pending
     this.value = next
     for (const listener of this.listeners) listener()
   }
 
-  /** Always respect the user's enabled preference immediately. */
+  /** Retain the last known preference while the optional settings RPC loads. */
   takeoverEnabled(): boolean {
-    return !this.pending && this.value.enabled
+    return this.value.enabled
   }
 
   readonly getSnapshot = (): StreamSettings => this.value
@@ -209,33 +210,20 @@ export function apply(ctx: ClientContext): void {
   const config = readBootConfig()
   const settings = new SettingsCell()
   const syncStyles = (): void => { syncFastFold(settings.getSnapshot().enabled && settings.getSnapshot().fastFold) }
-  const syncRecoveryDelay = (): void => { setForegroundRecoveryDelay(settings.getSnapshot().foregroundRecoveryDelayMs) }
   syncStyles()
-  syncRecoveryDelay()
   const offStyles = settings.subscribe(syncStyles)
-  const offRecoveryDelay = settings.subscribe(syncRecoveryDelay)
   ctx.effect(() => () => {
     offStyles()
-    offRecoveryDelay()
-    setForegroundRecoveryDelay(0)
     document.documentElement.removeAttribute('data-smooth-stream-fast-fold')
     document.getElementById(FAST_FOLD_STYLE_ID)?.remove()
   })
   healDshConversationPipeline(ctx, settings)
+  ctx.inject(['sessions'], scopedCtx => installEntryBaselineSource(scopedCtx.sessions))
   ctx.inject(['uiConversation'], scopedCtx => scopedCtx.uiConversation.events.register(streamOrderDefinition()))
-  ctx.inject(['sessions', 'connection'], scopedCtx => bindRecoverySynchronization(
-    scopedCtx.sessions,
-    scopedCtx.get('connection') as unknown as ConnectionHandle,
-  ))
   const useControlScroll = (): boolean => useSyncExternalStore(
     settings.subscribe,
     () => settings.getSnapshot().controlScroll,
     () => settings.getSnapshot().controlScroll,
-  )
-  const useBackgroundRecovery = (): BackgroundRecovery => useSyncExternalStore(
-    settings.subscribe,
-    () => settings.getSnapshot().backgroundRecovery,
-    () => settings.getSnapshot().backgroundRecovery,
   )
   // The card talks to the plugin-owned loopback RPC, so the core settings
   // namespace allowlist cannot make it disappear. The stream still applies
@@ -322,7 +310,7 @@ export function apply(ctx: ClientContext): void {
       const Inner = original
       // Stable across settings/parent updates: do not reset tool-local hooks.
       const Follow = key === 'assistant-step' ? undefined
-        : wrapFollowNodeView(Inner as ComponentType<FollowWrapProps>, useControlScroll, useBackgroundRecovery)
+        : wrapFollowNodeView(Inner as ComponentType<FollowWrapProps>, useControlScroll)
       return function SmoothStreamRendererAdapter(props: AssistantProps & FollowWrapProps) {
         const preferences = useSyncExternalStore(settings.subscribe, settings.getSnapshot, settings.getSnapshot)
         const ready = useSyncExternalStore(settings.subscribe,
@@ -337,7 +325,6 @@ export function apply(ctx: ClientContext): void {
             preferences: {
               controlScroll: preferences.controlScroll,
               motionPreference: preferences.motionPreference,
-              backgroundRecovery: preferences.backgroundRecovery,
               logarithmicFade: preferences.logarithmicFade,
               thinkAutoExpand: preferences.thinkAutoExpand,
               keepStreamOnToolCall: preferences.keepStreamOnToolCall,

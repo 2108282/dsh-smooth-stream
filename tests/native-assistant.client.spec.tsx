@@ -1,7 +1,7 @@
 import { assistantProgress } from '../src/client/presentationProgress.ts'
 import { clearToolPresentationLedger } from '../src/client/TypewriterToolNodeView.tsx'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
-import { createElement, useRef, type ComponentType } from 'react'
+import { createElement, useLayoutEffect, useRef, useState, type ComponentType } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatNodeViewProps, UseDisclosure, UsePresentation } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
@@ -10,7 +10,6 @@ import { NativeAssistantNodeView } from '../src/client/NativeAssistantNodeView.t
 import { relayScope, streamRelay } from '../src/client/streamRelay.ts'
 import { wrapFollowNodeView } from '../src/client/TypewriterToolNodeView.tsx'
 import { DEFAULT_STREAM_SETTINGS } from '../src/settings.ts'
-import { isBackgroundRecoveryScope } from '../src/client/backgroundRecovery.ts'
 
 type Owner = ChatNodeViewProps<'assistant-step'>
 type OfficialProps = Owner & PropsRenderSlots<'conversation.chat.reasoning.body' | 'conversation.chat.message.images'> & {
@@ -64,8 +63,23 @@ async function paint(count = 1): Promise<void> {
     for (const callback of batch) callback(timestamp)
   })
 }
-function native(props: OfficialProps, settings = preferences, Inner: ComponentType<Owner> = Probe) {
+function snapshot(props: OfficialProps, settings = preferences, Inner: ComponentType<Owner> = Probe) {
   return createElement(NativeAssistantNodeView, { Inner, owner: props, preferences: settings })
+}
+// Queue tests model a row mounted before its first live text publication.
+// Entry-baseline tests call snapshot() directly with already available content.
+function MountedLiveNative({ owner: props, settings, Inner }: {
+  owner: OfficialProps; settings: typeof preferences; Inner: ComponentType<Owner>
+}) {
+  const [published, setPublished] = useState(false)
+  useLayoutEffect(() => { setPublished(true) }, [])
+  const initial = props.node.data.status === 'running' && !published
+    ? { ...props, node: { ...props.node, data: { ...props.node.data, blocks: props.node.data.blocks.map(block =>
+      block.kind === 'text' || block.kind === 'reasoning' ? { ...block, text: '' } : block) } } } : props
+  return snapshot(initial, settings, Inner)
+}
+function native(props: OfficialProps, settings = preferences, Inner: ComponentType<Owner> = Probe) {
+  return createElement(MountedLiveNative, { owner: props, settings, Inner })
 }
 // Keep the official renderer's injected props and child Slot renderer on owner.
 const Official = (props: Owner) => createElement(AssistantNodeView, props as OfficialProps)
@@ -94,18 +108,60 @@ beforeEach(() => {
 })
 
 describe('native assistant wrapper', () => {
-  it('keeps a committed prefix across parent changes caused by interleaved input', async () => {
-    const props = owner('running', 'x'.repeat(500))
-    const tree = (group: string) => createElement('main', null,
-      createElement('section', { key: group }, native(props)))
-    const view = render(tree('before-steering'))
-    await paint(10)
-    const before = view.container.textContent!
-    expect(before.length).toBeGreaterThan(0)
-    view.rerender(tree('after-steering'))
-    expect(view.container.textContent).toBe(before)
+  it('adopts existing running text immediately and only paces later appends', async () => {
+    const prefix = 'existing😀 prefix'
+    const props = owner('running', prefix)
+    const view = render(snapshot(props))
+    expect(view.container.textContent).toBe(prefix)
+    expect(streamRelay.isBlocked(relayScope(props.node, props.sessionId), 'tool')).toBe(false)
+    const next = owner('running', prefix + '新增'.repeat(100))
+    view.rerender(snapshot(next))
+    expect(view.container.textContent).toBe(prefix)
+    await paint(4)
+    expect(view.container.textContent!.startsWith(prefix)).toBe(true)
+    expect(view.container.textContent!.length).toBeGreaterThan(prefix.length)
+    expect(view.container.textContent!.length).toBeLessThan(next.node.data.blocks[0]!.kind === 'text'
+      ? next.node.data.blocks[0]!.text.length : 0)
+  })
+
+  it('adopts content accumulated while unmounted instead of replaying a shorter cached prefix', async () => {
+    const first = owner('running', 'first')
+    const view = render(snapshot(first))
+    view.rerender(snapshot(owner('running', 'first' + 'queued'.repeat(30))))
+    await paint(4)
+    const shown = view.container.textContent!
+    view.unmount()
+    const latest = 'first' + 'queued'.repeat(60)
+    const again = render(snapshot(owner('running', latest)))
+    expect(again.container.textContent).toBe(latest)
+    expect(latest.length).toBeGreaterThan(shown.length)
     await paint(3)
-    expect(view.container.textContent!.startsWith(before)).toBe(true)
+    expect(again.container.textContent).toBe(latest)
+  })
+
+  it('adopts the current snapshot on A-B-A and regrouping without clearing presented text', async () => {
+    const a = owner('running', 'session a')
+    const b = { ...owner('running', 'session b'), sessionId: 'session-b' as OfficialProps['sessionId'] }
+    const view = render(snapshot(a))
+    view.rerender(snapshot(b))
+    expect(view.container.textContent).toBe('session b')
+    const latest = owner('running', 'session a grew while away')
+    view.rerender(snapshot(latest))
+    expect(view.container.textContent).toBe('session a grew while away')
+    view.rerender(createElement('section', { key: 'regrouped' }, snapshot(latest)))
+    expect(view.container.textContent).toBe('session a grew while away')
+  })
+
+  it('keeps automatically opened reasoning unchanged by lifecycle signals', async () => {
+    const props = owner('running', 'reasoning '.repeat(20), true)
+    const view = render(native(props, preferences, Official))
+    await paint(4)
+    expect(view.queryByTestId('reasoning-body')).not.toBeNull()
+    await act(() => { window.dispatchEvent(new Event('dsha:background')) })
+    await paint(4)
+    expect(view.queryByTestId('reasoning-body')).not.toBeNull()
+    await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
+    expect(view.queryByTestId('reasoning-body')).not.toBeNull()
   })
 
   it('does not subscribe or reserve a relay for static history', () => {
@@ -132,25 +188,8 @@ describe('native assistant wrapper', () => {
     expect(view.container.textContent).toBe('finished')
     await act(() => { streamRelay.release(token!) })
     view.unmount()
-    const again = render(native(props))
+    const again = render(snapshot(props))
     expect(again.container.textContent).toBe('finished')
-  })
-
-  it('applies latest on returning to an existing live reply then paces new text', async () => {
-    const settings = { ...preferences, backgroundRecovery: 'latest' as const }
-    const first = render(native(owner('running', 'first'), settings))
-    await paint(40)
-    first.unmount()
-    const props = owner('running', 'first' + 'x'.repeat(200))
-    const view = render(native(props, settings))
-    expect(view.container.textContent).toBe('first')
-    await paint(3)
-    expect(view.container.textContent).toBe('first' + 'x'.repeat(200))
-    const updated = owner('running', 'first' + 'x'.repeat(300))
-    view.rerender(native(updated, settings))
-    await paint(3)
-    expect(view.container.textContent!.length).toBeGreaterThan(205)
-    expect(view.container.textContent!.length).toBeLessThan(305)
   })
 
   it('does not wake static history on foreground transitions or fill the progress cache', async () => {
@@ -172,7 +211,7 @@ describe('native assistant wrapper', () => {
     await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
     expect(renders).toBe(before)
     view.unmount()
-    const again = render(native(props))
+    const again = render(snapshot(props))
     expect(again.container.textContent).toBe('kept live prefix')
   })
 
@@ -195,21 +234,6 @@ describe('native assistant wrapper', () => {
     expect(last.resolveFilePath).toBe(props.resolveFilePath)
   })
 
-  it('starts a fresh queue for a new session/turn/node even when text extends the prior prefix', async () => {
-    const props = owner('running', 'first answer')
-    const view = render(native(props))
-    await paint(50)
-    expect(view.container.textContent).toBe('first answer')
-    const next = { ...props, sessionId: 'session-b' as OfficialProps['sessionId'], node: { ...props.node,
-      key: 'assistant:2', data: { ...props.node.data, turn: 2, blocks: [{ kind: 'text' as const, text: 'first answer next turn' }] } } }
-    view.rerender(native(next))
-    expect(view.container.textContent).toBe('')
-    expect(streamRelay.isBlocked(relayScope(props.node, props.sessionId), 'tool')).toBe(false)
-    await paint(3)
-    expect(view.container.textContent?.length).toBeGreaterThan(0)
-    expect(view.container.textContent?.length).toBeLessThan('first answer'.length)
-  })
-
   it('does not replay historical text or take a relay lease', () => {
     const props = owner('settled', 'historical answer')
     const view = render(createElement('section', { 'data-chat-flow-key': 'historical' }, native(props)))
@@ -218,37 +242,7 @@ describe('native assistant wrapper', () => {
     expect(streamRelay.isBlocked(relayScope(props.node, props.sessionId), 'tool')).toBe(false)
   })
 
-  it.each(['replay', 'catch-up', 'latest'] as const)('orders a first settled reply behind recovering reasoning in %s mode', async mode => {
-    const initial = { ...owner('running', 'r'.repeat(200), true), groupPart: 'reasoning' }
-    const settings = { ...preferences, backgroundRecovery: mode }
-    const tree = (settled: boolean) => {
-      const snapshot: OfficialProps = settled ? { ...initial, node: { ...initial.node, data: { ...initial.node.data,
-        status: 'settled', blocks: [{ kind: 'reasoning', text: 'r'.repeat(400) }, { kind: 'text', text: 'final answer' }] } } } : initial
-      return createElement('main', null,
-        createElement('section', { key: 'reasoning', 'data-testid': 'reasoning-seat' }, native(snapshot, settings)),
-        settled ? createElement('section', { key: 'response', 'data-testid': 'response-seat' }, native({ ...snapshot, groupPart: 'response' }, settings)) : null)
-    }
-    const view = render(tree(false))
-    await paint(3)
-    const before = view.getByTestId('reasoning-seat').textContent!.length
-    await act(() => { window.dispatchEvent(new Event('pagehide')) })
-    await act(() => { window.dispatchEvent(new Event('pageshow')) })
-    // A slow reconnect must not lose the policy after the old one-second window.
-    timestamp += 3000
-    view.rerender(tree(true))
-    expect(view.getByTestId('reasoning-seat').textContent).toHaveLength(before)
-    expect(view.getByTestId('response-seat').querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('waiting')
-    expect(view.getByTestId('response-seat').textContent).toBe('')
-    for (let index = 0; index < 500; index++) {
-      await paint()
-      if (view.getByTestId('response-seat').textContent !== '') {
-        expect(view.getByTestId('reasoning-seat').textContent).toBe('r'.repeat(400))
-      }
-    }
-    expect(view.getByTestId('response-seat').textContent).toBe('final answer')
-  })
-
-  it('shows a first completed tool immediately during recovery', async () => {
+  it('shows a first completed tool immediately across lifecycle signals', async () => {
     const props = { ...owner('running', 'r'.repeat(400), true), groupPart: 'reasoning' }
     const Tool = wrapFollowNodeView(() => createElement('aside', null, 'tool result '.repeat(30)), () => false)
     const tree = (result: boolean) => createElement('main', null,
@@ -293,45 +287,7 @@ describe('native assistant wrapper', () => {
     expect(view.getByTestId('c').textContent).toBe('c'.repeat(100))
   })
 
-  it('releases the inherited epoch after a late latest snapshot finishes', async () => {
-    const first = owner('running', 'a'.repeat(100))
-    const later = owner('running', 'snapshot')
-    later.node = { ...later.node, key: 'assistant:2', anchorSeq: 2, data: { ...later.node.data, step: 2 } }
-    const settings = { ...preferences, backgroundRecovery: 'latest' as const }
-    const tree = (text?: string) => createElement('main', null,
-      createElement('section', { key: 'first' }, native(first, settings)),
-      text === undefined ? null : createElement('section', { key: 'later', 'data-testid': 'later' },
-        native({ ...later, node: { ...later.node, data: { ...later.node.data, blocks: [{ kind: 'text', text }] } } }, settings)))
-    const view = render(tree())
-    await paint(3)
-    await act(() => { window.dispatchEvent(new Event('dsha:background')) })
-    await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
-    view.rerender(tree('snapshot'))
-    await paint(10)
-    expect(view.getByTestId('later').textContent).toBe('snapshot')
-    const earlier = streamRelay.acquire({ ...relayScope(first.node, first.sessionId), node: 'earlier', order: 0 }, 'response')
-    view.rerender(tree('snapshot' + 'new'.repeat(30)))
-    await paint(5)
-    expect(streamRelay.recoveryEpoch(relayScope(later.node, later.sessionId))).toBeUndefined()
-    expect(view.getByTestId('later').textContent).toBe('snapshot')
-    expect(view.getByTestId('later').querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('waiting')
-    act(() => streamRelay.release(earlier))
-    await paint(100)
-    expect(view.getByTestId('later').textContent).toBe('snapshot' + 'new'.repeat(30))
-  })
-
-  it('retires a recovery scope when a drained live seat settles without new text', async () => {
-    const props = owner('running', 'short')
-    const view = render(native(props))
-    await paint(30)
-    await act(() => { window.dispatchEvent(new Event('dsha:background')) })
-    await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
-    expect(isBackgroundRecoveryScope(JSON.stringify([props.sessionId, '1']))).toBe(true)
-    view.rerender(native({ ...props, node: { ...props.node, data: { ...props.node.data, status: 'settled' } } }))
-    expect(isBackgroundRecoveryScope(JSON.stringify([props.sessionId, '1']))).toBe(false)
-  })
-
-  it('does not replay an earlier settled step remounted during recovery of a later step', async () => {
+  it('does not replay an earlier settled step remounted across lifecycle signals of a later step', async () => {
     const later = owner('running', 'x'.repeat(200))
     later.node = { ...later.node, key: 'assistant:2', anchorSeq: 5, data: { ...later.node.data, step: 2 } }
     const earlier = owner('settled', 'historical text')
@@ -381,40 +337,7 @@ describe('native assistant wrapper', () => {
     expect(view.getByTestId('settled').querySelector('[data-smooth-stream-phase]')?.getAttribute('data-smooth-stream-phase')).toBe('settled')
   })
 
-  it('keeps collapsed recovery reasoning closed after a large resume instead of auto-expanding', async () => {
-    const props = owner('running', 'reasoning '.repeat(160), true)
-    const view = render(native(props, preferences, Official))
-    await paint(3)
-    expect(view.queryByTestId('reasoning-body')).not.toBeNull()
-    await act(() => { window.dispatchEvent(new Event('dsha:background')) })
-    view.rerender(native({ ...props, node: { ...props.node, data: { ...props.node.data,
-      blocks: [{ kind: 'reasoning', text: 'reasoning '.repeat(180) }] } } }, preferences, Official))
-    await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
-    expect(view.queryByTestId('reasoning-body')).toBeNull()
-    await paint(60)
-    // A background resume never auto-opens reasoning, even once the hidden
-    // source has been synchronized. The previous policy re-expanded the block
-    // here, which is the "thinking opens early after returning from background"
-    // conflict this latch removes.
-    expect(view.queryByTestId('reasoning-body')).toBeNull()
-    // A manual open still reveals the full synchronized text.
-    fireEvent.click(view.getByText('Official thinking'))
-    expect(view.getByTestId('reasoning-body').textContent).toBe('reasoning '.repeat(180))
-  })
-
-  it('keeps automatic reasoning closed after a small recovery backlog too', async () => {
-    const props = owner('running', 'reasoning '.repeat(20), true)
-    const view = render(native(props, preferences, Official))
-    await paint(3)
-    await act(() => { window.dispatchEvent(new Event('dsha:background')) })
-    await act(() => { window.dispatchEvent(new Event('dsha:foreground')) })
-    await paint(4)
-    // Resuming from the background never auto-expands reasoning regardless of
-    // backlog size; only ordinary foreground streaming may open it.
-    expect(view.queryByTestId('reasoning-body')).toBeNull()
-  })
-
-  it('does not collapse a manually opened reasoning panel during large recovery', async () => {
+  it('does not collapse a manually opened reasoning panel across lifecycle signals', async () => {
     const props = owner('running', 'reasoning '.repeat(180), true)
     const view = render(native(props, preferences, Official))
     await paint(3)

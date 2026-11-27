@@ -1,5 +1,4 @@
-import { DEFAULT_STREAM_DEBUG_TUNING, type BackgroundRecovery, type StreamDebugTuning } from '../settings.ts'
-import { recoveryBudget } from './backgroundRecovery.ts'
+import { DEFAULT_STREAM_DEBUG_TUNING, type StreamDebugTuning } from '../settings.ts'
 
 export interface PlaybackSegment {
   id: string
@@ -11,6 +10,8 @@ export interface PlaybackSegment {
   awaitPresentation?: boolean
   /** Explicit source identity; a changed generation never inherits reveal progress. */
   generation?: string | number
+  /** Already visible entry prefix, in Unicode code points; zero also marks empty history. */
+  baselineChars?: number
 }
 
 export interface PlaybackDisplay {
@@ -33,19 +34,8 @@ export interface SessionPlaybackOptions extends PlaybackConfiguration {
   now?: () => number
 }
 
-interface RecoveryTarget {
-  epoch: number
-  length: number
-}
-
-interface RecoveryBatch {
-  mode: BackgroundRecovery
-  frontier: Map<string, RecoveryTarget>
-}
-
 interface SegmentState {
   generation: string | number | undefined
-  epoch: number
   animate: boolean
   text: string
   points: string[]
@@ -55,6 +45,7 @@ interface SegmentState {
   sealed: boolean
   hidden: boolean
   entered: boolean
+  entryBaseline: boolean
   presentationPending: boolean
   fraction: number
   touched: number
@@ -93,10 +84,6 @@ export class SessionPlayback {
   private maxLagChars = DEFAULT_MAX_LAG_CHARS
   private settleDelayMs = 0
   private tuning: StreamDebugTuning = { ...DEFAULT_STREAM_DEBUG_TUNING }
-  private paused = false
-  private pausedAt: number | undefined
-  private recovery: RecoveryBatch | undefined
-  private recoveryDebt = 0
   private readonly owners = new Map<string, Map<string, PlaybackSegment>>()
   private readonly states = new Map<string, SegmentState>()
   private readonly active = new Map<string, PlaybackSegment>()
@@ -106,7 +93,6 @@ export class SessionPlayback {
   private readonly listeners = new Set<() => void>()
   private enabled = true
   private disposed = false
-  private initialSealed = false
   private frame: number | undefined
   private lastFrameTime: number | undefined
   private wholeChars = 0
@@ -138,7 +124,11 @@ export class SessionPlayback {
   upsert(owner: string, segments: readonly PlaybackSegment[], animate: boolean): void {
     if (this.disposed) return
     const next = new Map<string, PlaybackSegment>()
+    const reopened = new Set<string>()
     for (const source of segments) {
+      const previous = this.states.get(source.id)
+      const wasActive = this.active.has(source.id)
+      const wasComplete = previous !== undefined && this.isComplete(previous)
       const segment: PlaybackSegment = {
         id: source.id,
         order: [...source.order],
@@ -147,13 +137,17 @@ export class SessionPlayback {
         hidden: source.hidden === true,
         awaitPresentation: source.awaitPresentation === true,
         ...(source.generation === undefined ? {} : { generation: source.generation }),
+        ...(source.baselineChars === undefined ? {} : { baselineChars: source.baselineChars }),
       }
       next.set(segment.id, segment)
       this.updateState(segment, animate)
+      const updated = this.states.get(segment.id)!
+      if ((!wasActive || wasComplete) && !this.isComplete(updated)) reopened.add(segment.id)
     }
     this.owners.set(owner, next)
     this.rebuildActive()
-    if (!this.enabled && !this.paused) this.adoptAll()
+    this.rehideSuccessors(reopened)
+    if (!this.enabled) this.adoptAll()
     else this.queuePump()
     this.trimLedger()
   }
@@ -164,7 +158,6 @@ export class SessionPlayback {
     const state = this.states.get(id)
     if (!state?.entered || !state.presentationPending || state.generation !== generation) return
     this.clearPresentation(id, state)
-    this.recoveryTarget(id, state)
     this.queuePump()
   }
 
@@ -175,64 +168,12 @@ export class SessionPlayback {
     this.trimLedger()
   }
 
-  /** Marks the initial owner-registration phase as complete; pumping stays microtask-batched. */
-  sealInitial(): void {
-    if (this.disposed || this.initialSealed) return
-    this.initialSealed = true
-    this.queuePump()
-  }
-
-  /** Freeze presentation without dropping incoming targets or accumulating frame debt. */
-  pause(): void {
-    if (this.disposed || this.paused) return
-    this.paused = true
-    this.pausedAt = this.now()
-    this.cancelPendingFrame()
-    this.resetClock()
-  }
-
-  resume(): void {
-    if (this.disposed || !this.paused) return
-    const pausedFor = Math.max(0, this.now() - (this.pausedAt ?? this.now()))
-    for (const state of this.states.values()) if (state.lastRevealAt !== undefined) state.lastRevealAt += pausedFor
-    this.paused = false
-    this.pausedAt = undefined
-    this.resetClock()
-    for (const segment of this.ordered) this.applyImmediateState(segment.id, this.states.get(segment.id)!)
-    if (!this.enabled) this.adoptAll()
-    else this.queuePump()
-  }
-
   /** Runtime configuration preserves each source's current reveal position. */
   configure(configuration: PlaybackConfiguration): void {
     if (this.disposed || !this.applyConfiguration(configuration)) return
     this.cancelPendingFrame()
     this.resetClock()
     this.queuePump()
-  }
-
-  /** Capture a finite frontier: later deltas never extend this recovery batch. */
-  beginRecovery(mode: BackgroundRecovery): void {
-    if (this.disposed) return
-    const frontier = new Map<string, RecoveryTarget>()
-    for (const segment of this.ordered) {
-      const state = this.states.get(segment.id)!
-      if (mode === 'latest' && state.lastRevealAt !== undefined) {
-        state.lastRevealAt = undefined
-        this.dirtyDisplays.add(segment.id)
-      }
-      if (!state.entered || state.consumed < state.points.length || state.presentationPending) {
-        frontier.set(segment.id, { epoch: state.epoch, length: state.points.length })
-      }
-    }
-    this.recovery = frontier.size > 0 ? { mode, frontier } : undefined
-    this.cancelPendingFrame()
-    this.resetClock()
-    this.queuePump()
-  }
-
-  setRecovery(mode: BackgroundRecovery): void {
-    this.beginRecovery(mode)
   }
 
   setEnabled(enabled: boolean): void {
@@ -242,7 +183,6 @@ export class SessionPlayback {
       for (const [id, state] of this.states) this.clearPresentation(id, state)
       this.queuePublish()
     }
-    if (this.paused) return
     if (enabled) {
       this.queuePump()
     } else {
@@ -254,7 +194,6 @@ export class SessionPlayback {
   private adoptAll(): void {
     this.cancelPendingFrame()
     this.resetClock()
-    this.recovery = undefined
     for (const segment of this.ordered) {
       const state = this.states.get(segment.id)!
       this.clearPresentation(segment.id, state)
@@ -270,7 +209,6 @@ export class SessionPlayback {
     if (this.disposed) return
     this.cancelPendingFrame()
     this.resetClock()
-    this.recovery = undefined
     for (const segment of this.ordered) {
       const state = this.states.get(segment.id)!
       this.clearPresentation(segment.id, state)
@@ -295,7 +233,6 @@ export class SessionPlayback {
     this.states.clear()
     this.displays.clear()
     this.listeners.clear()
-    this.recovery = undefined
   }
 
   private applyConfiguration(configuration: PlaybackConfiguration): boolean {
@@ -344,7 +281,6 @@ export class SessionPlayback {
     if (state === undefined) {
       state = {
         generation: segment.generation,
-        epoch: 0,
         animate,
         text: segment.text,
         points: nextPoints,
@@ -354,6 +290,7 @@ export class SessionPlayback {
         sealed: segment.sealed,
         hidden: segment.hidden === true,
         entered: false,
+        entryBaseline: segment.baselineChars !== undefined,
         presentationPending,
         fraction: 0,
         touched: ++this.touchSequence,
@@ -363,7 +300,6 @@ export class SessionPlayback {
       const previousPoints = state.points
       const retry = state.generation !== segment.generation || (state.sealed && !segment.sealed)
       if (retry) {
-        state.epoch++
         this.cancelPendingFrame()
         this.resetClock()
         state.consumed = 0
@@ -375,13 +311,12 @@ export class SessionPlayback {
       } else if (state.text !== segment.text) {
         if (startsWith(nextPoints, previousPoints)) {
           state.consumed = Math.min(state.consumed, previousPoints.length)
-        } else if (!this.paused && state.sealed && state.consumed >= previousPoints.length) {
+        } else if (state.sealed && state.consumed >= previousPoints.length) {
           // A replacement of completed history is adopted without replaying it.
           state.consumed = nextPoints.length
           state.lastRevealAt = undefined
           state.displayText = state.entered ? segment.text : ''
         } else {
-          state.epoch++
           state.consumed = 0
           state.lastRevealAt = undefined
           state.displayText = ''
@@ -394,18 +329,31 @@ export class SessionPlayback {
       state.points = nextPoints
       state.sealed = segment.sealed
       state.hidden = segment.hidden === true
+      state.entryBaseline = segment.baselineChars !== undefined
       state.touched = ++this.touchSequence
     }
 
     if (!presentationPending) this.clearPresentation(segment.id, state)
-    if (!this.paused) this.applyImmediateState(segment.id, state)
+    this.applyImmediateState(segment.id, state)
     if (!state.hidden && wasHidden && !state.entered) {
       state.consumed = 0
       state.displayText = ''
       state.fraction = 0
     }
+    if (segment.baselineChars !== undefined && Number.isFinite(segment.baselineChars)) {
+      const baseline = Math.max(0, Math.min(nextPoints.length, Math.floor(segment.baselineChars)))
+      const completeBaseline = baseline === nextPoints.length
+      if (baseline > 0 || completeBaseline) {
+        // Entry history is already visible. Only its live suffix takes part in
+        // the reveal clock, and repeated baselines never roll progress back.
+        if (baseline > state.consumed || completeBaseline) state.lastRevealAt = undefined
+        state.consumed = Math.max(state.consumed, baseline)
+        state.entered = true
+        state.displayText = nextPoints.slice(0, state.consumed).join('')
+        if (completeBaseline) this.clearPresentation(segment.id, state)
+      }
+    }
     this.dirtyDisplays.add(segment.id)
-    this.recoveryTarget(segment.id, state)
   }
 
   private applyImmediateState(id: string, state: SegmentState): void {
@@ -425,6 +373,25 @@ export class SessionPlayback {
     }
   }
 
+  private rehideSuccessors(reopened: ReadonlySet<string>): void {
+    if (reopened.size === 0) return
+    const index = this.ordered.findIndex(segment => {
+      if (!reopened.has(segment.id)) return false
+      const state = this.states.get(segment.id)
+      return state !== undefined && !this.isComplete(state)
+    })
+    if (index === -1) return
+    for (const segment of this.ordered.slice(index + 1)) {
+      const state = this.states.get(segment.id)!
+      if (!state.entered || state.entryBaseline || !state.animate || !this.isComplete(state)) continue
+      // Keep consumed progress: a previously shown successor returns whole as
+      // soon as the reopened predecessor drains, without replaying old text.
+      state.entered = false
+      state.displayText = ''
+      this.dirtyDisplays.add(segment.id)
+    }
+  }
+
   private rebuildActive(): void {
     const previousIds = new Set(this.active.keys())
     this.active.clear()
@@ -435,34 +402,11 @@ export class SessionPlayback {
     for (const id of this.active.keys()) if (!previousIds.has(id)) this.dirtyDisplays.add(id)
     this.ordered = [...this.active.values()].sort((left, right) =>
       compareOrder(left.order, right.order) || left.id.localeCompare(right.id))
-    const recovery = this.recovery
-    if (recovery) {
-      for (const id of recovery.frontier.keys()) {
-        const state = this.states.get(id)
-        if (!this.active.has(id) || !state) recovery.frontier.delete(id)
-        else this.recoveryTarget(id, state)
-      }
-      if (recovery.frontier.size === 0) this.recovery = undefined
-    }
-  }
-
-  private recoveryTarget(id: string, state: SegmentState): RecoveryTarget | undefined {
-    const target = this.recovery?.frontier.get(id)
-    if (!target) return undefined
-    if (target.epoch !== state.epoch || (state.entered && state.consumed >= target.length && !state.presentationPending)) {
-      this.recovery!.frontier.delete(id)
-      if (this.recovery!.frontier.size === 0) {
-        this.recovery = undefined
-        this.recoveryDebt = 0
-      }
-      return undefined
-    }
-    return target
   }
 
   private isSettling(state: SegmentState): boolean {
     return state.lastRevealAt !== undefined && state.animate && !state.hidden
-      && (this.pausedAt ?? this.now()) - state.lastRevealAt < this.settleDelayMs
+      && this.now() - state.lastRevealAt < this.settleDelayMs
   }
 
   private isComplete(state: SegmentState): boolean {
@@ -507,10 +451,6 @@ export class SessionPlayback {
   }
 
   private pump(): void {
-    if (this.paused) {
-      this.queuePublish()
-      return
-    }
     for (const segment of this.ordered) {
       const state = this.states.get(segment.id)!
       if (this.isComplete(state)) {
@@ -520,24 +460,14 @@ export class SessionPlayback {
         }
         continue
       }
-      const target = this.recoveryTarget(segment.id, state)
-      if (this.recovery?.mode === 'latest' && target) {
-        this.clearPresentation(segment.id, state)
-        this.enterState(segment.id, state)
-        this.consumeTo(segment.id, state, Math.min(target.length, state.points.length), false)
-        this.recoveryTarget(segment.id, state)
-        if (this.isComplete(state)) continue
-      }
       if (state.hidden) {
         this.enterState(segment.id, state)
         this.consumeTo(segment.id, state, state.points.length)
-        this.recoveryTarget(segment.id, state)
         if (state.sealed) continue
         break
       }
       if (state.points.length === 0) {
         this.enterState(segment.id, state)
-        this.recoveryTarget(segment.id, state)
         if (this.isComplete(state)) continue
       }
       break
@@ -549,7 +479,7 @@ export class SessionPlayback {
   private ensureFrame(): void {
     const head = this.firstIncomplete()
     const state = head ? this.states.get(head.id)! : undefined
-    const needsFrame = this.enabled && !this.paused && state !== undefined && !state.hidden
+    const needsFrame = this.enabled && state !== undefined && !state.hidden
       && (state.consumed < state.points.length || (state.sealed && this.isSettling(state)))
     if (!needsFrame) {
       if (this.frame !== undefined) this.cancelPendingFrame()
@@ -563,34 +493,20 @@ export class SessionPlayback {
 
   private onFrame(): void {
     this.frame = undefined
-    if (this.disposed || !this.enabled || this.paused) return
+    if (this.disposed || !this.enabled) return
     const timestamp = this.now()
     const previous = this.lastFrameTime ?? timestamp
     const elapsed = Math.max(0, timestamp - previous)
     this.lastFrameTime = timestamp
     const head = this.firstIncomplete()
     const headState = head ? this.states.get(head.id)! : undefined
-    const target = head && headState ? this.recoveryTarget(head.id, headState) : undefined
-    const catchingUp = this.recovery?.mode === 'catch-up' && target !== undefined
-    let budget: number
-    if (catchingUp) {
-      let backlog = 0
-      for (const [id, frontier] of this.recovery!.frontier) {
-        const state = this.states.get(id)
-        if (state?.epoch === frontier.epoch) backlog += Math.max(0, Math.min(frontier.length, state.points.length) - state.consumed)
-      }
-      const step = recoveryBudget(backlog, elapsed, this.recoveryDebt, this.tuning, true)
-      budget = step.chars
-      this.recoveryDebt = step.debt
-    } else {
-      const backlog = headState ? headState.points.length - headState.consumed : 0
-      const pressure = 1 + Math.min(1, backlog / this.maxLagChars) * this.tuning.queuePressure
-      const cps = Math.min(this.tuning.maxRevealCps, this.charsPerSecond * this.tuning.revealScale * pressure)
-      const accumulated = Math.min(this.maxLagChars, this.wholeChars + Math.min(elapsed, 120) * cps / 1000)
-      budget = Math.min(Math.max(1, Math.floor(this.tuning.cadenceClamp)), Math.floor(accumulated))
-      // Clamp whole-character debt away, preserving only sub-character cadence.
-      this.wholeChars = accumulated % 1
-    }
+    const backlog = headState ? headState.points.length - headState.consumed : 0
+    const pressure = 1 + Math.min(1, backlog / this.maxLagChars) * this.tuning.queuePressure
+    const cps = Math.min(this.tuning.maxRevealCps, this.charsPerSecond * this.tuning.revealScale * pressure)
+    const accumulated = Math.min(this.maxLagChars, this.wholeChars + Math.min(elapsed, 120) * cps / 1000)
+    let budget = Math.min(Math.max(1, Math.floor(this.tuning.cadenceClamp)), Math.floor(accumulated))
+    // Clamp whole-character debt away, preserving only sub-character cadence.
+    this.wholeChars = accumulated % 1
 
     const ordered = this.ordered
     let index = 0
@@ -604,20 +520,14 @@ export class SessionPlayback {
       if (state.hidden) {
         this.enterState(segment.id, state)
         this.consumeTo(segment.id, state, state.points.length)
-        this.recoveryTarget(segment.id, state)
         if (state.sealed) {
           index++
           continue
         }
         break
       }
-      const frontier = this.recoveryTarget(segment.id, state)
-      const recoveryMode = frontier ? this.recovery?.mode : undefined
-      if (recoveryMode === 'latest') break
-      if ((recoveryMode === 'catch-up') !== catchingUp && state.consumed < state.points.length) break
       this.enterState(segment.id, state)
       if (state.points.length === 0) {
-        this.recoveryTarget(segment.id, state)
         if (this.isComplete(state)) {
           index++
           continue
@@ -625,17 +535,14 @@ export class SessionPlayback {
         break
       }
       if (budget <= 0) break
-      const limit = catchingUp && frontier ? Math.min(frontier.length, state.points.length) : state.points.length
-      const amount = Math.min(budget, Math.max(0, limit - state.consumed))
+      const amount = Math.min(budget, state.points.length - state.consumed)
       this.consumeTo(segment.id, state, state.consumed + amount)
-      this.recoveryTarget(segment.id, state)
       budget -= amount
       if (this.isComplete(state)) {
         index++
         continue
       }
-      // A caught-up open source remains a protocol barrier; a frozen frontier
-      // also ends accelerated playback before any newly appended live suffix.
+      // An open source remains a protocol barrier even after all current text is visible.
       break
     }
 
@@ -659,7 +566,6 @@ export class SessionPlayback {
   private resetClock(): void {
     this.lastFrameTime = undefined
     this.wholeChars = 0
-    this.recoveryDebt = 0
   }
 
   private queuePublish(): void {

@@ -177,7 +177,7 @@ function FollowToggleProgressiveDomProbe({ enabled, text }: { enabled: boolean; 
   const speedCpsRef = useRef(35)
   // This probe temporarily releases follow while its live renderer still
   // receives output; it is not a terminal row retiring its observer.
-  useProgressiveDomText(rootRef, enabled, true, speedCpsRef, undefined, undefined, false, 'catch-up', undefined, undefined, true)
+  useProgressiveDomText(rootRef, enabled, true, speedCpsRef, undefined, undefined, false, true)
   return <div ref={rootRef}>{text}</div>
 }
 

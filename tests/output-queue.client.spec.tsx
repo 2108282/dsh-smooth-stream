@@ -3,6 +3,7 @@ import { createElement, StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { wrapFollowNodeView, clearToolPresentationLedger } from '../src/client/TypewriterToolNodeView.tsx'
 import { StreamRelay, streamRelay } from '../src/client/streamRelay.ts'
+import { installEntryBaselineSource, type EntryBaselineWindow } from '../src/client/entryBaseline.ts'
 
 let frames: Map<number, FrameRequestCallback>
 let time: number
@@ -36,6 +37,47 @@ function row(id: string, order: number, kind: string, text: string, sessionId = 
 }
 
 describe('ordered Agent output presentation', () => {
+  it('adopts an existing fallback tool snapshot and paces only later DOM growth', async () => {
+    const entry = (seq: number): EntryBaselineWindow['entries'][number] => ({
+      type: 'event', event: { type: 'tool/call', seq, data: {} },
+    })
+    const snapshotEntries = [entry(1)]
+    const window: EntryBaselineWindow = {
+      entries: snapshotEntries, revision: 1, change: { kind: 'replace', entries: snapshotEntries },
+    }
+    const dispose = installEntryBaselineSource({
+      binding: id => id === 's' ? {
+        session: {
+          getSnapshot: () => ({ openState: 'open' as const }),
+          subscribe: () => () => {},
+        },
+        eventSource: {
+          getSnapshot: () => window,
+          subscribe: () => () => {},
+        },
+      } : undefined,
+    })
+    const initial = 'running tool output '.repeat(20)
+    const updated = `${initial}new suffix`
+    const tree = (text: string) => row('existing-tool', 1, 'tool-call', text, 's')
+    try {
+      const view = render(createElement('main', null, tree(initial)))
+      const output = () => view.container.querySelector('[data-id="existing-tool"]')!
+      expect(output().textContent).toBe(initial)
+      expect(frames.size).toBe(0)
+
+      view.rerender(createElement('main', null, tree(updated)))
+      await paint(4)
+      expect(output().textContent).toMatch(new RegExp(`^${initial}`))
+      expect(output().textContent!.length).toBeGreaterThan(initial.length)
+      expect(output().textContent).not.toBe(updated)
+      await paint(120)
+      expect(output().textContent).toBe(updated)
+    } finally {
+      dispose()
+    }
+  })
+
   it('serializes tools, context, todo and future keyed rows independent of backend kind', async () => {
     const text = 'abcdefghijklmnopqrstuvwxyz'.repeat(2)
     const view = render(createElement('main', null,

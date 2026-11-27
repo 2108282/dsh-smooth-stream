@@ -42,7 +42,7 @@ function Probe({ title = 'visible title', body = 'hidden output '.repeat(100), o
 }) {
   const root = useRef<HTMLDivElement>(null)
   const speed = useRef(35)
-  useProgressiveDomText(root, enabled, true, speed, undefined, pending, false, 'catch-up', undefined, undefined, observe)
+  useProgressiveDomText(root, enabled, true, speed, undefined, pending, false, observe)
   return <div ref={root} data-tool="bash">
     <div data-disclosure-header><span data-testid="title">{title}</span></div>
     {mode === 'details' ? <details open={open}><summary>Details</summary><pre data-testid="body">{body}</pre></details>

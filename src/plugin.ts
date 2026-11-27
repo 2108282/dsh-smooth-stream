@@ -61,8 +61,6 @@ export const StreamSettingsSchema: Schema<StreamSettings> = Schema.object({
     Schema.const('force-smooth'),
     Schema.const('force-reduced'),
   ] as const).default(DEFAULT_STREAM_SETTINGS.motionPreference),
-  backgroundRecovery: Schema.union(['replay', 'catch-up', 'latest'] as const).default(DEFAULT_STREAM_SETTINGS.backgroundRecovery),
-  foregroundRecoveryDelayMs: Schema.number().step(1).min(0).max(10000).default(DEFAULT_STREAM_SETTINGS.foregroundRecoveryDelayMs),
   thinkAutoExpand: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.thinkAutoExpand),
   logarithmicFade: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.logarithmicFade),
   fastFold: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.fastFold),
@@ -101,10 +99,17 @@ export function apply(ctx: Context, config: Config): void {
 
   const SETTINGS_FILE = join(process.env.DSH_HOME || '/root/.dsh', 'storages', 'smooth-stream-settings.json')
 
+  // Old clients and saved files may still send these fields. Ignore them before
+  // validation so their old values never affect current preferences or playback.
+  function currentSettingsFields(value: Record<string, unknown>): Record<string, unknown> {
+    const { backgroundRecovery: _recovery, foregroundRecoveryDelayMs: _delay, ...current } = value
+    return current
+  }
+
   function loadSettings(): StreamSettings {
     try {
       if (existsSync(SETTINGS_FILE)) {
-        const saved = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
+        const saved = currentSettingsFields(JSON.parse(readFileSync(SETTINGS_FILE, 'utf8')))
         // Legacy files tied physical tuning to the HUD switch. Preserve that
         // effective state once; subsequent saves persist the independent flag.
         return StreamSettingsSchema({
@@ -112,7 +117,7 @@ export function apply(ctx: Context, config: Config): void {
           debugTuningEnabled: saved.debugTuningEnabled === undefined
             ? saved.debugEnabled === true
             : saved.debugTuningEnabled,
-        })
+        } as StreamSettings)
       }
     } catch (e) {
       console.warn('[dsh-smooth-stream] loadSettings error:', e)
@@ -150,8 +155,6 @@ export function apply(ctx: Context, config: Config): void {
           enabled: currentSettings.enabled,
           controlScroll: currentSettings.controlScroll,
           motionPreference: currentSettings.motionPreference,
-          backgroundRecovery: currentSettings.backgroundRecovery,
-          foregroundRecoveryDelayMs: currentSettings.foregroundRecoveryDelayMs,
           thinkAutoExpand: currentSettings.thinkAutoExpand,
           logarithmicFade: currentSettings.logarithmicFade,
           fastFold: currentSettings.fastFold ?? DEFAULT_STREAM_SETTINGS.fastFold,
@@ -212,9 +215,9 @@ export function apply(ctx: Context, config: Config): void {
             },
           }
         }
-        const next = payload as Record<string, unknown>
+        const next = currentSettingsFields(payload as Record<string, unknown>)
         const allowedKeys = new Set([
-          'enabled', 'controlScroll', 'motionPreference', 'backgroundRecovery', 'foregroundRecoveryDelayMs', 'thinkAutoExpand', 'logarithmicFade',
+          'enabled', 'controlScroll', 'motionPreference', 'thinkAutoExpand', 'logarithmicFade',
           'fastFold', 'fastPipeline', 'keepStreamOnToolCall', 'debugEnabled', 'debugTuningEnabled', 'debugTuning',
         ])
         if (Object.keys(next).some(key => !allowedKeys.has(key))) {
@@ -232,19 +235,6 @@ export function apply(ctx: Context, config: Config): void {
           && next.motionPreference !== 'force-smooth'
           && next.motionPreference !== 'force-reduced') {
           return rejectedSettings('settings payload contains an invalid motionPreference')
-        }
-        if ('backgroundRecovery' in next
-          && next.backgroundRecovery !== 'replay'
-          && next.backgroundRecovery !== 'catch-up'
-          && next.backgroundRecovery !== 'latest') {
-          return rejectedSettings('settings payload contains an invalid backgroundRecovery')
-        }
-        if ('foregroundRecoveryDelayMs' in next
-          && (typeof next.foregroundRecoveryDelayMs !== 'number'
-            || !Number.isInteger(next.foregroundRecoveryDelayMs)
-            || next.foregroundRecoveryDelayMs < 0
-            || next.foregroundRecoveryDelayMs > 10000)) {
-          return rejectedSettings('settings payload contains an invalid foregroundRecoveryDelayMs')
         }
         if ('debugTuning' in next && !validDebugTuning(next.debugTuning)) {
           return rejectedSettings('settings payload contains invalid debugTuning')

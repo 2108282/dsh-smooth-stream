@@ -2,18 +2,16 @@ import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef
 import type { AssistantBlock, ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client'
 import { FollowHost } from './FollowHost.tsx'
 import { notifyFollowCommit } from './teleprompterGlide.ts'
-import { LARGE_RECOVERY_BACKLOG_CHARS, countChars, useSmoothStreamContent, type StreamSmoothingPreset } from './useSmoothStreamContent.ts'
+import { countChars, useSmoothStreamContent, type StreamSmoothingPreset } from './useSmoothStreamContent.ts'
 import { useLogarithmicFade } from './useLogarithmicFade.ts'
 import type { StreamSettings } from '../settings.ts'
-import { relayScope, relayTurnKey, streamRelay } from './streamRelay.ts'
-import { isBackgroundRecoveryScope } from './backgroundRecovery.ts'
+import { relayScope, streamRelay } from './streamRelay.ts'
 import { assistantProgress } from './presentationProgress.ts'
 import { STREAM_ORDER_DATA_KEY, type StreamOrderData } from './streamOrder.ts'
 
 export interface NativeAssistantPreferences extends Pick<StreamSettings,
   'controlScroll' | 'motionPreference' | 'logarithmicFade' | 'thinkAutoExpand' | 'keepStreamOnToolCall'> {
   preset: StreamSmoothingPreset
-  backgroundRecovery?: StreamSettings['backgroundRecovery']
 }
 
 type AssistantProps = ChatNodeViewProps<'assistant-step'>
@@ -294,28 +292,11 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   const { preset, controlScroll, logarithmicFade, motionPreference } = preferences
   const reduced = useReducedMotion(motionPreference)
   const live = node.data.status === 'running'
-  const baseScope = useMemo(() => relayScope(node, owner.sessionId), [node.key, node.anchorSeq, node.data.turn, node.data.step, owner.sessionId])
-  const recoveryKey = relayTurnKey(baseScope)
-  const recoveryPosition = [baseScope.step, baseScope.order, groupPart === 'reasoning' ? 0 : 1] as const
-  const recoveringScope = isBackgroundRecoveryScope(recoveryKey, recoveryPosition)
-  const [recoveryEpoch, setRecoveryEpoch] = useState<number | undefined>(() => {
-    const activeEpoch = streamRelay.recoveryEpoch(recoveryKey)
-    return recoveringScope ? (activeEpoch ?? 0) + 1 : undefined
-  })
-  const scope = useMemo(() => ({ ...baseScope, recoveryEpoch }), [baseScope, recoveryEpoch])
-  const seenLive = useRef(live || recoveringScope)
-  if (live || recoveringScope) seenLive.current = true
+  const scope = useMemo(() => relayScope(node, owner.sessionId), [node.key, node.anchorSeq, node.data.turn, node.data.step, owner.sessionId])
+  const seenLive = useRef(live)
+  if (live) seenLive.current = true
   const segments = useMemo(() => assistantTextSegments(node.data.blocks, groupPart), [node.data.blocks, groupPart])
   const source = projectionCache(segments).source
-  const [recoveryBacklog, setRecoveryBacklog] = useState(() => !reduced && node.data.status !== 'interrupted'
-    && recoveringScope && countChars(source) > LARGE_RECOVERY_BACKLOG_CHARS)
-  // A resumed seat must never auto-open its reasoning, whatever the backlog
-  // size. Latch the recovery scope (the shared recovery map is mutable, so a
-  // mid-drain snapshot can drop to `false`) together with any large recovery
-  // backlog, so fast-forwarding a collapsed block to "drained" cannot re-open
-  // it. The latch resets only when this seat unmounts (a new turn/step seat).
-  const recoveryDisclosure = useRef(reduced ? false : (recoveringScope || recoveryBacklog))
-  if (!reduced && (recoveringScope || recoveryBacklog)) recoveryDisclosure.current = true
   const root = useRef<HTMLDivElement>(null)
   const [collapsedReasoning, setCollapsedReasoning] = useState<readonly number[]>(() => !preferences.thinkAutoExpand
     ? node.data.blocks.flatMap((block, index) => block.kind === 'reasoning' ? [index] : []) : [])
@@ -363,8 +344,10 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   const scale = useRef(1)
   const part = groupPart === 'reasoning' ? 'reasoning' : 'response'
   const presentationKey = JSON.stringify([scope.session, scope.turn, scope.step, scope.node, part])
-  const [restored] = useState(() => assistantProgress.read(presentationKey, source))
-  const committed = useRef(restored ?? (seenLive.current ? '' : source))
+  // This fallback has no Conversation-entry lifetime. Conservatively adopt
+  // the current snapshot on every mount; only later appends are new playback.
+  const [initialContent] = useState(source)
+  const committed = useRef(initialContent)
   // Only live/new backlog participates; an already presented historical row
   // cannot be turned back into a stream by an unrelated predecessor.
   const animate = seenLive.current && !reduced && node.data.status !== 'interrupted'
@@ -378,21 +361,10 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   hold.current = animate && source !== committed.current && streamRelay.isBlocked(scope, part)
   const smoothed = useSmoothStreamContent(source, {
     enabled: animate,
-    backgroundRecovery: preferences.backgroundRecovery,
-    recoveryKey: seenLive.current ? recoveryKey : undefined,
-    recoveryPosition,
     replayOnEnable: false,
-    initialDisplayedContent: restored,
-    resumeOnMount: restored !== undefined,
+    initialDisplayedContent: initialContent,
     skipRanges: skipPlan.ranges,
     canSkipRange,
-    onRecoveryBacklogChange: setRecoveryBacklog,
-    initialRecoveryEpoch: recoveryEpoch,
-    // Restoring a cached prefix also uses local playback, but only background
-    // recovery may promote that playback above ordinary predecessor leases.
-    onRecoveryBatchChange: epoch => setRecoveryEpoch(epoch === undefined
-      || isBackgroundRecoveryScope(recoveryKey, recoveryPosition)
-      || streamRelay.recoveryEpoch(recoveryKey) !== undefined ? epoch : undefined),
     inputComplete: !live || toolPresent || node.data.blocks.some(block => block.kind === 'tool-call')
       || (groupPart === 'reasoning' && node.data.blocks.at(-1)?.kind !== 'reasoning'),
     shouldHoldBack: () => hold.current,
@@ -411,10 +383,8 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   const blocked = useSyncExternalStore(subscribeBlocked,
     () => pending && streamRelay.isBlocked(activeScope, part), () => false)
   hold.current = blocked
-  const presented = useRef(false)
+  const presented = useRef(initialContent !== '')
   useLayoutEffect(() => { if (!blocked && shown !== '') presented.current = true }, [blocked, shown])
-  const preserveRecoveryLayout = presented.current
-    && (recoveryEpoch !== undefined || streamRelay.recoveryEpoch(scope) !== undefined)
   const ownsLiveTail = live && !toolPresent && !node.data.blocks.some(block => block.kind === 'tool-call')
     && (groupPart !== 'reasoning' || node.data.blocks.at(-1)?.kind === 'reasoning')
   const typing = !toolHandoff && (ownsLiveTail || pending)
@@ -440,11 +410,7 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
     && block.text !== (node.data.blocks[index] as { text?: string } | undefined)?.text)
   const reasoningTyping = !toolHandoff && (reasoningPending
     || (live && !toolPresent && node.data.blocks.at(-1)?.kind === 'reasoning'))
-  // Ordinary live reasoning keeps the usual auto-expand policy. A background
-  // resume never auto-opens: the latch above stays set until this seat is
-  // replaced, so a collapsed block cannot reopen mid-catch-up. The disclosure
-  // hook still honours manual choices.
-  const useDisclosure = useAutomaticDisclosure(owner.useDisclosure, preferences.thinkAutoExpand && !recoveryDisclosure.current, reasoningTyping && !blocked)
+  const useDisclosure = useAutomaticDisclosure(owner.useDisclosure, preferences.thinkAutoExpand, reasoningTyping && !blocked)
   // The Hook changes only with its policy/phase, so the official memo tree
   // observes completion even if the final text snapshot is unchanged. React
   // retains each ReasoningRow's Hook state and the official reset subscription.
@@ -454,7 +420,7 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
     node: { ...node, data: { ...node.data, blocks,
       status: typing ? 'running' as const : live && !ownsLiveTail ? 'settled' as const : node.data.status } },
   }), [owner, node, blocks, useDisclosure, typing, live, ownsLiveTail])
-  useLogarithmicFade(root, logarithmicFade && !reduced, typing, speed)
+  useLogarithmicFade(root, logarithmicFade && !reduced, typing, speed, true)
   useLayoutEffect(() => {
     const row = root.current?.closest('[data-chat-flow-key]')
     if (row === undefined || row === null) return
@@ -464,7 +430,7 @@ function NativeAssistantSeat({ Inner, owner, preferences }: NativeProps): ReactN
   }, [typing])
   return (
     <div ref={root}
-      style={blocked && !preserveRecoveryLayout ? { opacity: 0, pointerEvents: 'none', height: 0, overflow: 'hidden' } : undefined}
+      style={blocked && !presented.current ? { opacity: 0, pointerEvents: 'none', height: 0, overflow: 'hidden' } : undefined}
       data-smooth-stream-phase={blocked ? 'waiting' : typing ? 'typing' : 'settled'}
       data-smooth-stream-typing={!blocked && typing ? 'true' : undefined}>
       <FollowHost active={!blocked && typing && !reduced} speedCpsRef={speed} revealedCharsRef={revealed}

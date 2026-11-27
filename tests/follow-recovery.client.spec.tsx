@@ -85,13 +85,14 @@ function mount() {
   const view = render(<Conversation layout={layout} />)
   return {
     model: layout.current!,
+    unmount: () => view.unmount(),
     remount: () => view.rerender(<Conversation layout={layout} generation={1} />),
     complete: () => view.rerender(<Conversation layout={layout} active={false} />),
   }
 }
-async function paint(count = 1) {
+async function paint(count = 1, delta = 16) {
   for (let index = 0; index < count; index++) await act(async () => {
-    time += 16
+    time += delta
     const batch = [...frames.values()]
     frames.clear()
     for (const callback of batch) callback(time)
@@ -131,8 +132,8 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-describe('conversation follow across WebView recovery', () => {
-  it.each([false, true])('does not recreate runway when a new arm mounts after host handoff (background=%s)', async background => {
+describe('conversation follow with ordinary frame timing', () => {
+  it.each([false, true])('keeps host handoff across arm mounts and lifecycle events (background=%s)', async background => {
     const { model, remount } = mount()
     await paint(20)
     expect(model.port.hasAttribute('data-follow-owned')).toBe(true)
@@ -157,81 +158,84 @@ describe('conversation follow across WebView recovery', () => {
     expectNativeSpacing(model)
   })
 
-  it('releases obsolete geometry while hidden and remeasures the new viewport before resuming follow', async () => {
+  it('leaves owned geometry and scheduled motion intact across lifecycle events', async () => {
     const { model } = mount()
     await paint(20)
-    const reserve = pixels(model.status.style.marginTop) - pixels(ORIGINAL.margin)
-    expect(reserve).toBeGreaterThan(0)
+    const before = {
+      margin: model.status.style.marginTop,
+      padding: model.transcript.style.paddingBottom,
+      minHeight: model.transcript.style.minHeight,
+      shift: shift(model.transcript),
+      scrollTop: model.port.scrollTop,
+      owned: model.port.hasAttribute('data-follow-owned'),
+      frames: frames.size,
+    }
+    expect(pixels(before.margin)).toBeGreaterThan(pixels(ORIGINAL.margin))
     await lifecycle(true)
-    expectNativeSpacing(model)
-    expect(shift(model.transcript)).toBe(0)
-    expect(model.transcript.style.minHeight).toBe(ORIGINAL.minHeight)
-    // A hidden WebView can temporarily lose its measured size. No glyph/resize
-    // commit may recreate a stale runway before its foreground layout is ready.
-    model.measurable = false
-    model.base = 440
-    model.viewport = 320
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'))
+      window.dispatchEvent(new Event('pagehide'))
+      window.dispatchEvent(new Event('freeze'))
+    })
+    expect({
+      margin: model.status.style.marginTop,
+      padding: model.transcript.style.paddingBottom,
+      minHeight: model.transcript.style.minHeight,
+      shift: shift(model.transcript),
+      scrollTop: model.port.scrollTop,
+      owned: model.port.hasAttribute('data-follow-owned'),
+      frames: frames.size,
+    }).toEqual(before)
+    model.base += 26
     await act(async () => notifyFollowCommit(model.row))
-    expectNativeSpacing(model)
-    time += 60000
+    await paint()
+    expect(model.port.scrollTop).toBe(model.port.scrollHeight - model.port.clientHeight)
+    expect(model.port.hasAttribute('data-follow-owned')).toBe(true)
     await lifecycle(false)
-    await paint()
-    expectNativeSpacing(model)
-    model.measurable = true
-    await paint(100)
     expect(model.spacer.style.height).toBe(ORIGINAL.spacer)
-    expect(Number.isFinite(shift(model.transcript))).toBe(true)
-    expect(model.port.scrollHeight - model.port.clientHeight - model.port.scrollTop).toBeLessThanOrEqual(1)
-    // At steady state the normal native gap must not grow into blank viewport
-    // space merely because the hidden document had a different viewport size.
-    const normalGap = pixels(ORIGINAL.padding) + pixels(ORIGINAL.margin) + pixels(ORIGINAL.spacer)
-    expect(model.viewport - model.row.getBoundingClientRect().bottom).toBeLessThanOrEqual(normalGap + 73)
   })
 
-  it('rebases the first measured frame after a long WebView stall without replaying hidden height growth', async () => {
-    const { model } = mount()
-    await paint(30)
-    // No lifecycle signal is guaranteed on all WebView carriers. Real layout
-    // grew while RAF was suspended; the first fresh frame must use that layout.
-    model.base += 600
-    model.viewport = 280
-    time += 60000
-    await paint()
-    const normalGap = pixels(ORIGINAL.padding) + pixels(ORIGINAL.margin) + pixels(ORIGINAL.spacer)
-    expect(model.port.scrollHeight - model.port.clientHeight - model.port.scrollTop).toBeLessThanOrEqual(1)
-    expect(Math.abs(model.viewport - model.row.getBoundingClientRect().bottom - normalGap)).toBeLessThanOrEqual(8)
-    expect(model.spacer.style.height).toBe(ORIGINAL.spacer)
-    expect(model.status.textContent).toBe('Working')
+  it('treats a long frame exactly like the normal 32ms motion cap without rebasing', async () => {
+    const run = async (delta: number) => {
+      const { model, unmount } = mount()
+      await paint(20)
+      model.base += 26
+      await paint(1, delta)
+      const result = {
+        margin: model.status.style.marginTop,
+        padding: model.transcript.style.paddingBottom,
+        shift: shift(model.transcript),
+        scrollTop: model.port.scrollTop,
+        owned: model.port.hasAttribute('data-follow-owned'),
+      }
+      unmount()
+      await paint(120)
+      return result
+    }
+    expect(await run(60000)).toEqual(await run(32))
   })
 
-  it('does not let a detached completion settle reopen spacing while the WebView is hidden', async () => {
+  it('continues an ordinary completion settle across lifecycle events', async () => {
     const { model, complete } = mount()
     await paint(20)
-    model.base += 300
+    model.base += 26
     await act(async () => notifyFollowCommit(model.row))
     await paint(2)
     complete()
+    const margin = pixels(model.status.style.marginTop)
     await lifecycle(true)
-    expectNativeSpacing(model)
-    expect(shift(model.transcript)).toBe(0)
-    const top = model.port.scrollTop
-    // A final model result or an already queued settle callback may run while
-    // the WebView is hidden. Neither may resurrect the canceled visual state.
-    model.base += 100
-    await act(async () => notifyFollowCommit(model.row))
-    await paint(100)
-    expectNativeSpacing(model)
-    expect(shift(model.transcript)).toBe(0)
-    expect(model.port.scrollTop).toBe(top)
-    expect(model.port.hasAttribute('data-follow-owned')).toBe(false)
+    expect(pixels(model.status.style.marginTop)).toBe(margin)
+    await paint(20)
+    expect(pixels(model.status.style.marginTop)).toBeLessThan(margin)
+    expect(model.spacer.style.height).toBe(ORIGINAL.spacer)
+    expect(Number.isFinite(shift(model.transcript))).toBe(true)
   })
 
-  it('does not accumulate runway across repeated rapid hide/show transitions', async () => {
+  it('keeps the ordinary runway budget across repeated lifecycle events', async () => {
     const { model } = mount()
     await paint(20)
     for (let index = 0; index < 5; index++) {
       await lifecycle(true)
-      expectNativeSpacing(model)
       model.viewport += 10
       model.base += 20
       await lifecycle(false)
@@ -294,7 +298,7 @@ describe('conversation follow across WebView recovery', () => {
     expect(model.port.hasAttribute('data-follow-owned')).toBe(false)
   })
 
-  it.each(['lifecycle', 'long-frame'] as const)('keeps a reader who scrolled up released after %s geometry recovery', async mode => {
+  it.each(['lifecycle', 'long-frame'] as const)('keeps a reader who scrolled up released across a %s interval', async mode => {
     const { model } = mount()
     await paint(20)
     fireEvent.wheel(model.port, { deltaY: -80 })

@@ -93,9 +93,6 @@ export interface DiagnosticSample {
   readonly gapMs?: number
   readonly durationMs?: number
   readonly backlogChars?: number
-  readonly activeBatchChars?: number | undefined
-  readonly incomingBatchChars?: number | undefined
-  readonly recoveryEpoch?: number | undefined
   readonly pendingNodes?: number
   readonly records?: number
   readonly mode?: string

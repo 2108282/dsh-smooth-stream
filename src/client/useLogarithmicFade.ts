@@ -87,7 +87,6 @@ export class LogarithmicFadeController {
   private enabled = false
   private active = false
   private speedCps = 100
-  private pausedAt: number | null = null
   private disposed = false
   private readonly observer: MutationObserver
 
@@ -103,14 +102,7 @@ export class LogarithmicFadeController {
     return scheduler === null ? null : new LogarithmicFadeController(root, scheduler)
   }
 
-  update(enabled: boolean, active: boolean, speedCps = 100, paused = false): void {
-    const now = this.scheduler.window.performance.now()
-    if (paused && this.pausedAt === null) this.pausedAt = now
-    if (!paused && this.pausedAt !== null) {
-      const pauseDuration = now - this.pausedAt
-      for (const character of this.characters) character.born += pauseDuration
-      this.pausedAt = null
-    }
+  update(enabled: boolean, active: boolean, speedCps = 100): void {
     this.enabled = enabled
     this.active = active
     this.speedCps = speedCps
@@ -159,7 +151,7 @@ export class LogarithmicFadeController {
       return
     }
     this.root.classList.add(css.scope!)
-    const now = this.pausedAt ?? this.scheduler.window.performance.now()
+    const now = this.scheduler.window.performance.now()
     // A parser rewrite must not replay already readable content. Retain only
     // the unchanged prefix; future appends resume the effect normally.
     let prefix = 0
@@ -211,13 +203,8 @@ export class LogarithmicFadeController {
       end = start
     }
     if (this.paint(now)) {
-      if (this.pausedAt === null) {
-        this.scheduler.pending.add(this)
-        schedule(this.scheduler)
-      } else {
-        this.scheduler.pending.delete(this)
-        this.stopIfIdle()
-      }
+      this.scheduler.pending.add(this)
+      schedule(this.scheduler)
     } else {
       this.scheduler.pending.delete(this)
       this.stopIfIdle()
@@ -274,7 +261,6 @@ export function useLogarithmicFade(
   enabled: boolean,
   active: boolean,
   speedCpsRef?: { current: number },
-  paused = false,
   adoptInitialText = false,
 ): void {
   const controller = useRef<LogarithmicFadeController | null>(null)
@@ -295,7 +281,7 @@ export function useLogarithmicFade(
       // A shared source cursor may also hand a new renderer an existing prefix.
       if (committed.current || adoptInitialText) controller.current?.update(false, false)
     }
-    controller.current?.update(enabled, active, speedCpsRef?.current, paused)
+    controller.current?.update(enabled, active, speedCpsRef?.current)
     committed.current = true
   })
 }

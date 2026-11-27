@@ -33,8 +33,6 @@ const developmentView: StreamSettingsView = {
     enabled: true,
     controlScroll: true,
     motionPreference: 'auto',
-    backgroundRecovery: 'catch-up',
-  foregroundRecoveryDelayMs: 0,
     thinkAutoExpand: true,
     logarithmicFade: true,
     fastFold: true,
@@ -102,7 +100,6 @@ async function bench(options: BenchOptions = {}): Promise<{
         enabled?: unknown
         thinkAutoExpand?: unknown
         logarithmicFade?: boolean
-        backgroundRecovery?: StreamSettingsView['backgroundRecovery']
         debugEnabled?: unknown
         debugTuningEnabled?: boolean
         debugTuning?: unknown
@@ -119,7 +116,6 @@ async function bench(options: BenchOptions = {}): Promise<{
         enabled: settings.enabled,
         thinkAutoExpand: settings.thinkAutoExpand,
         logarithmicFade: settings.logarithmicFade ?? view.logarithmicFade,
-        backgroundRecovery: settings.backgroundRecovery ?? view.backgroundRecovery,
       }
       if (typeof settings.debugEnabled === 'boolean' && typeof settings.debugTuning === 'object' && settings.debugTuning !== null) {
         debugView = { debugEnabled: settings.debugEnabled, debugTuningEnabled: settings.debugTuningEnabled ?? false, tuning: settings.debugTuning as StreamDebugSettingsView['tuning'] }
@@ -357,8 +353,6 @@ describe('smooth-stream settings card', () => {
       enabled: true,
       controlScroll: true,
       motionPreference: 'auto',
-      backgroundRecovery: 'catch-up',
-  foregroundRecoveryDelayMs: 0,
       thinkAutoExpand: false,
       logarithmicFade: true,
       fastFold: true,
@@ -392,28 +386,34 @@ describe('smooth-stream settings card', () => {
     expect(choiceLabel!.parentElement!.closest('label')).toBeNull()
   })
 
-  it('selects, saves and reloads each background playback choice', async () => {
-    const { ctx, slots, call } = await bench()
+  it('ignores retired response fields and only saves current preferences', async () => {
+    const { ctx, slots, call } = await bench({ readValue: {
+      ...developmentView,
+      controlScroll: false,
+      backgroundRecovery: { obsolete: true },
+      foregroundRecoveryDelayMs: 'obsolete-delay',
+    } })
     declareCardSlot(slots)
     await ctx.plugin({ inject: [...inject], apply }).await()
     const face = cardFace(slots)
-    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().status).toBe('ready'))
-    const rendered = render(<SmoothStreamCard {...cardProps(face)} />)
+    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot()).toMatchObject({
+      status: 'ready', controlScroll: false, motionPreference: 'auto',
+    }))
+    expect(face.hooks.smoothStreamCard.getSnapshot()).not.toHaveProperty('backgroundRecovery')
+    expect(face.hooks.smoothStreamCard.getSnapshot()).not.toHaveProperty('foregroundRecoveryDelayMs')
+    render(<SmoothStreamCard {...cardProps(face)} />)
     fireEvent.click(screen.getByRole('button', { name: /smooth stream/i }))
-    const group = screen.getByRole('radiogroup', { name: en.backgroundRecovery })
-    const radios = [...group.querySelectorAll<HTMLInputElement>('input[type=radio]')]
-    expect(radios.map(input => input.checked)).toEqual([false, true, false])
-    for (const [index, mode] of ['replay', 'catch-up', 'latest'].entries()) {
-      const current = screen.getByRole('radiogroup', { name: en.backgroundRecovery }).querySelectorAll<HTMLInputElement>('input[type=radio]')
-      fireEvent.click(current[index]!)
-      expect(face.hooks.smoothStreamCard.getSnapshot().backgroundRecovery).toBe(mode)
-      face.save()
-      await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().dirty).toBe(false))
-      expect(call).toHaveBeenCalledWith(STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.write, expect.objectContaining({ backgroundRecovery: mode }))
-      face.reload()
-      await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot()).toMatchObject({ status: 'ready', backgroundRecovery: mode }))
-      rendered.rerender(<SmoothStreamCard {...cardProps(face)} />)
-    }
+    expect(screen.getAllByRole('radiogroup')).toHaveLength(1)
+    expect(screen.queryByRole('radiogroup', { name: /background recovery/i })).toBeNull()
+    expect(screen.queryByRole('spinbutton', { name: /foreground recovery/i })).toBeNull()
+    expect(screen.getByRole('checkbox', { name: new RegExp(`^${en.debugTuningEnabled}`) })).toBeTruthy()
+    face.edit({ thinkAutoExpand: false })
+    face.save()
+    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().dirty).toBe(false))
+    const payload = call.mock.calls.findLast(args => args[1] === STREAM_SETTINGS_RPC.write)![2]
+    expect(payload).toMatchObject({ controlScroll: false, motionPreference: 'auto', thinkAutoExpand: false })
+    expect(payload).not.toHaveProperty('backgroundRecovery')
+    expect(payload).not.toHaveProperty('foregroundRecoveryDelayMs')
   })
 
   it('stages and persists the diagnostics switch through its compatible endpoint', async () => {
@@ -464,8 +464,6 @@ describe('smooth-stream settings card', () => {
       enabled: false,
       controlScroll: true,
       motionPreference: 'auto',
-      backgroundRecovery: 'catch-up',
-  foregroundRecoveryDelayMs: 0,
       thinkAutoExpand: true,
       logarithmicFade: true,
       fastFold: true,
@@ -589,7 +587,7 @@ describe('smooth-stream settings card', () => {
       .toBeNull()
   })
 
-  it('starts recovery capture with the diagnostics panel switch off and preserves it after remount', async () => {
+  it('starts diagnostics capture with the diagnostics panel switch off and preserves it after remount', async () => {
     const { ctx, slots } = await bench({ view: { ...developmentView, enabled: true } })
     declareCardSlot(slots)
     await ctx.plugin({ inject: [...inject], apply }).await()

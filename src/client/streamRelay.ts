@@ -8,8 +8,6 @@ export interface RelayScope {
   order: number
   /** Source event position of the currently pending block, when available. */
   sourceOrder?: number | undefined
-  /** Frozen recovery batch; lower epochs drain before later batches in this turn. */
-  recoveryEpoch?: number | undefined
 }
 export type RelayPart = 'reasoning' | 'response' | 'tool' | 'output'
 interface Lease {
@@ -18,7 +16,6 @@ interface Lease {
   node: string
   order: number
   sourceOrder?: number | undefined
-  recoveryEpoch?: number | undefined
   part: RelayPart
   active: boolean
 }
@@ -45,7 +42,7 @@ export function relayScope(node: unknown, sessionId?: unknown): RelayScope {
   }
 }
 
-/** Shared recovery identity, isolated from other sessions and historical turns. */
+/** Shared turn identity, isolated from other sessions and historical turns. */
 export function relayTurnKey(scope: RelayScope): string {
   return JSON.stringify([scope.session, scope.turn])
 }
@@ -182,7 +179,7 @@ interface Subscription {
 /** Every mounted renderer owns a token; another viewport cannot release its work. */
 export class StreamRelay {
   private readonly leases = new Map<symbol, Lease>()
-  private readonly activeTurns = new Map<string, Map<number | undefined, TurnActivity>>()
+  private readonly activeTurns = new Map<string, TurnActivity>()
   private readonly tools = new Map<string, Map<number, number>>()
   private readonly blockedListeners = new Map<string, Set<Subscription>>()
   private readonly toolListeners = new Map<string, Map<number, Set<Subscription>>>()
@@ -194,7 +191,7 @@ export class StreamRelay {
 
   acquire(scope: RelayScope, part: RelayPart, active = true): symbol {
     const token = Symbol(part)
-    const lease = { turnKey: relayTurnKey(scope), step: scope.step, node: scope.node, order: scope.order, sourceOrder: scope.sourceOrder, recoveryEpoch: scope.recoveryEpoch, part, active }
+    const lease = { turnKey: relayTurnKey(scope), step: scope.step, node: scope.node, order: scope.order, sourceOrder: scope.sourceOrder, part, active }
     this.leases.set(token, lease)
     if (part === 'tool') this.changeTool(lease, 1)
     if (active) this.changeActive(lease, true)
@@ -219,24 +216,8 @@ export class StreamRelay {
     this.flushNotifications()
   }
 
-  /** Lowest mounted active recovery batch; new recovery seats join that batch. */
-  recoveryEpoch(scope: RelayScope | string): number | undefined {
-    const batches = this.activeTurns.get(typeof scope === 'string' ? scope : relayTurnKey(scope))
-    let earliest: number | undefined
-    if (batches !== undefined) for (const epoch of batches.keys()) {
-      if (epoch !== undefined && (earliest === undefined || epoch < earliest)) earliest = epoch
-    }
-    return earliest
-  }
-
   isBlocked(scope: RelayScope, part: RelayPart): boolean {
-    const batches = this.activeTurns.get(relayTurnKey(scope))
-    if (batches === undefined) return false
-    const earliest = this.recoveryEpoch(scope)
-    // Ordinary new input waits behind recovery. It cannot reclaim an earlier
-    // source position after its own frozen batches have already drained.
-    if (earliest !== undefined && (scope.recoveryEpoch === undefined || earliest < scope.recoveryEpoch)) return true
-    return batches.get(scope.recoveryEpoch)?.blocks(scope, part) ?? false
+    return this.activeTurns.get(relayTurnKey(scope))?.blocks(scope, part) ?? false
   }
 
   hasTool(scope: RelayScope): boolean {
@@ -276,13 +257,10 @@ export class StreamRelay {
 
   private changeActive(lease: Lease, active: boolean): void {
     if (Number.isNaN(lease.step)) return
-    const batches = this.activeTurns.get(lease.turnKey) ?? new Map<number | undefined, TurnActivity>()
-    const turn = batches.get(lease.recoveryEpoch) ?? new TurnActivity()
+    const turn = this.activeTurns.get(lease.turnKey) ?? new TurnActivity()
     turn.change(lease, active)
-    if (turn.empty) batches.delete(lease.recoveryEpoch)
-    else batches.set(lease.recoveryEpoch, turn)
-    if (batches.size === 0) this.activeTurns.delete(lease.turnKey)
-    else this.activeTurns.set(lease.turnKey, batches)
+    if (turn.empty) this.activeTurns.delete(lease.turnKey)
+    else this.activeTurns.set(lease.turnKey, turn)
     this.enqueue(this.blockedListeners.get(lease.turnKey))
   }
 

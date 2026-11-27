@@ -29,22 +29,6 @@ interface BindingPatch {
 
 const pipelines = new WeakMap<UnknownRecord, Pipeline>()
 const patchedBindings = new WeakMap<UnknownRecord, BindingPatch>()
-const borrowedBindings = new Set<BindingPatch>()
-
-/** Commit pending assembler publications before foreground playback recovery. */
-export function flushConversationPublications(): void {
-  for (const patch of [...borrowedBindings]) {
-    if (patch.owners.size === 0) continue
-    const frame = patch.binding.frame
-    patch.pending = undefined
-    if (typeof frame !== 'number') continue
-    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame)
-    patch.binding.frame = undefined
-    const flush = patch.binding.flush
-    if (typeof flush === 'function') Reflect.apply(flush, patch.binding, [])
-  }
-}
-
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null
 }
@@ -136,7 +120,6 @@ function patchBinding(pipeline: Pipeline, value: unknown): void {
   }
   patch.owners.add(pipeline)
   pipeline.bindings.add(patch)
-  borrowedBindings.add(patch)
 }
 
 /**
@@ -182,7 +165,6 @@ export function installConversationPipeline(service: unknown, enabled: Enabled):
       patch.pending = undefined
       restoreMethod(patch.method)
       patchedBindings.delete(patch.binding)
-      borrowedBindings.delete(patch)
       // Hand an unfinished publication back to DSH instead of dropping its assembler work.
       if (pending && patch.binding.frame === pending.id) {
         if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(pending.id)

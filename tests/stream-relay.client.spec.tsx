@@ -166,11 +166,11 @@ describe('scoped stream relay leases', () => {
     // Enforce the cost contract directly, independent of clock resolution and device load.
     const indexes = relay as unknown as {
       leases: Map<symbol, unknown>
-      activeTurns: Map<string, Map<number | undefined, { blocks: (scope: RelayScope, part: string) => boolean }>>
+      activeTurns: Map<string, { blocks: (scope: RelayScope, part: string) => boolean }>
     }
     const scans = [vi.spyOn(indexes.leases, 'values'), vi.spyOn(indexes.leases, 'entries'),
       vi.spyOn(indexes.leases, 'forEach'), vi.spyOn(indexes.leases, Symbol.iterator)]
-    const otherQuery = vi.spyOn(indexes.activeTurns.get(JSON.stringify([foreign.session, foreign.turn]))!.get(undefined)!, 'blocks')
+    const otherQuery = vi.spyOn(indexes.activeTurns.get(JSON.stringify([foreign.session, foreign.turn]))!, 'blocks')
     const otherListener = vi.fn()
     relay.subscribeBlocked(foreign, 'response', otherListener)
     otherQuery.mockClear()

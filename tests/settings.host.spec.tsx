@@ -1,6 +1,6 @@
 /** Host settings persist in the plugin-owned JSON file and use Connection RPC. */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -78,19 +78,46 @@ async function mountHost(baseUrl: string, sharedHome?: string): Promise<{
 }
 
 describe('smooth-stream host settings', () => {
-  it('persists each recovery mode, defaults missing fields and rejects unknown choices atomically', async () => {
-    expect(StreamSettingsSchema({} as typeof DEFAULT_STREAM_SETTINGS).backgroundRecovery).toBe('catch-up')
-    const host = await mountHost(profileBaseUrl(`link:${process.cwd()}`))
-    for (const mode of ['replay', 'catch-up', 'latest']) {
-      expect(await host.registration.handler(STREAM_SETTINGS_RPC.write, { backgroundRecovery: mode }, signal(), peer)).toMatchObject({ ok: true, value: { backgroundRecovery: mode } })
-      expect(JSON.parse(readFileSync(host.settingsFile, 'utf8')).backgroundRecovery).toBe(mode)
-      expect(await host.registration.handler(STREAM_SETTINGS_RPC.read, {}, signal(), peer)).toMatchObject({ ok: true, value: { backgroundRecovery: mode } })
-    }
-    const persisted = readFileSync(host.settingsFile, 'utf8')
-    expect(await host.registration.handler(STREAM_SETTINGS_RPC.write, { backgroundRecovery: 'unknown' }, signal(), peer)).toMatchObject({ ok: false })
-    expect(readFileSync(host.settingsFile, 'utf8')).toBe(persisted)
-    await host.fiber.dispose()
-  })
+  it.each(['replay', 'catch-up', 'latest', { obsolete: true }])(
+    'ignores retired recovery settings from saved files and older clients: %j',
+    async backgroundRecovery => {
+      const home = mkdtempSync(join(tmpdir(), 'dsh-smooth-stream-legacy-home-'))
+      tempDirs.add(home)
+      mkdirSync(join(home, 'storages'))
+      const tuning = { ...DEFAULT_STREAM_SETTINGS.debugTuning, cadenceClamp: 5, springDamping: 31 }
+      writeFileSync(join(home, 'storages', 'smooth-stream-settings.json'), JSON.stringify({
+        ...DEFAULT_STREAM_SETTINGS,
+        enabled: false,
+        controlScroll: false,
+        motionPreference: 'force-reduced',
+        logarithmicFade: false,
+        debugTuningEnabled: true,
+        debugTuning: tuning,
+        backgroundRecovery,
+        foregroundRecoveryDelayMs: 'obsolete-delay',
+      }), 'utf8')
+      const host = await mountHost(profileBaseUrl(`link:${process.cwd()}`), home)
+      const expected = {
+        enabled: false, controlScroll: false, motionPreference: 'force-reduced', logarithmicFade: false,
+      }
+      const read = await host.registration.handler(STREAM_SETTINGS_RPC.read, {}, signal(), peer)
+      expect(read).toMatchObject({ ok: true, value: expected })
+      expect(read).not.toHaveProperty('value.backgroundRecovery')
+      expect(read).not.toHaveProperty('value.foregroundRecoveryDelayMs')
+      expect(await host.registration.handler(STREAM_SETTINGS_RPC.debugRead, {}, signal(), peer))
+        .toMatchObject({ ok: true, value: { debugTuningEnabled: true, tuning } })
+      const written = await host.registration.handler(STREAM_SETTINGS_RPC.write, {
+        thinkAutoExpand: false, backgroundRecovery, foregroundRecoveryDelayMs: -999,
+      }, signal(), peer)
+      expect(written).toMatchObject({ ok: true, value: { ...expected, thinkAutoExpand: false } })
+      expect(written).not.toHaveProperty('value.backgroundRecovery')
+      const persisted = JSON.parse(readFileSync(host.settingsFile, 'utf8'))
+      expect(persisted).toMatchObject({ ...expected, thinkAutoExpand: false, debugTuningEnabled: true, debugTuning: tuning })
+      expect(persisted).not.toHaveProperty('backgroundRecovery')
+      expect(persisted).not.toHaveProperty('foregroundRecoveryDelayMs')
+      await host.fiber.dispose()
+    },
+  )
 
   it('defaults physical tuning off and validates the independent flag and cadence', async () => {
     expect(StreamSettingsSchema({} as typeof DEFAULT_STREAM_SETTINGS).debugTuningEnabled).toBe(false)

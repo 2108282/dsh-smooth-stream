@@ -149,17 +149,21 @@ describe('assistant waiting presentation', () => {
       useDisclosure: () => ({ expanded: false, setExpanded: () => {}, toggle: () => {} }),
     } as unknown as ChatNodeViewProps<'assistant-step'>
     const Inner = () => createElement('aside', null, 'official chrome')
-    const view = render(createElement(NativeAssistantNodeView, {
-      Inner, owner,
-      preferences: { ...DEFAULT_STREAM_SETTINGS, controlScroll: false, logarithmicFade: false,
-        preset: 'balanced', keepStreamOnToolCall },
-    }))
+    const empty = { ...owner, node: { ...owner.node, data: { ...owner.node.data,
+      blocks: [{ kind: 'text' as const, text: '' }] } } }
+    const preferences = { ...DEFAULT_STREAM_SETTINGS, controlScroll: false, logarithmicFade: false,
+      preset: 'balanced' as const, keepStreamOnToolCall }
+    const view = render(createElement(NativeAssistantNodeView, { Inner, owner: empty, preferences }))
+    // Existing mount content is a baseline. Only a later live publication
+    // enters the ordinary relay queue and must hide official chrome.
+    view.rerender(createElement(NativeAssistantNodeView, { Inner, owner, preferences }))
     let root = view.container.querySelector<HTMLElement>('[data-smooth-stream-phase]')!
     expect(root.dataset.smoothStreamPhase).toBe('waiting')
     view.rerender(createElement(NativeAssistantNodeView, {
-      key: 'remounted', Inner, owner,
-      preferences: { ...DEFAULT_STREAM_SETTINGS, controlScroll: false, logarithmicFade: false,
-        preset: 'balanced', keepStreamOnToolCall },
+      key: 'remounted', Inner, owner: empty, preferences,
+    }))
+    view.rerender(createElement(NativeAssistantNodeView, {
+      key: 'remounted', Inner, owner, preferences,
     }))
     root = view.container.querySelector<HTMLElement>('[data-smooth-stream-phase]')!
     expect(root.dataset.smoothStreamPhase).toBe('waiting')

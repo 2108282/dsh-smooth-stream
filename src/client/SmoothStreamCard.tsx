@@ -39,8 +39,6 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
       enabled: true,
       controlScroll: true,
       motionPreference: 'auto' as const,
-      backgroundRecovery: 'catch-up' as const,
-      foregroundRecoveryDelayMs: 0,
       thinkAutoExpand: false,
       logarithmicFade: true,
       fastFold: true,
@@ -185,46 +183,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                   </span>
                   <span className={css.hint}>{t('logarithmicFadeHint')}</span>
                 </label>
-                <div className={state.enabled ? css.field : `${css.field} ${css.fieldDisabled}`}>
-                  <span className={css.fieldHead}>
-                    <span className={css.label}>{t('backgroundRecovery')}</span>
-                  </span>
-                  <span className={css.hint}>{t('backgroundRecoveryHint')}</span>
-                  <div role="radiogroup" aria-label={t('backgroundRecovery')}>
-                    {([
-                      ['replay', 'backgroundReplay', 'backgroundReplayHint'],
-                      ['catch-up', 'backgroundCatchUp', 'backgroundCatchUpHint'],
-                      ['latest', 'backgroundLatest', 'backgroundLatestHint'],
-                    ] as const).map(([value, label, hint]) => (
-                      <div key={value}>
-                        <label className={css.choice}>
-                          <input
-                            type="radio"
-                            className={css.choiceInput}
-                            name="smooth-stream-background-recovery"
-                            checked={state.backgroundRecovery === value}
-                            disabled={!state.writable || state.saving || !state.enabled}
-                            onChange={() => { edit({ backgroundRecovery: value }) }}
-                          />
-                          {t(label)}
-                        </label>
-                        <p className={css.hint}>{t(hint)}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <label className={state.enabled ? css.field : `${css.field} ${css.fieldDisabled}`}>
-                   <span className={css.fieldHead}><span className={css.label}>{t('foregroundRecoveryDelay')}</span></span>
-                   <span className={css.hint}>{t('foregroundRecoveryDelayHint')}</span>
-                   <input type="number" min={0} max={10000} step={1} inputMode="numeric"
-                     value={state.foregroundRecoveryDelayMs}
-                     disabled={!state.writable || state.saving || !state.enabled}
-                     onChange={(event) => {
-                       const value = event.currentTarget.valueAsNumber
-                       if (Number.isInteger(value) && value >= 0 && value <= 10000) edit({ foregroundRecoveryDelayMs: value })
-                     }} />
-                 </label>
-                 {/* Motion preference is a radio group, so this row is a div:
+                {/* Motion preference is a radio group, so this row is a div:
                     nesting the choice labels inside a field <label> would be
                     illegal HTML (label within label) and browsers route the
                     inner click away, so React never sees onChange. */}

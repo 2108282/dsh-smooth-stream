@@ -124,19 +124,22 @@ it('lingers after completion and clears immediately when disabled', () => {
   expect(vi.getTimerCount()).toBe(0)
 })
 
-it('freezes opacity while paused and resumes from the same progress', () => {
-  const { controller } = attach('暂停保留透明度')
+it('keeps ordinary fade timing across page lifecycle events', () => {
+  const { controller } = attach('持续渐显')
   controller.update(true, true, 100)
   tick(64)
-  const before = [...registry.entries()].filter(([, ranges]) => ranges.size > 0).map(([name]) => name)
-  controller.update(true, true, 100, true)
-  tick(500)
-  const frozen = [...registry.entries()].filter(([, ranges]) => ranges.size > 0).map(([name]) => name)
-  expect(frozen).toEqual(before)
-  expect(ranges().length).toBeGreaterThan(0)
-  controller.update(true, true, 100, false)
+  const before = ranges().length
+  expect(before).toBeGreaterThan(0)
+  window.dispatchEvent(new Event('dsha:background'))
+  document.dispatchEvent(new Event('visibilitychange'))
+  window.dispatchEvent(new Event('pagehide'))
   tick(192)
   expect(ranges()).toHaveLength(0)
+  window.dispatchEvent(new Event('dsha:foreground'))
+  window.dispatchEvent(new Event('pageshow'))
+  controller.update(true, true, 100)
+  expect(ranges()).toHaveLength(0)
+  expect(vi.getTimerCount()).toBe(0)
 })
 
 it('does not replay replacement, history or content revealed while disabled', () => {
