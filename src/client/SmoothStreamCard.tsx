@@ -82,7 +82,7 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
   const stopCapture = async () => {
     const capture = debugRuntime.stopDiagnostics()
     if (capture === null) return
-    const accepted = await writeClipboard(JSON.stringify({ version: state.version ?? '0.10.9', capture, tuning: state.debugTuning }, null, 2))
+    const accepted = await writeClipboard(JSON.stringify({ version: state.version ?? '0.11.0-rebuild.2', capture, tuning: state.debugTuning }, null, 2))
     setCaptureError(!accepted)
   }
   const blocked = !state.dirty || state.saving || state.status !== 'ready'

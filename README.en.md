@@ -1,6 +1,6 @@
 # dsh-smooth-stream
 
-> **Stable fix release 0.10.9 (main)**: Isolates background recovery playback batches so incoming text cannot rejoin an older batch, and fixes ordering when idle outputs receive new text, ordinary components remount, or `latest` recovery ends. Existing foreground recovery diagnostics and user tuning are preserved. See the [release record](docs/changes-0.10.9.md).
+> **Main rebuild candidate 0.11.0-rebuild.2**: Based on `origin/main` commit `d0c96a4651e175d393799168c11b42a9a743649a` (baseline package version 0.10.9), with unified session playback rebuilt inside the independent injection plugin. The earlier candidate based on the 0.10.10 fix branch is superseded for this task. See the [candidate notes](docs/changes-0.11.0-rebuild.2.md). This candidate has not been installed or reviewed on a live UI; the older performance and feel descriptions below are not evidence of candidate device validation.
 
 > **Transform jumpy AI outputs into a calm, teleprompter-smooth reading experience.**  
 > Physics-based stream rendering and zero-reflow viewport tracking for the DeepSeek Harness (`dsh`) Web UI.
@@ -61,45 +61,14 @@ Traditional chat UIs bind DOM rendering and scrolling directly to arrival events
 - Reasoning and tool executions remain expanded while streaming.
 - Once a turn settles, intermediate processes cleanly fold behind a minimalist `Processed in Xs` summary row, keeping the conversation view focused on final answers.
 
-### 4. Reactive Baton Relay Queue
+### 4. Session-Scoped Protocol Playback (0.11.0-rebuild.2 Candidate)
 
-When models perform complex reasoning or multi-step Agent loops, their output typically transitions through distinct phases: **Reasoning Chain → Preamble Response Text → Tool Execution**.
+This candidate uses one playback queue per injected Flow and orders visible content by conversation protocol metadata rather than DOM grouping. See the [candidate notes](docs/changes-0.11.0-rebuild.2.md) for behavior and verification boundaries.
 
-Under DeepSeek Harness's decoupled presentation layer, these phases are mounted across independent React subtrees. Uncoordinated rendering causes reasoning, text, and tools to burst simultaneously, clashing for visual focus, triggering layout thrashing, and causing frame drops on mobile devices.
-
-`dsh-smooth-stream` implements an event-driven **Baton Relay Queue (`streamRelay`)** to guarantee strict sequential execution across all stages:
-
-```
-[ Model Generation Stream ]
-            │
-            ▼
-┌────────────────────────────────────────────────────────┐
-│  Phase 1: Reasoning Chain Reveal                       │
-│  - Smooth progressive expansion & logarithmic fade     │
-│  - Text and tools stay suspended in place (0 CPU load) │
-│  - Drains tail buffer at steady pace, then auto-folds  │
-└───────────────────────────┬────────────────────────────┘
-                            │ Relay handoff
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│  Phase 2: Response Text Streaming                      │
-│  - Begins smooth reveal from character 0               │
-│  - 2nd-order damped spring glide, zero visual leaps    │
-│  - Holds tool lock active during entire reveal         │
-│  - Unlocks downstream tools after text settle finishes │
-└───────────────────────────┬────────────────────────────┘
-                            │ Lock released
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│  Phase 3: Tool Execution & Entrance                    │
-│  - Tool cards unlock and glide in with 120ms GPU ease  │
-│  - Tool execution and result display proceed cleanly   │
-│  - Zero DOM loss, zero focus jumping                   │
-└────────────────────────────────────────────────────────┘
-```
-
-- **Zero-Polling Reactivity**: Bypasses costly DOM `MutationObserver` traversals entirely by subscribing via React 18 `useSyncExternalStore` to an atomic in-memory state machine. Delivers sub-millisecond coordination and sustains 60/120fps fluid playback even on mobile devices.
-- **Mental Model Alignment**: Guarantees that reasoning completes and folds before text streams, and preamble text completely reveals before tool execution cards appear.
+- Response text, expanded reasoning, and tool cards follow protocol sequence; tool cards retain the official renderer and enter atomically.
+- A predecessor releases its successor only after an explicit block-end or durable settlement boundary. Network silence or a temporarily drained character buffer is not treated as protocol completion.
+- Initial history and older-page navigation display without replay. Background recovery applies the selected `replay`, `catch-up`, or `latest` policy to a finite batch.
+- The candidate retains the mainline renderer fallback. This page's inherited performance and motion claims are not evidence of live-device validation for this candidate.
 
 ### 5. Running Status & Bottom Baseline Stabilization
 - **Accurate DSH Status Container Targeting**: Specifically matches Harness's native running indicator via `[data-chat-running]` (including the "Deep diving..." status and `runningDivider`), strictly isolating it from ordinary message transform surfaces (`shiftSurfaces`).
@@ -135,25 +104,21 @@ Verified by local browser-level audit suites:
 
 ### Installation
 
-Inside your DeepSeek Harness repository checkout:
+**`0.11.0-rebuild.2` has not been published to npm.** Use the local `dsh-smooth-stream-0.11.0-rebuild.2.tgz` delivered with this candidate. Installing by npm package name or using an older `dist` download URL will not install this candidate.
+
+Use its absolute path in DSH's **Plugins → Add plugin** flow. Alternatively, use the existing CLI from your DeepSeek Harness checkout:
 
 ```sh
-pnpm dsh plugin --profile web add dsh-smooth-stream
+pnpm dsh plugin --profile web add /absolute/path/dsh-smooth-stream-0.11.0-rebuild.2.tgz
 ```
 
 If `dsh` is in your system `PATH`:
 
 ```sh
-dsh plugin --profile web add dsh-smooth-stream
+dsh plugin --profile web add /absolute/path/dsh-smooth-stream-0.11.0-rebuild.2.tgz
 ```
 
-Start the interface:
-
-```sh
-pnpm dsh web
-```
-
-Verify that `[dsh-smooth-stream] plugin loaded!` appears in the host startup logs.
+Replace `web` with the intended profile. Follow the plugin manager's application result after installation; a load log alone does not validate page behavior or animation quality. This delivery only builds and verifies the archive; it does not install, publish, or restart DSH.
 
 To uninstall: `pnpm dsh plugin --profile web remove dsh-smooth-stream`.
 
@@ -166,7 +131,7 @@ To uninstall: `pnpm dsh plugin --profile web remove dsh-smooth-stream`.
 | `0.2.2-rc.2` | Validated against the new `ui-conversation`, `ui-chat` and `ui-renderer` contracts |
 | `0.1.x` | Use an earlier compatible release; this branch requires `>=0.2.2-rc.2 <0.3.0` |
 
-The adapter paces the text supplied to the shipped assistant renderer. Its registration keeps the official locale, child Slots, image loading, translation, context menus and presentation hooks. Auto-expansion wraps the official disclosure Hook, preserving manual choices and Turn resets. Reasoning, response and tool queues use independent leases scoped by Session, Turn and Step; interruption and unmount release their own leases.
+The adapter paces the text supplied to the shipped assistant renderer. Its registration keeps the official locale, child Slots, image loading, translation, context menus and presentation hooks. Auto-expansion wraps the official disclosure Hook, preserving manual choices and Turn resets. The injected Flow owns one protocol-ordered playback queue and character budget; tool cards enter atomically with their official renderer. Suspense hiding preserves the playback engine; a true unmount disposes it. Mainline fallback rendering remains available.
 
 Fast dispatch remains optional and feature-detected. It accelerates only `animation-frame` publications on compatible binding instances and restores the original methods when unloaded. History is displayed immediately. The settings UI uses `settings.section` and `settings.plugins.tab`.
 - **Never statically import runtime symbols from `@deepseek-ai/*` packages.** The host CLI starts via `node --import tsx/esm`, and tsx applies the host `tsconfig` `paths` mapping, so a bare `@deepseek-ai/*` import from an external plugin may be redirected into the host's own sources — any host-side rename or removal then explodes at boot as a module instantiation error. Type-only imports (`import type`) are unaffected.
@@ -185,15 +150,16 @@ The plugin defaults to `preset: balanced`. You can tune the cadence in your prof
 
 ## User Preferences
 
-Open **Settings → Plugins → Plugin Configuration** in the Web UI:
+Open **Settings → Smooth stream**, or **Settings → Plugins → Smooth stream**, in the Web UI:
 
 **Logarithmic fade** (on by default) adapts the tail from 24 to at most 160 graphemes according to reveal speed, fading answers and expanded thinking from 0% opacity over 240ms with a reversed logarithmic curve that stays translucent longer. Text settles even during network pauses. Turning it off preserves text pacing and scrolling. It follows the motion preference and skips code, formulas and thinking summaries. Browsers without text-range highlighting support retain the existing reveal behavior.
 
 For a local preview, run `pnpm build:repro`, serve the repository with `python3 -m http.server 8765 --bind 127.0.0.1`, and open `http://127.0.0.1:8765/repro/index.html?demo=fade`. This uses the real reveal/fade hooks with synthetic rich-text fixtures. Run `node scripts/verify-logarithmic-fade.mjs` to check and record it (Chrome and `pnpm exec playwright-core install ffmpeg` required; override the Chrome path with `CHROME_BIN`). Reports and recordings go to the ignored `repro/artifacts/logarithmic-fade/` directory.
 
 - **Enable smooth streaming** (default on): Toggles custom stream rendering and follow. Disabling instantly falls back to built-in Harness rendering.
-- **Auto-expand thinking**: Controls whether reasoning opens automatically while streaming. Collapsed thinking and Tool details synchronize existing content without invisible typewriter debt; visible headers retain their animation, and reopening shows the existing snapshot. Newly arriving expanded content is still paced.
-- **Background recovery**: Bounded catch-up uses each animation frame with at most 16 characters per commit, without a fixed 40ms inter-commit wait. After a reconnect, recovery waits for the Session-owned replacement baseline and exits once its visible queues are drained; an unchanged or empty synchronized baseline does not leave future foreground text in recovery mode.
+- **Auto-expand thinking**: Uses the official disclosure Hook and preserves manual choices and Turn resets. Automatically opened reasoning closes when playback drains or the setting is disabled. Background recovery closes plugin-opened reasoning and suppresses automatic reopening for that response; manual expansion remains available and new responses follow the setting. Collapsed reasoning synchronizes its snapshot without invisible reveal debt; newly arriving expanded content is paced.
+- **Keep tool introductions streaming**: Paces preceding text before admitting a tool card. Disabling it skips that text animation while retaining explicit protocol-end barriers. Tool card contents keep the official renderer.
+- **Background recovery**: `replay` resumes at normal speed, `catch-up` drains a bounded batch with a limited per-frame budget, and `latest` skips animation for that batch without crossing an unsealed block. After a reconnect, accepted Session publications are flushed before capturing the recovery frontier; later foreground text does not extend the batch. Initial history and older-page navigation display without replay.
 - **Collapse finished work** (default on): Folds thoughts and tool steps into a summary line once the turn settles.
 - **Show render diagnostics** (default off): Opens a live HUD on the right side to inspect FPS, character backlog, spring state, and adjust physical parameters in real time.
 

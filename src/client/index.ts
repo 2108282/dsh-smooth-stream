@@ -8,7 +8,9 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client'
 import { NativeAssistantNodeView } from './NativeAssistantNodeView.tsx'
+import { SessionPlaybackNode, useSessionPlayback } from './sessionPlaybackReact.tsx'
 import { installRendererAdapter } from './rendererAdapter.ts'
+import { installFlowPresentationAdapter } from './flowPresentationAdapter.tsx'
 import { installConversationPipeline } from './conversationPipeline.ts'
 import { bindRecoverySynchronization } from './recoverySynchronization.ts'
 import { setForegroundRecoveryDelay } from './backgroundRecovery.ts'
@@ -311,6 +313,9 @@ export function apply(ctx: ClientContext): void {
     }
   })
 
+  ctx.slots.inject('conversation.chat.flow', () => installFlowPresentationAdapter(ctx, settings,
+    (key, component) => isWrappableComponent(component) && !SKIP_WRAP.has(key), config.preset))
+
   ctx.slots.inject('conversation.chat.node', () => {
     const release = installRendererAdapter(ctx, (key, original) => {
       if (!isWrappableComponent(original) || SKIP_WRAP.has(key)) return original
@@ -320,7 +325,11 @@ export function apply(ctx: ClientContext): void {
         : wrapFollowNodeView(Inner as ComponentType<FollowWrapProps>, useControlScroll, useBackgroundRecovery)
       return function SmoothStreamRendererAdapter(props: AssistantProps & FollowWrapProps) {
         const preferences = useSyncExternalStore(settings.subscribe, settings.getSnapshot, settings.getSnapshot)
-        if (!preferences.enabled) return createElement(Inner, props)
+        const ready = useSyncExternalStore(settings.subscribe,
+          () => settings.takeoverEnabled(), () => settings.takeoverEnabled())
+        const playback = useSessionPlayback()
+        if (!ready || !preferences.enabled) return createElement(Inner, props)
+        if (playback !== null) return createElement(SessionPlaybackNode, { Inner, owner: props })
         if (key === 'assistant-step') {
           return createElement(NativeAssistantNodeView, {
             Inner: Inner as unknown as ComponentType<AssistantProps>,
