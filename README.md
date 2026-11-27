@@ -1,6 +1,6 @@
 # dsh-smooth-stream
 
-> **main 重建候选版 0.11.0-rebuild.2**：基于 `origin/main` 提交 `d0c96a4651e175d393799168c11b42a9a743649a`（基线包版本 0.10.9），在独立注入插件中重建会话统一播放。此前基于 0.10.10 修复分支的候选包不作为本次交付。详见 [候选版说明](docs/changes-0.11.0-rebuild.2.md)。尚未安装或完成实机 UI 验收；下文旧版性能与手感描述不代表本候选版的实机验证结论。
+> **main 重建候选版 0.11.0-rebuild.3**：基于 `origin/main` 提交 `d0c96a4651e175d393799168c11b42a9a743649a`（基线包版本 0.10.9），在独立注入插件中重建会话统一播放。此前基于 0.10.10 修复分支的候选包不作为本次交付。详见 [候选版说明](docs/changes-0.11.0-rebuild.3.md)。尚未安装或完成实机 UI 验收；下文旧版性能与手感描述不代表本候选版的实机验证结论。
 
 > **让 AI 的长篇生成如提词器般温润流淌。**  
 > 为 DeepSeek Harness（`dsh`）打造的二阶弹簧物理流式渲染与零重排跟随引擎。
@@ -62,9 +62,9 @@
 - 对话进行时，思考链与工具调用保持实时展开；
 - 回合结算完成并稳定后，自动将执行过程收敛为一行极简的 `已处理 X 秒` 摘要，保持工作区专注；支持随时点击无缝展开。
 
-### 4. 会话级协议顺序播放（0.11.0-rebuild.2 候选）
+### 4. 会话级协议顺序播放（0.11.0-rebuild.3 候选）
 
-本候选版在注入的 Flow 层为会话共用播放队列，依据对话协议顺序而非 DOM 分组顺序安排可见内容。实现细节与验证边界见 [候选版说明](docs/changes-0.11.0-rebuild.2.md)。
+本候选版在注入的 Flow 层为会话共用播放队列，依据对话协议顺序而非 DOM 分组顺序安排可见内容。实现细节与验证边界见 [候选版说明](docs/changes-0.11.0-rebuild.3.md)。
 
 - 正文、展开的思考和工具卡按协议序号接续；工具卡保留官方组件及其交互，并作为整体入场。
 - 前序流块只有在收到显式结束标记或持久化结算边界后才释放后继；字符耗尽或网络暂时静默不会代替协议结束。
@@ -103,18 +103,18 @@
 
 ## 安装与使用
 
-本候选版 **`0.11.0-rebuild.2` 未发布到 npm**。请使用本次交付的本地 `dsh-smooth-stream-0.11.0-rebuild.2.tgz`；按 npm 包名安装或使用旧版 `dist` 下载地址不会获得本候选版。
+本候选版 **`0.11.0-rebuild.3` 未发布到 npm**。请使用本次交付的本地 `dsh-smooth-stream-0.11.0-rebuild.3.tgz`；按 npm 包名安装或使用旧版 `dist` 下载地址不会获得本候选版。
 
 在 DSH「插件 → 添加插件」中使用该安装包的绝对路径。也可在 DeepSeek Harness 源码根目录通过已有 CLI 安装到目标 profile：
 
 ```sh
-pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.11.0-rebuild.2.tgz
+pnpm dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.11.0-rebuild.3.tgz
 ```
 
 如果系统 `PATH` 中已有 `dsh`：
 
 ```sh
-dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.11.0-rebuild.2.tgz
+dsh plugin --profile web add /绝对路径/dsh-smooth-stream-0.11.0-rebuild.3.tgz
 ```
 
 将示例中的 `web` 替换为实际目标 profile。安装后按插件管理结果判断是否已应用；加载日志本身不能证明页面行为或动画观感已通过验收。本次交付仅生成并校验安装包，未执行安装、发布或重启。

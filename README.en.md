@@ -1,6 +1,6 @@
 # dsh-smooth-stream
 
-> **Main rebuild candidate 0.11.0-rebuild.2**: Based on `origin/main` commit `d0c96a4651e175d393799168c11b42a9a743649a` (baseline package version 0.10.9), with unified session playback rebuilt inside the independent injection plugin. The earlier candidate based on the 0.10.10 fix branch is superseded for this task. See the [candidate notes](docs/changes-0.11.0-rebuild.2.md). This candidate has not been installed or reviewed on a live UI; the older performance and feel descriptions below are not evidence of candidate device validation.
+> **Main rebuild candidate 0.11.0-rebuild.3**: Based on `origin/main` commit `d0c96a4651e175d393799168c11b42a9a743649a` (baseline package version 0.10.9), with unified session playback rebuilt inside the independent injection plugin. The earlier candidate based on the 0.10.10 fix branch is superseded for this task. See the [candidate notes](docs/changes-0.11.0-rebuild.3.md). This candidate has not been installed or reviewed on a live UI; the older performance and feel descriptions below are not evidence of candidate device validation.
 
 > **Transform jumpy AI outputs into a calm, teleprompter-smooth reading experience.**  
 > Physics-based stream rendering and zero-reflow viewport tracking for the DeepSeek Harness (`dsh`) Web UI.
@@ -61,9 +61,9 @@ Traditional chat UIs bind DOM rendering and scrolling directly to arrival events
 - Reasoning and tool executions remain expanded while streaming.
 - Once a turn settles, intermediate processes cleanly fold behind a minimalist `Processed in Xs` summary row, keeping the conversation view focused on final answers.
 
-### 4. Session-Scoped Protocol Playback (0.11.0-rebuild.2 Candidate)
+### 4. Session-Scoped Protocol Playback (0.11.0-rebuild.3 Candidate)
 
-This candidate uses one playback queue per injected Flow and orders visible content by conversation protocol metadata rather than DOM grouping. See the [candidate notes](docs/changes-0.11.0-rebuild.2.md) for behavior and verification boundaries.
+This candidate uses one playback queue per injected Flow and orders visible content by conversation protocol metadata rather than DOM grouping. See the [candidate notes](docs/changes-0.11.0-rebuild.3.md) for behavior and verification boundaries.
 
 - Response text, expanded reasoning, and tool cards follow protocol sequence; tool cards retain the official renderer and enter atomically.
 - A predecessor releases its successor only after an explicit block-end or durable settlement boundary. Network silence or a temporarily drained character buffer is not treated as protocol completion.
@@ -104,18 +104,18 @@ Verified by local browser-level audit suites:
 
 ### Installation
 
-**`0.11.0-rebuild.2` has not been published to npm.** Use the local `dsh-smooth-stream-0.11.0-rebuild.2.tgz` delivered with this candidate. Installing by npm package name or using an older `dist` download URL will not install this candidate.
+**`0.11.0-rebuild.3` has not been published to npm.** Use the local `dsh-smooth-stream-0.11.0-rebuild.3.tgz` delivered with this candidate. Installing by npm package name or using an older `dist` download URL will not install this candidate.
 
 Use its absolute path in DSH's **Plugins → Add plugin** flow. Alternatively, use the existing CLI from your DeepSeek Harness checkout:
 
 ```sh
-pnpm dsh plugin --profile web add /absolute/path/dsh-smooth-stream-0.11.0-rebuild.2.tgz
+pnpm dsh plugin --profile web add /absolute/path/dsh-smooth-stream-0.11.0-rebuild.3.tgz
 ```
 
 If `dsh` is in your system `PATH`:
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-smooth-stream-0.11.0-rebuild.2.tgz
+dsh plugin --profile web add /absolute/path/dsh-smooth-stream-0.11.0-rebuild.3.tgz
 ```
 
 Replace `web` with the intended profile. Follow the plugin manager's application result after installation; a load log alone does not validate page behavior or animation quality. This delivery only builds and verifies the archive; it does not install, publish, or restart DSH.

@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { Context } from '@deepseek-ai/cordis'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
+import { MarkdownDelegateProvider, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   createElement, StrictMode, Suspense, useRef, useState, useSyncExternalStore,
   type ComponentType, type ReactElement, type ReactNode,
@@ -189,7 +190,7 @@ function entry(key: string, groupPart?: string): Entry {
 }
 
 /** Only the shipped Inner renderers are replaced; all admission, projection and clocks are real. */
-function fixture(options: { expanded?: boolean; strict?: boolean; ready?: boolean; settings?: Partial<StreamSettings> } = {}) {
+function fixture(options: { expanded?: boolean; strict?: boolean; ready?: boolean; markdown?: boolean; children?: boolean; settings?: Partial<StreamSettings> } = {}) {
   const source = cell(new Map<string, SourceNode>())
   const groupSource = cell(new Map<string, Group>())
   let builder = { get: (key: string) => source.getSnapshot().get(key) }
@@ -211,6 +212,10 @@ function fixture(options: { expanded?: boolean; strict?: boolean; ready?: boolea
   const child = createElement('small', { 'data-testid': 'official-child' }, 'official child')
   const slot = vi.fn((_name: string, _props: unknown) => null)
   const t = vi.fn((key: string) => `官方:${key}`)
+  const labels = { code: { copyLabel: 'Copy', copiedLabel: 'Copied' }, footnotes: 'Footnotes' }
+  const renderText = (text: string, running: boolean) => options.markdown
+    ? createElement(MarkdownDelegateProvider, { openFile: extras.openFile,
+      children: createElement(MarkdownText, { text, streaming: running, labels }) }) : text
   let entries: readonly Entry[] = []
   const useChatNode = ((key: string, selector: (node: SourceNode | undefined) => unknown = value => value) => {
     const node = useSyncExternalStore(source.subscribe, () => source.getSnapshot().get(key), () => source.getSnapshot().get(key))
@@ -230,7 +235,7 @@ function fixture(options: { expanded?: boolean; strict?: boolean; ready?: boolea
     const disclosure = props.useDisclosure()
     return createElement('section', null,
       createElement('button', { onClick: disclosure.toggle, 'aria-label': `toggle ${props.node.key}` }, props.t('message.think')),
-      createElement('output', { 'data-block': index, hidden: !disclosure.expanded }, text),
+      createElement('div', { 'data-block': index, hidden: !disclosure.expanded }, renderText(text, props.node.data.status === 'running')),
       disclosure.expanded ? props.renderSlot('conversation.chat.reasoning.body', {
         rawText: text, text, running: props.node.data.status === 'running',
       }) : null)
@@ -249,8 +254,8 @@ function fixture(options: { expanded?: boolean; strict?: boolean; ready?: boolea
         if (props.groupPart === 'response' && block.kind === 'reasoning') return null
         return block.kind === 'reasoning' && block.text.trim() !== ''
           ? createElement(ReasoningProbe, { key: index, props, text: block.text, index })
-          : block.kind === 'text' ? createElement('output', { key: index, 'data-block': index }, block.text) : null
-      }), props.children)
+          : block.kind === 'text' ? createElement('div', { key: index, 'data-block': index }, renderText(block.text, node.data.status === 'running')) : null
+      }), options.children === false ? null : props.children)
   }
   const WrappedNode = (props: ProbeOwner) => createElement(SessionPlaybackNode, { Inner: NodeInner, owner: props as never })
   let NodeRenderer: ComponentType<ProbeOwner> = WrappedNode
@@ -461,6 +466,85 @@ describe('session playback injected into the official flow and keyed renderers',
     expect(row(view.container, 'tool:1')).toBeNull()
     await publish(`${prefix} resumed after silence`, true)
     await until(() => row(view.container, 'tool:1') !== null)
+  })
+
+  it.each(['text', 'reasoning'] as const)('keeps the %s source cursor and adopts the readable prefix when its visual group changes', async (kind) => {
+    const highlights = new Map<string, Set<Range>>()
+    vi.stubGlobal('Highlight', class extends Set<Range> {})
+    vi.stubGlobal('CSS', { highlights, supports: () => true })
+    const fadingText = () => [...highlights.values()].flatMap(bucket => [...bucket]).map(range => range.toString())
+    const f = fixture({ children: false, settings: { logarithmicFade: true } })
+    const view = render(f.tree())
+    const answer = 'one source, one playback cursor '.repeat(40)
+    const part = kind === 'reasoning' ? 'reasoning' : 'response'
+    const live = assistant('assistant:1', answer, { status: 'running', sealed: [false], blocks: [{ kind, text: answer }] })
+    await act(async () => {
+      f.set([live], [entry('assistant:1', part)])
+      view.rerender(f.tree())
+    })
+    await paint(8)
+    const before = text(view.container, 'assistant:1', 0, part) ?? ''
+    expect(before.length).toBeGreaterThan(0)
+    expect(before.length).toBeLessThan(answer.length)
+
+    await act(async () => {
+      f.set([live], [entry('assistant:1')])
+      view.rerender(f.tree())
+    })
+    expect(text(view.container, 'assistant:1')).toBe(before)
+    expect(fadingText()).toEqual([])
+    await paint(4)
+    const after = text(view.container, 'assistant:1') ?? ''
+    expect(after.startsWith(before)).toBe(true)
+    expect(after.length).toBeGreaterThan(before.length)
+    expect(fadingText().length).toBeGreaterThan(0)
+    const output = row(view.container, 'assistant:1')!.querySelector('[data-block="0"]')!
+    expect([...highlights.values()].flatMap(bucket => [...bucket]).every(range =>
+      !output.contains(range.startContainer) || range.startOffset >= before.length)).toBe(true)
+  })
+
+  it.each([
+    ['text', 'file'], ['reasoning', 'file'], ['text', 'reference'], ['reasoning', 'reference'],
+  ] as const)('reparses a real %s Markdown %s link without replay and still paces a new suffix', async (kind, link) => {
+    const highlights = new Map<string, Set<Range>>()
+    vi.stubGlobal('Highlight', class extends Set<Range> {})
+    vi.stubGlobal('CSS', { highlights, supports: () => true })
+    const f = fixture({ markdown: true, children: false, settings: { logarithmicFade: true } })
+    const view = render(f.tree())
+    const answer = link === 'file' ? 'read [source](</tmp/source.ts>)'
+      : '[source][ref]\n\nsecond paragraph\n\nthird paragraph\n\n[ref]: https://example.test/source'
+    const selector = link === 'file' ? 'button[title="/tmp/source.ts"]' : 'a[href="https://example.test/source"]'
+    const publish = async (status: 'running' | 'settled', suffix = '') => act(async () => {
+      f.set([assistant('assistant:1', '', { status, sealed: suffix ? [true, false] : [status === 'settled'],
+        blocks: [{ kind, text: answer }, ...(suffix ? [{ kind, text: suffix }] : [])] })])
+      view.rerender(f.tree())
+    })
+    await publish('running')
+    await paint(240)
+    const first = row(view.container, 'assistant:1')!
+    expect(first.querySelector(selector)).toBeNull()
+    if (link === 'reference') expect(text(view.container, 'assistant:1')).toContain('[source][ref]')
+    expect([...highlights.values()].flatMap(bucket => [...bucket])).toHaveLength(0)
+    await publish('settled')
+    expect(row(view.container, 'assistant:1')).toBe(first)
+    expect(first.querySelector(selector)?.textContent).toBe('source')
+    expect([...highlights.values()].flatMap(bucket => [...bucket])).toHaveLength(0)
+    const rendered = text(view.container, 'assistant:1')!
+    const suffix = 'new suffix continues streaming '.repeat(10)
+    await publish('running', suffix)
+    expect(text(view.container, 'assistant:1')).toContain('source')
+    expect(text(view.container, 'assistant:1', 1) ?? '').toBe('')
+    await paint(4)
+    const newPrefix = text(view.container, 'assistant:1', 1) ?? ''
+    expect(newPrefix.length).toBeGreaterThan(0)
+    expect(newPrefix.length).toBeLessThan(suffix.length)
+    expect(suffix.startsWith(newPrefix)).toBe(true)
+    await until(() => text(view.container, 'assistant:1', 1) === suffix.trimEnd())
+    await publish('settled', suffix)
+    await paint(20)
+    expect(text(view.container, 'assistant:1')).toBe(rendered)
+    expect(first.querySelectorAll(selector)).toHaveLength(1)
+    expect(text(view.container, 'assistant:1', 1)).toBe(suffix.trimEnd())
   })
 
   it('does not replay paginated closed history or reset a live prefix under StrictMode', async () => {

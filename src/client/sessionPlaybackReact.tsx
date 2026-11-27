@@ -22,14 +22,19 @@ type NodeProps = { node?: unknown; sessionId?: unknown; groupPart?: string } & R
 type SourceNode = ChatNode
 
 function identity(key: string, part?: string): string { return JSON.stringify([key, part ?? '']) }
-function segmentId(owner: string, index: number | string): string { return JSON.stringify([owner, index]) }
+function sourceIdentity(owner: string, node: SourceNode | undefined): string {
+  return typeof node?.key === 'string' ? node.key : owner
+}
+function segmentId(sourceKey: string, index: number | string): string { return JSON.stringify([sourceKey, index]) }
 interface PlaybackBlockIdentity {
   key: string
   seq: number
   generation: string
 }
-function blockIds(scope: PlaybackScope, node: SourceNode, owner: string): string[] {
-  return scope.blocks(node).map(block => segmentId(owner, block.key))
+function blockIds(scope: PlaybackScope, node: SourceNode): string[] {
+  // Playback progress belongs to the source block, not to the renderer's
+  // current visual partition (reasoning/response/grouped/ungrouped).
+  return scope.blocks(node).map(block => segmentId(node.key, block.key))
 }
 
 /** One playback clock belongs to the injected Flow, never to a node renderer. */
@@ -44,7 +49,7 @@ export class PlaybackScope {
   readonly initialOwners = new Set<string>()
   readonly animatedOwners = new Set<string>()
   readonly recoveredOwners = new Set<string>()
-  private readonly sources = new Map<string, readonly PlaybackSegment[]>()
+  private readonly sources = new Map<string, { sourceKey: string; segments: readonly PlaybackSegment[] }>()
   private readonly tools = new Map<string, SourceNode>()
   private revision = 0
   private readonly listeners = new Set<() => void>()
@@ -98,26 +103,27 @@ export class PlaybackScope {
     return boundary
   }
   register(owner: string, segments: readonly PlaybackSegment[], node: SourceNode | undefined): void {
+    const sourceKey = sourceIdentity(owner, node)
     const previousTool = this.tools.get(owner)
     if (node?.kind === 'tool-call') this.tools.set(owner, node)
     else this.tools.delete(owner)
     if ((previousTool?.anchorSeq ?? Infinity) !== (this.tools.get(owner)?.anchorSeq ?? Infinity)) this.publish()
     if (this.initial) {
-      this.initialOwners.add(owner)
+      this.initialOwners.add(sourceKey)
       this.initialMaxSeq = Math.max(this.initialMaxSeq, node?.anchorSeq ?? Number.NEGATIVE_INFINITY)
       this.initialSources.set(owner, { segments, node })
       return
     }
     if ((node?.kind === 'assistant-step' && node.data.status === 'running')
-      || (!this.initialOwners.has(owner) && (node?.anchorSeq ?? 0) > this.initialMaxSeq)) this.animatedOwners.add(owner)
-    this.sources.set(owner, segments)
-    if (this.suspended) this.rememberRecovery(owner, segments)
+      || (!this.initialOwners.has(sourceKey) && (node?.anchorSeq ?? 0) > this.initialMaxSeq)) this.animatedOwners.add(sourceKey)
+    this.sources.set(owner, { sourceKey, segments })
+    if (this.suspended) this.rememberRecovery(sourceKey, segments)
     const location = node?.location
     const reason = location?.kind === 'turn' || location?.kind === 'step' ? location.turn.end?.data.reason.kind : undefined
     const interrupted = (node?.kind === 'assistant-step' && node.data.status === 'interrupted')
       || reason === 'error' || reason === 'aborted' || reason === 'interrupted'
     // A cancelled historical turn must never advance another turn's cursor.
-    this.playback.upsert(owner, segments, this.animatedOwners.has(owner) && !interrupted)
+    this.playback.upsert(owner, segments, this.animatedOwners.has(sourceKey) && !interrupted)
   }
   sealInitial(): void {
     if (!this.initial) return
@@ -127,8 +133,10 @@ export class PlaybackScope {
       for (const segment of segments) liveSeq = Math.min(liveSeq, segment.order[0]!)
     }
     this.initial = false
-    for (const [owner, { node, segments }] of this.initialSources) {
-      if (segments.some(segment => segment.order[0]! >= liveSeq)) this.animatedOwners.add(owner)
+    for (const [owner, { segments, node }] of this.initialSources) {
+      if (segments.some(segment => segment.order[0]! >= liveSeq)) {
+        this.animatedOwners.add(sourceIdentity(owner, node))
+      }
       this.register(owner, segments, node)
     }
     this.initialSources.clear()
@@ -159,7 +167,7 @@ export class PlaybackScope {
   }
   suspend(value: boolean): void {
     if (value) {
-      for (const [owner, segments] of this.sources) this.rememberRecovery(owner, segments)
+      for (const { sourceKey, segments } of this.sources.values()) this.rememberRecovery(sourceKey, segments)
     }
     if (this.suspended !== value) { this.suspended = value; this.publish() }
     if (value) this.playback.pause()
@@ -206,11 +214,11 @@ function PlaybackNodeSource({ flow, scope, nodeKey, groupPart, order, groupKey, 
   const shape = order.join(',')
   const segments = useMemo<readonly PlaybackSegment[]>(() => {
     if (node === undefined || !managedKinds.has(node.kind)) return []
-    if (node.kind !== 'assistant-step') return [{ id: segmentId(owner, -1), order: [node.anchorSeq, ...order, 0],
+    if (node.kind !== 'assistant-step') return [{ id: segmentId(nodeKey, -1), order: [node.anchorSeq, ...order, 0],
       text: '', sealed: true, hidden, awaitPresentation: scope.preferences.controlScroll }]
     const sealed = sealedBlocks(node)
     const identities = scope.blocks(node)
-    const ids = blockIds(scope, node, owner)
+    const ids = blockIds(scope, node)
     const toolBoundary = Math.min(scope.toolBoundary(node), ...node.data.blocks.flatMap((block, index) =>
       block.kind === 'tool-call' ? [identities[index]!.seq] : []))
     return node.data.blocks.flatMap((block, index) => {
@@ -353,13 +361,12 @@ function SessionPlaybackFlowScope({ Inner, props, settings, managedNodeKinds, bu
       const node = builder === undefined ? undefined : (builder as { get(key: string): SourceNode | undefined }).get(member.key)
       if (node === undefined) return false
       if (!managedNodeKinds.has(node.kind)) return true
-      const owner = identity(member.key, member.groupPart)
-      const ids = blockIds(scope, node, owner)
+      const ids = blockIds(scope, node)
       return node.kind === 'assistant-step'
         ? node.data.blocks.some((block, index) => (member.groupPart === 'reasoning' ? block.kind === 'reasoning'
           : member.groupPart === 'response' ? block.kind !== 'reasoning' : true)
           && scope.playback.read(ids[index]!).entered)
-        : scope.playback.read(segmentId(owner, -1)).entered
+        : scope.playback.read(segmentId(member.key, -1)).entered
     }) ?? false), [scope, group, builder, managedNodeKinds, key])
     const entered = useSyncExternalStore(scope.playback.subscribe, read, read)
     const admitted = useRef({ key, entered: false })
@@ -381,16 +388,17 @@ function SessionPlaybackFlowScope({ Inner, props, settings, managedNodeKinds, bu
 export function SessionPlaybackNode({ Inner, owner }: { Inner: ComponentType<any>; owner: NodeProps }): ReactNode {
   const { scope, active } = useContext(PlaybackContext)!
   const node = owner.node as NonNullable<SourceNode> | undefined
-  const key = identity(String(node?.key), owner.groupPart)
+  const sourceKey = String(node?.key)
+  const ownerKey = identity(sourceKey, owner.groupPart)
   const ids = useMemo(() => {
-    if (node?.kind !== 'assistant-step') return [segmentId(key, -1)]
-    const all = blockIds(scope, node, key)
+    if (node?.kind !== 'assistant-step') return [segmentId(sourceKey, -1)]
+    const all = blockIds(scope, node)
     return node.data.blocks.flatMap((block, index) => {
       if (owner.groupPart === 'reasoning' && block.kind !== 'reasoning') return []
       if (owner.groupPart === 'response' && block.kind === 'reasoning') return []
       return block.kind === 'tool-call' ? [] : [all[index]!]
     })
-  }, [node, owner.groupPart, key])
+  }, [node, owner.groupPart, sourceKey, scope])
   const previous = useRef<readonly PlaybackDisplay[]>([])
   const read = useCallback(() => {
     const next = ids.map(id => scope.playback.read(id))
@@ -401,22 +409,22 @@ export function SessionPlaybackNode({ Inner, owner }: { Inner: ComponentType<any
   useSyncExternalStore(scope.subscribe, scope.snapshot, scope.snapshot)
   if (!active) return createElement(Inner, owner)
   if (node?.kind !== 'assistant-step') {
-    return scope.playback.read(segmentId(key, -1)).entered
-      ? createElement(SessionPlaybackAtomic, { Inner, owner, scope, ownerKey: key }) : null
+    return scope.playback.read(segmentId(sourceKey, -1)).entered
+      ? createElement(SessionPlaybackAtomic, { Inner, owner, scope, sourceKey }) : null
   }
-  return createElement(SessionPlaybackAssistant, { Inner, owner: owner as unknown as AssistantProps, scope, ownerKey: key })
+  return createElement(SessionPlaybackAssistant, { Inner, owner: owner as unknown as AssistantProps, scope, ownerKey })
 }
 
 /** Cards enter whole; this host only follows their committed height. */
-function SessionPlaybackAtomic({ Inner, owner, scope, ownerKey }: {
-  Inner: ComponentType<any>; owner: NodeProps; scope: PlaybackScope; ownerKey: string
+function SessionPlaybackAtomic({ Inner, owner, scope, sourceKey }: {
+  Inner: ComponentType<any>; owner: NodeProps; scope: PlaybackScope; sourceKey: string
 }) {
   const root = useRef<HTMLDivElement>(null)
   const speed = useRef(scope.speedCps)
   speed.current = scope.speedCps
   const extent = useRef<number | null>(null)
-  const id = segmentId(ownerKey, -1)
-  const [entering, setEntering] = useState(() => scope.animatedOwners.has(ownerKey) && scope.playback.read(id).pending)
+  const id = segmentId(sourceKey, -1)
+  const [entering, setEntering] = useState(() => scope.animatedOwners.has(sourceKey) && scope.playback.read(id).pending)
   const finish = useCallback(() => {
     extent.current = null
     setEntering(false)
@@ -465,13 +473,13 @@ function SessionPlaybackAssistant({ Inner, owner, scope, ownerKey }: {
   const speed = useRef(scope.speedCps)
   speed.current = scope.speedCps
   const revealed = useRef(0)
-  const ids = blockIds(scope, node, ownerKey)
+  const ids = blockIds(scope, node)
   const disclosed = useRef(new Map<string, string>())
   const mountedReasoning = useRef<readonly string[]>([])
   const officialDisclosure = owner.useDisclosure
   const reasoningPending = node.data.blocks.some((block, index) => block.kind === 'reasoning'
     && scope.playback.read(ids[index]!).pending)
-  const recovered = scope.recoveredOwners.has(ownerKey)
+  const recovered = scope.recoveredOwners.has(sourceIdentity(ownerKey, node))
   const useDisclosure = useMemo(() => function usePlaybackDisclosure() {
     const disclosure = officialDisclosure()
     const token = useId()
@@ -555,7 +563,9 @@ function SessionPlaybackAssistant({ Inner, owner, scope, ownerKey }: {
       return (render as Function)(name, props, ...args)
     }) as AssistantProps['renderSlot']
   }, [owner.renderSlot, node.data.blocks, projected, ownerKey, scope])
-  useLogarithmicFade(root, scope.preferences.logarithmicFade, pending, speed, scope.suspended)
+  // The session cursor already owns this prefix. A fresh DOM host adopts it;
+  // only characters appended after attachment may start a new fade.
+  useLogarithmicFade(root, scope.preferences.logarithmicFade, pending, speed, scope.suspended, true)
   if (!entered) return null
   return createElement(FollowHost, { active: pending && !scope.suspended, speedCpsRef: speed, revealedCharsRef: revealed,
     hostRef: root, controlScroll: scope.preferences.controlScroll, predictive: false,

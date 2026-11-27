@@ -275,6 +275,7 @@ export function useLogarithmicFade(
   active: boolean,
   speedCpsRef?: { current: number },
   paused = false,
+  adoptInitialText = false,
 ): void {
   const controller = useRef<LogarithmicFadeController | null>(null)
   const committed = useRef(false)
@@ -291,7 +292,8 @@ export function useLogarithmicFade(
     if (controller.current === null && root !== null && enabled && active) {
       controller.current = LogarithmicFadeController.create(root)
       // Enabling midway through a message must not replay readable text.
-      if (committed.current) controller.current?.update(false, false)
+      // A shared source cursor may also hand a new renderer an existing prefix.
+      if (committed.current || adoptInitialText) controller.current?.update(false, false)
     }
     controller.current?.update(enabled, active, speedCpsRef?.current, paused)
     committed.current = true
