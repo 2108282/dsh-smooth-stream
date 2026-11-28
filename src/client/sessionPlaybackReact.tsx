@@ -42,7 +42,13 @@ function blockIds(scope: PlaybackScope, node: SourceNode): string[] {
 
 /** One playback clock belongs to the injected Flow, never to a node renderer. */
 export class PlaybackScope {
-  readonly playback = new SessionPlayback()
+  readonly revealScale = { current: 1 }
+  readonly playback = new SessionPlayback({
+    requestFrame: callback => globalThis.requestAnimationFrame(time => {
+      this.playback.setRevealScale(this.revealScale.current)
+      callback(time)
+    }),
+  })
   preferences: StreamSettings = DEFAULT_STREAM_SETTINGS
   active = true
   speedCps = 110
@@ -457,7 +463,7 @@ function SessionPlaybackAtomic({ Inner, owner, scope, sourceKey }: {
   return createElement(FollowHost, {
     active: textPending, entrance: entering && scope.playback.read(id).pending,
     onEntranceSettled: finish, onGrowth: scope.preferences.controlScroll ? growth : undefined,
-    entranceExtentRef: extent, speedCpsRef: speed, hostRef: root,
+    entranceExtentRef: extent, speedCpsRef: speed, hostRef: root, revealScaleRef: scope.revealScale,
     predictive: false, controlScroll: scope.preferences.controlScroll,
     children: createElement(Inner, owner),
   })
@@ -584,6 +590,7 @@ function SessionPlaybackAssistant({ Inner, owner, scope, ownerKey }: {
   }, [owner.renderSlot, node.data.blocks, projected, ownerKey, scope])
   if (!entered) return null
   return createElement(FollowHost, { active: pending, speedCpsRef: speed, revealedCharsRef: revealed,
+    revealScaleRef: scope.revealScale,
     hostRef: root, controlScroll: scope.preferences.controlScroll, predictive: false,
     children: createElement(Inner, { ...owner, useDisclosure, ...(renderSlot === undefined ? {} : { renderSlot }), node: { ...node, data: { ...node.data, blocks: projected,
       status: pending ? 'running' : node.data.status } } }),

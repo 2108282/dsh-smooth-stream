@@ -525,6 +525,126 @@ describe('SessionPlayback', () => {
     expect(playback.read('body').text).toHaveLength(9)
   })
 
+  it('applies shared reveal scale per frame without publishing or resetting progress', async () => {
+    const fullSpeed = createPlayback(100)
+    const reducedSpeed = createPlayback(100)
+    fullSpeed.upsert('owner', [segment('full', [1], 'x'.repeat(100), false)], true)
+    reducedSpeed.upsert('owner', [segment('reduced', [1], 'x'.repeat(100), false)], true)
+    await settle()
+
+    const fullListener = vi.fn()
+    const reducedListener = vi.fn()
+    fullSpeed.subscribe(fullListener)
+    reducedSpeed.subscribe(reducedListener)
+    fullListener.mockClear()
+    reducedListener.mockClear()
+    reducedSpeed.setRevealScale(0.55)
+    expect(fullListener).not.toHaveBeenCalled()
+    expect(reducedListener).not.toHaveBeenCalled()
+
+    time += 100
+    const callbacks = [...frames.values()]
+    frames.clear()
+    for (const callback of callbacks) callback(time)
+    await settle()
+    expect(fullSpeed.read('full').text).toHaveLength(10)
+    expect(reducedSpeed.read('reduced').text).toHaveLength(5)
+
+    reducedSpeed.setRevealScale(1)
+    time += 100
+    const resumedCallbacks = [...frames.values()]
+    frames.clear()
+    for (const callback of resumedCallbacks) callback(time)
+    await settle()
+    expect(reducedSpeed.read('reduced').text).toHaveLength(15)
+  })
+
+  it('clamps shared reveal scale, ignores non-finite values, and retains the speed ceiling', async () => {
+    const playback = createPlayback(1000)
+    playback.configure({ tuning: { maxRevealCps: 120 } })
+    playback.setRevealScale(Number.NaN)
+    playback.setRevealScale(Number.POSITIVE_INFINITY)
+    playback.upsert('owner', [segment('body', [1], 'x'.repeat(100), false)], true)
+    await settle()
+    paint(100)
+    await settle()
+    expect(playback.read('body').text).toHaveLength(12)
+
+    playback.setRevealScale(100)
+    paint(100)
+    await settle()
+    expect(playback.read('body').text).toHaveLength(24)
+
+    playback.configure({ charsPerSecond: 60 })
+    await settle()
+    playback.setRevealScale(-1)
+    for (let frame = 0; frame < 10; frame++) paint(120)
+    await settle()
+    expect(playback.read('body').text).toHaveLength(27)
+  })
+
+  it('keeps frame work bounded after a long completed prefix and skips unchanged owner rebuilds', async () => {
+    const playback = createPlayback(1000)
+    const history = Array.from({ length: 10_000 }, (_, index) => segment(`history:${index}`, [index], 'done'))
+    const live = { ...segment('live', [10_000], 'stream', false), generation: 1 }
+    playback.upsert('history', history, false)
+    playback.upsert('live', [live], true)
+    await settle()
+
+    const rebuildOrder = vi.spyOn(playback as unknown as { rebuildOrder: () => void }, 'rebuildOrder')
+    playback.upsert('history', history, false)
+    playback.upsert('live', [live], true)
+    await settle()
+    expect(rebuildOrder).not.toHaveBeenCalled()
+
+    const isComplete = vi.spyOn(playback as unknown as { isComplete: (state: unknown) => boolean }, 'isComplete')
+    paint()
+    await settle()
+    expect(playback.read('live').text).toBe('s')
+    expect(isComplete.mock.calls.length).toBeLessThanOrEqual(16)
+  })
+
+  it('rewinds the queue cursor when an earlier completed source reopens', async () => {
+    const playback = createPlayback()
+    playback.upsert('early', [{ ...segment('early', [1], 'early'), generation: 1 }], false)
+    playback.upsert('middle', [segment('middle', [2], 'middle')], false)
+    playback.upsert('live', [segment('live', [3], 'later', false)], true)
+    await settle()
+    expect(playback.read('early').pending).toBe(false)
+    expect(playback.read('middle').pending).toBe(false)
+
+    playback.upsert('early', [{ ...segment('early', [1], 'early'), generation: 2 }], true)
+    await settle()
+    expect(playback.read('early')).toMatchObject({ text: '', entered: false, pending: true })
+    expect(playback.read('live').text).toBe('')
+    paint()
+    await settle()
+    expect(playback.read('early').text).toBe('e')
+    expect(playback.read('live').text).toBe('')
+  })
+
+  it('rewinds the queue cursor when a non-active owner updates a shared source', async () => {
+    const playback = createPlayback(1000)
+    const shared = (generation: number): PlaybackSegment => ({ ...segment('shared', [1], 'shared'), generation })
+    playback.upsert('older', [shared(1)], false)
+    playback.upsert('newer', [shared(1)], false)
+    playback.upsert('tail', [segment('tail', [2], 'later')], true)
+    await settle()
+    paint(10)
+    await settle()
+    expect(playback.read('tail')).toMatchObject({ text: 'later', pending: false })
+    expect(frames.size).toBe(0)
+
+    playback.upsert('older', [shared(2)], true)
+    await settle()
+    expect(playback.read('shared')).toMatchObject({ text: '', entered: false, pending: true })
+    expect(playback.read('tail')).toMatchObject({ text: '', entered: false, pending: true })
+    paint()
+    await settle()
+    expect(playback.read('shared').text).toBe('s')
+    expect(playback.read('tail').text).toBe('')
+  })
+
   it('honors production tuning defaults instead of an uncapped constructor speed', async () => {
     const playback = createPlayback(1000)
     playback.configure({ tuning: DEFAULT_STREAM_DEBUG_TUNING })

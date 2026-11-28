@@ -46,6 +46,8 @@ interface SegmentState {
   hidden: boolean
   entered: boolean
   entryBaseline: boolean
+  awaitPresentation: boolean
+  baselineChars: number | undefined
   presentationPending: boolean
   fraction: number
   touched: number
@@ -67,16 +69,33 @@ function compareOrder(left: readonly number[], right: readonly number[]): number
   return left.length - right.length
 }
 
-function startsWith<T>(value: readonly T[], prefix: readonly T[]): boolean {
-  if (prefix.length > value.length) return false
-  for (let index = 0; index < prefix.length; index++) {
-    if (value[index] !== prefix[index]) return false
-  }
-  return true
-}
-
 function sameOrder(left: readonly number[], right: readonly number[]): boolean {
   return compareOrder(left, right) === 0
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xD800 && code <= 0xDBFF
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xDC00 && code <= 0xDFFF
+}
+
+/** Append only newly received code points; keep full scans for rewrites. */
+function appendPoints(points: string[], previousText: string, nextText: string): boolean {
+  if (!nextText.startsWith(previousText)) return false
+  const previousLast = previousText.charCodeAt(previousText.length - 1)
+  const nextAtBoundary = nextText.charCodeAt(previousText.length)
+  // A stream chunk can split a surrogate pair across publications. Rebuild that
+  // rare boundary so a standalone high surrogate does not become a fake glyph.
+  if (isHighSurrogate(previousLast) && isLowSurrogate(nextAtBoundary)) return false
+  let suffixStart = previousText.length
+  if (isHighSurrogate(previousLast)) {
+    points.pop()
+    suffixStart--
+  }
+  for (const point of nextText.slice(suffixStart)) points.push(point)
+  return true
 }
 
 /** A single-clock playback queue shared by every owner in one session. */
@@ -85,6 +104,7 @@ export class SessionPlayback {
   private readonly cancelFrame: (handle: number) => void
   private readonly now: () => number
   private charsPerSecond = DEFAULT_CHARS_PER_SECOND
+  private revealScale = 1
   private maxLagChars = DEFAULT_MAX_LAG_CHARS
   private tuning: StreamDebugTuning = { ...DEFAULT_STREAM_DEBUG_TUNING }
   private readonly owners = new Map<string, Map<string, PlaybackSegment>>()
@@ -92,6 +112,9 @@ export class SessionPlayback {
   private readonly active = new Map<string, PlaybackSegment>()
   private readonly activeOwners = new Map<string, string>()
   private ordered: PlaybackSegment[] = []
+  private readonly orderedIndices = new Map<string, number>()
+  /** First index not yet known complete; mutations rewind it when they reopen earlier work. */
+  private headIndex = 0
   private readonly dirtyDisplays = new Set<string>()
   private readonly displays = new Map<string, PlaybackDisplay>()
   private readonly listeners = new Set<() => void>()
@@ -147,12 +170,13 @@ export class SessionPlayback {
 
   upsert(owner: string, segments: readonly PlaybackSegment[], animate: boolean): void {
     if (this.disposed) return
+    const previous = this.owners.get(owner)
     const next = new Map<string, PlaybackSegment>()
     const reopened = new Set<string>()
     for (const source of segments) {
-      const previous = this.states.get(source.id)
+      const previousState = this.states.get(source.id)
       const wasActive = this.active.has(source.id)
-      const wasComplete = previous !== undefined && this.isComplete(previous)
+      const wasComplete = previousState !== undefined && this.isComplete(previousState)
       const segment: PlaybackSegment = {
         id: source.id,
         order: [...source.order],
@@ -164,12 +188,29 @@ export class SessionPlayback {
         ...(source.baselineChars === undefined ? {} : { baselineChars: source.baselineChars }),
       }
       next.set(segment.id, segment)
-      this.updateState(segment, animate)
+      const changed = this.updateState(segment, animate)
       const updated = this.states.get(segment.id)!
       if ((!wasActive || wasComplete) && !this.isComplete(updated)) reopened.add(segment.id)
+      // Source state is shared by ID across owners, so even a non-active owner
+      // can reopen an earlier queue entry and must rewind the shared cursor.
+      if (changed) this.rewindHead(segment.id)
     }
+    const structureChanged = previous === undefined || previous.size !== next.size
+      || [...next].some(([id, segment]) => {
+        const old = previous.get(id)
+        return old === undefined || !sameOrder(old.order, segment.order)
+      })
     this.owners.set(owner, next)
-    this.rebuildActive()
+    if (structureChanged) {
+      this.rebuildActive()
+    } else {
+      for (const segment of next.values()) {
+        if (this.activeOwners.get(segment.id) !== owner) continue
+        this.active.set(segment.id, segment)
+        const index = this.orderedIndices.get(segment.id)
+        if (index !== undefined) this.ordered[index] = segment
+      }
+    }
     this.rehideSuccessors(reopened)
     if (!this.enabled) this.adoptAll()
     else this.queuePump()
@@ -205,14 +246,14 @@ export class SessionPlayback {
       const previous = this.states.get(segment.id)
       const wasComplete = previous !== undefined && this.isComplete(previous)
       this.active.set(segment.id, segment)
-      this.updateState(segment, animate)
+      const changed = this.updateState(segment, animate)
+      if (changed) this.rewindHead(segment.id)
+      const index = this.orderedIndices.get(segment.id)
+      if (!orderChanged && index !== undefined) this.ordered[index] = segment
       const updated = this.states.get(segment.id)!
       if (wasComplete && !this.isComplete(updated)) reopened.add(segment.id)
     }
-    if (orderChanged) {
-      this.ordered = [...this.active.values()].sort((left, right) =>
-        compareOrder(left.order, right.order) || left.id.localeCompare(right.id))
-    }
+    if (orderChanged) this.rebuildOrder()
     this.rehideSuccessors(reopened)
     if (!this.enabled) this.adoptAll()
     else this.queuePump()
@@ -274,14 +315,16 @@ export class SessionPlayback {
       this.active.set(id, nextSegment)
       const previous = this.states.get(id)
       const wasComplete = previous !== undefined && this.isComplete(previous)
-      this.updateState(nextSegment, nextOwner === owner ? animate : true)
+      const stateChanged = this.updateState(nextSegment, nextOwner === owner ? animate : true)
       const updated = this.states.get(id)!
       if ((previousSegment === undefined || wasComplete) && !this.isComplete(updated)) reopened.add(id)
+      if (this.activeOwners.get(id) === nextOwner) {
+        const index = this.orderedIndices.get(id)
+        if (index !== undefined) this.ordered[index] = nextSegment
+      }
+      if (stateChanged || previousSegment === undefined || previousOwner !== nextOwner) this.rewindHead(id)
     }
-    if (activeChanged || orderChanged) {
-      this.ordered = [...this.active.values()].sort((left, right) =>
-        compareOrder(left.order, right.order) || left.id.localeCompare(right.id))
-    }
+    if (activeChanged || orderChanged) this.rebuildOrder()
     this.rehideSuccessors(reopened)
     if (!this.enabled) this.adoptAll()
     else this.queuePump()
@@ -310,6 +353,12 @@ export class SessionPlayback {
     this.cancelPendingFrame()
     this.resetClock()
     this.queuePump()
+  }
+
+  /** Synchronize per-frame shared backpressure without publishing a snapshot. */
+  setRevealScale(scale: number): void {
+    if (this.disposed || !Number.isFinite(scale)) return
+    this.revealScale = Math.min(1, Math.max(0.05, scale))
   }
 
   setEnabled(enabled: boolean): void {
@@ -366,6 +415,8 @@ export class SessionPlayback {
     this.active.clear()
     this.activeOwners.clear()
     this.ordered = []
+    this.orderedIndices.clear()
+    this.headIndex = 0
     this.dirtyDisplays.clear()
     this.states.clear()
     this.displays.clear()
@@ -401,14 +452,25 @@ export class SessionPlayback {
     return changed
   }
 
-  private updateState(segment: PlaybackSegment, animate: boolean): void {
+  private updateState(segment: PlaybackSegment, animate: boolean): boolean {
     let state = this.states.get(segment.id)
+    const awaitPresentation = segment.awaitPresentation === true
+    if (state !== undefined && state.generation === segment.generation && state.animate === animate
+      && state.text === segment.text && state.sealed === segment.sealed
+      && state.hidden === (segment.hidden === true) && state.awaitPresentation === awaitPresentation
+      && state.baselineChars === segment.baselineChars) {
+      state.touched = ++this.touchSequence
+      return false
+    }
     const previousText = state?.text
+    const unchangedText = state !== undefined && state.text === segment.text
     const previousDisplay = state?.displayText
     const previousEntered = state?.entered
     const previousPending = state === undefined ? undefined : !this.isComplete(state)
+    const previousPointLength = state?.points.length ?? 0
     const wasHidden = state?.hidden ?? false
-    const nextPoints = Array.from(segment.text)
+    const appended = state !== undefined && !unchangedText && appendPoints(state.points, state.text, segment.text)
+    const nextPoints = state === undefined || (!unchangedText && !appended) ? Array.from(segment.text) : state.points
     const presentationPending = this.enabled && animate && !segment.hidden && segment.awaitPresentation === true
     if (state === undefined) {
       state = {
@@ -422,13 +484,14 @@ export class SessionPlayback {
         hidden: segment.hidden === true,
         entered: false,
         entryBaseline: segment.baselineChars !== undefined,
+        awaitPresentation,
+        baselineChars: segment.baselineChars,
         presentationPending,
         fraction: 0,
         touched: ++this.touchSequence,
       }
       this.states.set(segment.id, state)
     } else {
-      const previousPoints = state.points
       const retry = state.generation !== segment.generation || (state.sealed && !segment.sealed)
       if (retry) {
         this.cancelPendingFrame()
@@ -438,10 +501,10 @@ export class SessionPlayback {
         state.entered = false
         state.presentationPending = presentationPending
         state.fraction = 0
-      } else if (state.text !== segment.text) {
-        if (startsWith(nextPoints, previousPoints)) {
-          state.consumed = Math.min(state.consumed, previousPoints.length)
-        } else if (state.sealed && state.consumed >= previousPoints.length) {
+      } else if (!unchangedText) {
+        if (appended) {
+          state.consumed = Math.min(state.consumed, previousPointLength)
+        } else if (state.sealed && state.consumed >= previousPointLength) {
           // A replacement of completed history is adopted without replaying it.
           state.consumed = nextPoints.length
           state.displayText = state.entered ? segment.text : ''
@@ -458,6 +521,8 @@ export class SessionPlayback {
       state.sealed = segment.sealed
       state.hidden = segment.hidden === true
       state.entryBaseline = segment.baselineChars !== undefined
+      state.awaitPresentation = awaitPresentation
+      state.baselineChars = segment.baselineChars
       state.touched = ++this.touchSequence
     }
 
@@ -485,6 +550,7 @@ export class SessionPlayback {
       || previousPending !== nextPending || previousText === undefined) {
       this.dirtyDisplays.add(segment.id)
     }
+    return true
   }
 
   private applyImmediateState(_id: string, state: SegmentState): void {
@@ -536,8 +602,22 @@ export class SessionPlayback {
     }
     for (const id of previousIds) if (!this.active.has(id)) this.dirtyDisplays.add(id)
     for (const id of this.active.keys()) if (!previousIds.has(id)) this.dirtyDisplays.add(id)
+    this.rebuildOrder()
+  }
+
+  private rebuildOrder(): void {
     this.ordered = [...this.active.values()].sort((left, right) =>
       compareOrder(left.order, right.order) || left.id.localeCompare(right.id))
+    this.orderedIndices.clear()
+    for (let index = 0; index < this.ordered.length; index++) {
+      this.orderedIndices.set(this.ordered[index]!.id, index)
+    }
+    this.headIndex = 0
+  }
+
+  private rewindHead(id: string): void {
+    const index = this.orderedIndices.get(id)
+    if (index !== undefined && index < this.headIndex) this.headIndex = index
   }
 
   private isComplete(state: SegmentState): boolean {
@@ -577,21 +657,33 @@ export class SessionPlayback {
   }
 
   private pump(): void {
-    for (const segment of this.ordered) {
+    let index = this.firstIncompleteIndex()
+    while (index < this.ordered.length) {
+      const segment = this.ordered[index]!
       const state = this.states.get(segment.id)!
-      if (this.isComplete(state)) continue
+      if (this.isComplete(state)) {
+        index++
+        continue
+      }
       if (state.hidden) {
         this.enterState(segment.id, state)
         this.consumeTo(segment.id, state, state.points.length)
-        if (state.sealed) continue
+        if (state.sealed) {
+          index++
+          continue
+        }
         break
       }
       if (state.points.length === 0) {
         this.enterState(segment.id, state)
-        if (this.isComplete(state)) continue
+        if (this.isComplete(state)) {
+          index++
+          continue
+        }
       }
       break
     }
+    this.headIndex = index
     this.queuePublish()
     this.ensureFrame()
   }
@@ -618,18 +710,21 @@ export class SessionPlayback {
     const previous = this.lastFrameTime ?? timestamp
     const elapsed = Math.max(0, timestamp - previous)
     this.lastFrameTime = timestamp
-    const head = this.firstIncomplete()
+    let index = this.firstIncompleteIndex()
+    const head = this.ordered[index]
     const headState = head ? this.states.get(head.id)! : undefined
     const backlog = headState ? headState.points.length - headState.consumed : 0
     const pressure = 1 + Math.min(1, backlog / this.maxLagChars) * this.tuning.queuePressure
-    const cps = Math.min(this.tuning.maxRevealCps, this.charsPerSecond * this.tuning.revealScale * pressure)
+    const cps = Math.min(
+      this.tuning.maxRevealCps,
+      this.charsPerSecond * this.tuning.revealScale * this.revealScale * pressure,
+    )
     const accumulated = Math.min(this.maxLagChars, this.wholeChars + Math.min(elapsed, 120) * cps / 1000)
     let budget = Math.min(Math.max(1, Math.floor(this.tuning.cadenceClamp)), Math.floor(accumulated))
     // Clamp whole-character debt away, preserving only sub-character cadence.
     this.wholeChars = accumulated % 1
 
     const ordered = this.ordered
-    let index = 0
     while (index < ordered.length) {
       const segment = ordered[index]!
       const state = this.states.get(segment.id)!
@@ -666,15 +761,23 @@ export class SessionPlayback {
       break
     }
 
+    this.headIndex = index
     this.pump()
   }
 
   private firstIncomplete(): PlaybackSegment | undefined {
-    for (const segment of this.ordered) {
-      const state = this.states.get(segment.id)!
-      if (!this.isComplete(state)) return segment
+    return this.ordered[this.firstIncompleteIndex()]
+  }
+
+  private firstIncompleteIndex(): number {
+    let index = Math.min(this.headIndex, this.ordered.length)
+    while (index < this.ordered.length) {
+      const segment = this.ordered[index]!
+      if (!this.isComplete(this.states.get(segment.id)!)) break
+      index++
     }
-    return undefined
+    this.headIndex = index
+    return index
   }
 
   private cancelPendingFrame(): void {
