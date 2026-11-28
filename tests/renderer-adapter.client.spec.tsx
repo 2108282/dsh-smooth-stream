@@ -4,8 +4,6 @@ import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { createElement, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { installRendererAdapter } from '../src/client/rendererAdapter.ts'
-import { assistantTextSegments, revealAssistantBlocks } from '../src/client/NativeAssistantNodeView.tsx'
-import type { AssistantBlock } from '@deepseek-ai/dsh-client-ui-chat/client'
 
 afterEach(cleanup)
 
@@ -20,23 +18,6 @@ function register(ctx: Context, key: string, component: unknown, priority = 0) {
   ctx.slots.register({ name: 'conversation.chat.node', key, priority } as never, component as never)
   return ctx.slots.entries('conversation.chat.node').find(entry => entry.options.key === key)!
 }
-
-describe('native assistant block projection', () => {
-  it('keeps grouped text aligned to its source blocks and preserves Unicode code points', () => {
-    const blocks = [
-      { kind: 'reasoning', text: 'think' },
-      { kind: 'text', text: '🙂hello' },
-      { kind: 'other', block: { type: 'image', id: 'opaque' } },
-    ] as unknown as AssistantBlock[]
-    const projection = assistantTextSegments(blocks, 'response')
-    expect(projection.segments).toEqual(['🙂hello'])
-    expect(projection.blockIndices).toEqual([1])
-    const projected = revealAssistantBlocks(blocks, projection, '🙂hel')
-    expect(projected[0]).toBe(blocks[0])
-    expect(projected[1]).toMatchObject({ text: '🙂hel' })
-    expect(projected[2]).toBe(blocks[2])
-  })
-})
 
 describe('renderer adapter', () => {
   it('wraps the official entry in place, forwards props, and restores it on dispose', async () => {

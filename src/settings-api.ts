@@ -31,8 +31,6 @@ export interface StreamSettingsView {
   motionPreference: import('./settings.ts').StreamMotionPreference
   /** Current resolved preference. */
   thinkAutoExpand: boolean
-  /** Whether new answer/thinking text fades into its original color. */
-  logarithmicFade: boolean
   /** Whether collapsed tool steps are detached via display: none. */
   fastFold: boolean
   /** Whether DSH 3-frame nested rAF throttle is bypassed into native single-frame dispatch. */

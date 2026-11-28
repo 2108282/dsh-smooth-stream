@@ -40,7 +40,7 @@ import { FollowHost } from '../src/client/FollowHost.tsx'
 import { useSmoothStreamContent } from '../src/client/useSmoothStreamContent.ts'
 import { notifyFollowCommit } from '../src/client/teleprompterGlide.ts'
 import { debugRuntime } from '../src/client/debugRuntime.ts'
-import css from '../src/client/TypewriterAssistantNodeView.module.css'
+import css from './overlap.module.css'
 import markdownCss from '../../deepseek-harness/packages/client/ui-primitives/src/markdown/MarkdownText.module.css'
 
 /* ------------------------------- fixtures --------------------------------- */

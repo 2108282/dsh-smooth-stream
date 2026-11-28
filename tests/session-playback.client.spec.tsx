@@ -174,7 +174,7 @@ describe('SessionPlayback', () => {
   })
 
   it.each(['append', 'insert-child'] as const)(
-    'rehides entered successors when a completed predecessor grows by %s', async change => {
+    'rehides entered successors when a completed predecessor grows by %s', async (change: 'append' | 'insert-child') => {
       const playback = createPlayback()
       playback.upsert('owner', [
         segment('first', [1], 'a'),
@@ -420,102 +420,25 @@ describe('SessionPlayback', () => {
     expect(playback.read('body').text).toBe('a')
   })
 
-  it('holds pending after the final visible character until its delay ends on the sole frame clock', async () => {
+  it('requires a protocol seal after an open source has consumed all current text', async () => {
     const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
-    playback.upsert('owner', [segment('first', [1], 'a'), segment('card', [2], ''), segment('next', [3], 'b')], true)
+    playback.upsert('owner', [segment('open', [1], 'a', false), segment('card', [2], '')], true)
     await settle()
     paint(1)
     await settle()
-    expect(playback.read('first')).toMatchObject({ text: 'a', pending: true })
+    expect(playback.read('open')).toMatchObject({ text: 'a', pending: true })
     expect(playback.read('card').entered).toBe(false)
-    expect(playback.read('next').entered).toBe(false)
-    expect(frames.size).toBe(1)
-    paint(239)
+    expect(frames.size).toBe(0)
+
+    playback.upsert('owner', [segment('open', [1], 'a'), segment('card', [2], '')], true)
     await settle()
-    expect(playback.read('first').pending).toBe(true)
-    expect(playback.read('card').entered).toBe(false)
-    paint(1)
-    await settle()
-    expect(playback.read('first').pending).toBe(false)
+    expect(playback.read('open').pending).toBe(false)
     expect(playback.read('card')).toMatchObject({ entered: true, pending: false })
-    expect(playback.read('next')).toMatchObject({ text: 'b', pending: true })
-    expect(frames.size).toBe(1)
-    paint(240)
-    await settle()
-    expect(playback.read('next').pending).toBe(false)
     expect(frames.size).toBe(0)
   })
 
-  it('counts the delay from consumption rather than a later protocol seal', async () => {
+  it('keeps static history, hidden reasoning, and empty atomic cards outside text reveal', async () => {
     const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
-    playback.upsert('owner', [segment('open', [1], 'a', false), segment('card', [2], '')], true)
-    await settle()
-    paint(1)
-    await settle()
-    expect(frames.size).toBe(0)
-    time += 100
-    playback.upsert('owner', [segment('open', [1], 'a'), segment('card', [2], '')], true)
-    await settle()
-    expect(playback.read('open').pending).toBe(true)
-    paint(139)
-    await settle()
-    expect(playback.read('card').entered).toBe(false)
-    paint(1)
-    await settle()
-    expect(playback.read('open').pending).toBe(false)
-    expect(playback.read('card').entered).toBe(true)
-    expect(frames.size).toBe(0)
-  })
-
-  it('still requires a protocol seal after an open source has already finished its appearance delay', async () => {
-    const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
-    playback.upsert('owner', [segment('open', [1], 'a', false), segment('card', [2], '')], true)
-    await settle()
-    paint(1)
-    await settle()
-    time += 1000
-    playback.upsert('owner', [segment('open', [1], 'a', false), segment('card', [2], '')], true)
-    await settle()
-    expect(playback.read('open').pending).toBe(true)
-    expect(playback.read('card').entered).toBe(false)
-    expect(frames.size).toBe(0)
-    playback.upsert('owner', [segment('open', [1], 'a'), segment('card', [2], '')], true)
-    await settle()
-    expect(playback.read('open').pending).toBe(false)
-    expect(playback.read('card').entered).toBe(true)
-    expect(frames.size).toBe(0)
-  })
-
-  it('restarts the appearance delay only when an appended visible character is consumed', async () => {
-    const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
-    playback.upsert('owner', [segment('body', [1], 'a', false), segment('card', [2], '')], true)
-    await settle()
-    paint(1)
-    await settle()
-    time += 200
-    playback.upsert('owner', [segment('body', [1], 'ab', false), segment('card', [2], '')], true)
-    await settle()
-    paint(1)
-    await settle()
-    expect(playback.read('body').text).toBe('ab')
-    time += 20
-    playback.upsert('owner', [segment('body', [1], 'ab'), segment('card', [2], '')], true)
-    await settle()
-    paint(219)
-    await settle()
-    expect(playback.read('card').entered).toBe(false)
-    paint(1)
-    await settle()
-    expect(playback.read('card').entered).toBe(true)
-  })
-
-  it('does not add an appearance delay to static history, hidden reasoning, or empty atomic cards', async () => {
-    const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
     playback.upsert('history', [segment('history', [0], 'history')], false)
     playback.upsert('live', [segment('hidden', [1], 'thought', true, true), segment('card', [2], ''), segment('text', [3], 'x')], true)
     await settle()
@@ -525,12 +448,11 @@ describe('SessionPlayback', () => {
     expect(playback.read('text').entered).toBe(false)
     paint(1)
     await settle()
-    expect(playback.read('text')).toMatchObject({ text: 'x', pending: true })
+    expect(playback.read('text')).toMatchObject({ text: 'x', pending: false })
   })
 
-  it.each(['hidden', 'static'] as const)('skips an existing appearance delay when its source becomes %s', async mode => {
+  it.each(['hidden', 'static'] as const)('adopts an existing source when it becomes %s without replaying it', async (mode: 'hidden' | 'static') => {
     const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
     playback.upsert('body', [segment('body', [1], 'a')], true)
     playback.upsert('card', [segment('card', [2], '')], true)
     await settle()
@@ -547,9 +469,8 @@ describe('SessionPlayback', () => {
     expect(frames.size).toBe(0)
   })
 
-  it('fast-forwards appearance delays while preserving an explicit unsealed barrier', async () => {
+  it('fast-forwards visible content while preserving an explicit unsealed barrier', async () => {
     const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
     playback.upsert('owner', [segment('first', [1], 'a'), segment('open', [2], 'b', false), segment('card', [3], '')], true)
     await settle()
     paint(1)
@@ -567,48 +488,26 @@ describe('SessionPlayback', () => {
     expect(frames.size).toBe(0)
   })
 
-  it('discards a prior generation appearance delay instead of applying it to the retry', async () => {
+  it('resets reveal progress for a replacement generation', async () => {
     const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
     playback.upsert('owner', [{ ...segment('body', [1], 'a'), generation: 1 }, segment('card', [2], '')], true)
     await settle()
     paint(1)
     await settle()
-    time += 100
+    expect(playback.read('body').text).toBe('a')
+    expect(playback.read('card').entered).toBe(true)
+
     playback.upsert('owner', [{ ...segment('body', [1], 'b'), generation: 2 }, segment('card', [2], '')], true)
     await settle()
     expect(playback.read('body')).toMatchObject({ text: '', entered: false, pending: true })
     paint(1)
     await settle()
-    paint(239)
-    await settle()
-    expect(playback.read('card').entered).toBe(false)
-    paint(1)
-    await settle()
-    expect(playback.read('card').entered).toBe(true)
-  })
-
-  it('can disable an existing appearance delay without replaying it when enabled again', async () => {
-    const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
-    playback.upsert('owner', [segment('body', [1], 'a'), segment('card', [2], '')], true)
-    await settle()
-    paint(1)
-    await settle()
-    playback.configure({ settleDelayMs: 0 })
-    await settle()
-    expect(playback.read('body').pending).toBe(false)
-    expect(playback.read('card').entered).toBe(true)
-    expect(frames.size).toBe(0)
-    playback.configure({ settleDelayMs: 240 })
-    await settle()
-    expect(playback.read('body').pending).toBe(false)
-    expect(frames.size).toBe(0)
+    expect(playback.read('body')).toMatchObject({ text: 'b', entered: true, pending: false })
+    expect(playback.read('card')).toMatchObject({ entered: true, pending: false })
   })
 
   it('adopts every disabled native row across open barriers without rollback', async () => {
     const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
     const values = [segment('open', [1], 'abcdef', false), segment('card', [2], ''), segment('later', [3], 'later')]
     playback.upsert('owner', values, true)
     await settle()
@@ -693,7 +592,7 @@ describe('SessionPlayback', () => {
   })
 
   it.each(['hidden', 'static', 'disabled', 'fast-forward', 'removed'] as const)(
-    'releases a pending atomic predecessor when it becomes %s', async mode => {
+    'releases a pending atomic predecessor when it becomes %s', async (mode: 'hidden' | 'static' | 'disabled' | 'fast-forward' | 'removed') => {
       const playback = createPlayback()
       const card = { ...segment('card', [1], ''), awaitPresentation: true }
       playback.upsert('card', [card], true)
@@ -722,7 +621,7 @@ describe('SessionPlayback', () => {
     },
   )
 
-  it.each(['hidden', 'static'] as const)('never arms presentation for an initially %s atomic source', async mode => {
+  it.each(['hidden', 'static'] as const)('never arms presentation for an initially %s atomic source', async (mode: 'hidden' | 'static') => {
     const playback = createPlayback()
     playback.upsert('card', [{ ...segment('card', [1], '', true, mode === 'hidden'), awaitPresentation: true }], mode !== 'static')
     playback.upsert('body', [segment('body', [2], 'x')], true)
@@ -763,28 +662,6 @@ describe('SessionPlayback', () => {
     await settle()
     paint(1)
     await settle()
-    expect(playback.read('body').text).toBe('x')
-  })
-
-  it('keeps the existing text appearance delay after presentation acknowledgement', async () => {
-    const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
-    playback.upsert('owner', [
-      { ...segment('card', [1], 'a'), awaitPresentation: true },
-      segment('body', [2], 'x'),
-    ], true)
-    await settle()
-    paint(1)
-    await settle()
-    playback.acknowledgePresentation('card')
-    await settle()
-    expect(playback.read('card').pending).toBe(true)
-    paint(239)
-    await settle()
-    expect(playback.read('body').entered).toBe(false)
-    paint(1)
-    await settle()
-    expect(playback.read('card').pending).toBe(false)
     expect(playback.read('body').text).toBe('x')
   })
 
@@ -836,7 +713,6 @@ describe('SessionPlayback', () => {
 
   it('adopts a running history baseline without sealing it and animates later appends', async () => {
     const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
     const source = { ...segment('body', [1], 'history', false), baselineChars: 7 }
     playback.upsert('owner', [source, segment('card', [2], '')], true)
     await settle()
@@ -855,17 +731,13 @@ describe('SessionPlayback', () => {
     expect(playback.read('body')).toMatchObject({ text: 'historyab', pending: true })
     playback.upsert('owner', [{ ...source, text: 'historyab', sealed: true }, segment('card', [2], '')], true)
     await settle()
-    paint(239)
-    await settle()
-    expect(playback.read('card').entered).toBe(false)
-    paint(1)
-    await settle()
-    expect(playback.read('card').entered).toBe(true)
+    expect(playback.read('body')).toMatchObject({ text: 'historyab', pending: false })
+    expect(playback.read('card')).toMatchObject({ entered: true, pending: false })
+    expect(frames.size).toBe(0)
   })
 
   it('shows only the entry prefix when history and the first live packet merge before registration', async () => {
     const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
     playback.upsert('owner', [
       { ...segment('body', [1], 'oldnew'), baselineChars: 3 },
       { ...segment('history-card', [2], ''), baselineChars: 0, awaitPresentation: true },
@@ -878,10 +750,7 @@ describe('SessionPlayback', () => {
     expect(playback.read('live-card').entered).toBe(false)
     paint(3)
     await settle()
-    expect(playback.read('body')).toMatchObject({ text: 'oldnew', pending: true })
-    expect(playback.read('live-card').entered).toBe(false)
-    paint(240)
-    await settle()
+    expect(playback.read('body')).toMatchObject({ text: 'oldnew', pending: false })
     expect(playback.read('live-card')).toMatchObject({ entered: true, pending: true })
     expect(playback.read('tail').entered).toBe(false)
     playback.acknowledgePresentation('live-card')
@@ -891,9 +760,8 @@ describe('SessionPlayback', () => {
     expect(playback.read('tail').text).toBe('x')
   })
 
-  it('never adds an appearance delay or presentation gate to a complete history baseline', async () => {
+  it('adopts complete history baselines without a presentation barrier', async () => {
     const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
     playback.upsert('owner', [
       { ...segment('history', [1], 'past'), baselineChars: 4 },
       { ...segment('card', [2], ''), baselineChars: 0, awaitPresentation: true },
@@ -959,16 +827,14 @@ describe('SessionPlayback', () => {
 
   it('clamps oversized baselines to the current code point length', async () => {
     const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
     playback.upsert('owner', [{ ...segment('body', [1], '😀x'), baselineChars: 999 }], true)
     await settle()
     expect(playback.read('body')).toMatchObject({ text: '😀x', entered: true, pending: false })
     expect(frames.size).toBe(0)
   })
 
-  it('never rolls back ordinary reveal progress or clears a suffix settle on repeated smaller baselines', async () => {
+  it('never rolls back ordinary reveal progress when baselines become smaller', async () => {
     const playback = createPlayback()
-    playback.configure({ settleDelayMs: 240 })
     const source = { ...segment('body', [1], 'oldnew'), baselineChars: 3 }
     playback.upsert('owner', [source, segment('card', [2], '')], true)
     await settle()
@@ -982,13 +848,8 @@ describe('SessionPlayback', () => {
     await settle()
     playback.upsert('owner', [source, segment('card', [2], '')], true)
     await settle()
-    expect(playback.read('body')).toMatchObject({ text: 'oldnew', pending: true })
-    paint(239)
-    await settle()
-    expect(playback.read('card').entered).toBe(false)
-    paint(1)
-    await settle()
-    expect(playback.read('card').entered).toBe(true)
+    expect(playback.read('body')).toMatchObject({ text: 'oldnew', pending: false })
+    expect(playback.read('card')).toMatchObject({ entered: true, pending: false })
   })
 
   it('does not inherit a baseline across generations and applies a replacement generation baseline after reset', async () => {

@@ -76,7 +76,7 @@ function setup(overrides: Partial<DebugRuntimeState> = {}) {
 }
 
 describe('render diagnostics panel', () => {
-  it.each([false, true])('applies saved physical tuning independently of HUD=%s', hud => {
+  it.each([false, true])('applies saved physical tuning independently of HUD=%s', (hud: boolean) => {
     const tuning = { ...DEFAULT_STREAM_DEBUG_TUNING, cadenceClamp: 5, maxRevealCps: 220 }
     debugRuntime.syncSettings({ available: true, enabled: hud, tuningEnabled: true,
       writable: true, dirty: false, status: 'ready', tuning })

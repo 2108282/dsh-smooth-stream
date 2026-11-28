@@ -16,8 +16,9 @@ import { installEntryBaselineSource, type EntryBaselineBinding, type EntryBaseli
 import * as followHost from '../src/client/FollowHost.tsx'
 import type { SettingsSource } from '../src/client/flowPresentationAdapter.tsx'
 import { apply, inject } from '../src/client/index.ts'
-import { STREAM_ORDER_DATA_KEY, streamOrderDefinition, type StreamOrderData } from '../src/client/streamOrder.ts'
+import { visibleReasoningText } from '../src/client/reasoningPlayback.ts'
 import { DEFAULT_STREAM_SETTINGS, type StreamSettings } from '../src/settings.ts'
+import { STREAM_ORDER_DATA_KEY, streamOrderDefinition, type StreamOrderData } from '../src/client/streamOrder.ts'
 
 type SourceNode = ChatConversationViewNode
 type AssistantOwner = ChatNodeViewProps<'assistant-step'>
@@ -188,12 +189,21 @@ function tool(key: string): SourceNode {
   } as unknown as SourceNode
 }
 
+function atomicCard(key: string, kind: 'context' | 'command' | 'system-prompt'): SourceNode {
+  const anchorSeq = Number(key.split(':').at(-1)) * 100 + 50
+  return {
+    key, id: key, kind, anchorSeq, target: 'chat', visibility: 'visible',
+    data: { turn: 1, step: 1, status: 'settled', root: { callId: key, text: `complete ${key}` } },
+    location: { kind: 'step', turn: { turn: 1, status: 'open' }, step: { turn: 1, step: 1, status: 'closed' } },
+  } as unknown as SourceNode
+}
+
 function entry(key: string, groupPart?: string): Entry {
   return { kind: 'node', key, ...(groupPart === undefined ? {} : { groupPart }) } as Entry
 }
 
 /** Only the shipped Inner renderers are replaced; all admission, projection and clocks are real. */
-function fixture(options: { expanded?: boolean; strict?: boolean; ready?: boolean; markdown?: boolean; children?: boolean; cold?: boolean; settings?: Partial<StreamSettings> } = {}) {
+function fixture(options: { expanded?: boolean; strict?: boolean; ready?: boolean; markdown?: boolean; children?: boolean; cold?: boolean; managedKinds?: readonly string[]; settings?: Partial<StreamSettings> } = {}) {
   const source = cell(new Map<string, SourceNode>())
   let sessionId = 'single-clock-session'
   type WireEntry = EntryBaselineWindow['entries'][number]
@@ -273,7 +283,8 @@ function fixture(options: { expanded?: boolean; strict?: boolean; ready?: boolea
   const seenFlows: ChatFlowSlotProps[] = []
   const mounts: string[] = []
   const child = createElement('small', { 'data-testid': 'official-child' }, 'official child')
-  const slot = vi.fn((_name: string, _props: unknown) => null)
+  const slot = vi.fn((name: string, props: Record<string, unknown>) => name === 'conversation.chat.reasoning.body'
+    ? renderText(String(props.text ?? ''), Boolean(props.running)) : null)
   const t = vi.fn((key: string) => `官方:${key}`)
   const labels = { code: { copyLabel: 'Copy', copiedLabel: 'Copied' }, footnotes: 'Footnotes' }
   const renderText = (text: string, running: boolean) => options.markdown
@@ -296,12 +307,15 @@ function fixture(options: { expanded?: boolean; strict?: boolean; ready?: boolea
   }
   const ReasoningProbe = ({ props, text, index }: { props: ProbeOwner; text: string; index: number }) => {
     const disclosure = props.useDisclosure()
+    const displayText = visibleReasoningText(text)
+    const running = props.node.data.status === 'running' && index === props.node.data.blocks.length - 1
+    const body = disclosure.expanded ? props.renderSlot('conversation.chat.reasoning.body', {
+      rawText: text, text: displayText, running,
+    }) : null
+    const summary = displayText.split(/\r?\n/, 1)[0] ?? ''
     return createElement('section', null,
       createElement('button', { onClick: disclosure.toggle, 'aria-label': `toggle ${props.node.key}` }, props.t('message.think')),
-      createElement('div', { 'data-block': index, hidden: !disclosure.expanded }, renderText(text, props.node.data.status === 'running')),
-      disclosure.expanded ? props.renderSlot('conversation.chat.reasoning.body', {
-        rawText: text, text, running: props.node.data.status === 'running',
-      }) : null)
+      createElement('div', { 'data-block': index, hidden: !disclosure.expanded }, disclosure.expanded ? body : summary))
   }
   const NodeInner = (props: ProbeOwner) => {
     const { node } = props
@@ -350,7 +364,7 @@ function fixture(options: { expanded?: boolean; strict?: boolean; ready?: boolea
       useGroupHeaderAction: () => {}, ...extras } as unknown as ChatFlowSlotProps
   }
   let FlowRenderer: ComponentType<ChatFlowSlotProps> | undefined
-  const managedNodeKinds = new Set(['assistant-step', 'tool-call'])
+  const managedNodeKinds = new Set(options.managedKinds ?? ['assistant-step', 'tool-call'])
   const tree = () => {
     const flow = FlowRenderer === undefined
       ? createElement(SessionPlaybackFlow, { Inner: FlowInner, props: props(), settings, managedNodeKinds })
@@ -498,6 +512,8 @@ describe('session playback injected into the official flow and keyed renderers',
     expect(row(view.container, 'tool:1')).toBeNull()
     expect(view.container.querySelector('[data-group]')).toBeNull()
     let paced = false
+    let pacedCardTitle = false
+    let completedCardTitle = false
     await until(() => row(view.container, 'tool:2') !== null, () => {
       const prefix = text(view.container, 'assistant:1') ?? ''
       paced ||= prefix.length > 0 && prefix.length < first.length
@@ -505,45 +521,64 @@ describe('session playback injected into the official flow and keyed renderers',
       if (row(view.container, 'tool:1')) {
         expect(prefix).toBe(first)
         expect(view.container.querySelector('[data-card-icon="tool:1"]')).not.toBeNull()
-        expect(row(view.container, 'tool:1')?.textContent).toBe('complete tool:1official action')
+        const title = row(view.container, 'tool:1')?.querySelector('header')?.textContent ?? ''
+        pacedCardTitle ||= title.length > 0 && title.length < 'complete tool:1'.length
+        completedCardTitle ||= title === 'complete tool:1'
+        expect(row(view.container, 'tool:1')?.querySelector('button')?.textContent).toBe('official action')
       }
-      if (row(view.container, 'assistant:2')) expect(row(view.container, 'tool:1')).not.toBeNull()
+      if (row(view.container, 'assistant:2')) {
+        expect(row(view.container, 'tool:1')).not.toBeNull()
+        expect(row(view.container, 'tool:1')?.querySelector('header')?.textContent).toBe('complete tool:1')
+      }
       if (row(view.container, 'tool:2')) expect(text(view.container, 'assistant:2')).toBe(second)
     })
     expect(paced).toBe(true)
+    expect(pacedCardTitle).toBe(true)
+    expect(completedCardTitle).toBe(true)
     expect(f.mounts).toEqual(['assistant:1', 'tool:1', 'assistant:2', 'tool:2'])
   })
 
-  it('keeps the playback position on the fading tail before admitting the next tool card', async () => {
-    const highlights = new Map<string, Set<Range>>()
-    vi.stubGlobal('Highlight', class extends Set<Range> {})
-    vi.stubGlobal('CSS', { highlights, supports: () => true })
-    const f = fixture({ settings: { logarithmicFade: true } })
+  it('streams context, command and system-prompt card text through the shared session queue', async () => {
+    const f = fixture({ managedKinds: ['assistant-step', 'tool-call', 'context', 'command', 'system-prompt'] })
+    const view = render(f.tree())
+    const contextText = 'complete context:1'
+    const commandText = 'complete command:2'
+    await act(async () => {
+      f.set([
+        atomicCard('context:1', 'context'),
+        atomicCard('command:2', 'command'),
+        atomicCard('system-prompt:3', 'system-prompt'),
+      ])
+      view.rerender(f.tree())
+    })
+
+    let pacedContext = false
+    let pacedCommand = false
+    await until(() => row(view.container, 'system-prompt:3') !== null, () => {
+      const context = row(view.container, 'context:1')?.querySelector('header')?.textContent ?? ''
+      const command = row(view.container, 'command:2')?.querySelector('header')?.textContent ?? ''
+      pacedContext ||= context.length > 0 && context.length < contextText.length
+      pacedCommand ||= command.length > 0 && command.length < commandText.length
+      if (row(view.container, 'command:2')) expect(context).toBe(contextText)
+      if (row(view.container, 'system-prompt:3')) expect(command).toBe(commandText)
+      expect(row(view.container, 'context:1')?.querySelector('button')?.textContent).toBe('official action')
+    })
+    expect(pacedContext).toBe(true)
+    expect(pacedCommand).toBe(true)
+    await until(() => row(view.container, 'system-prompt:3')?.querySelector('header')?.textContent === 'complete system-prompt:3')
+  })
+
+  it('admits the next tool card as soon as settled text drains without a fade tail', async () => {
+    const f = fixture()
     const view = render(f.tree())
     const answer = 'short sealed answer'
     await act(async () => {
       f.set([assistant('assistant:1', answer, { status: 'settled', sealed: [true] }), tool('tool:1')])
       view.rerender(f.tree())
     })
-    await until(() => text(view.container, 'assistant:1') === answer, () => {
-      expect(row(view.container, 'tool:1')).toBeNull()
-      expect(row(view.container, 'assistant:1')?.getAttribute('data-status')).toBe('running')
-    })
-    const lastCharacterAt = timestamp
-    expect(highlights.size).toBeGreaterThan(0)
-    expect(row(view.container, 'tool:1')).toBeNull()
-    expect(row(view.container, 'assistant:1')?.getAttribute('data-status')).toBe('running')
-    for (let index = 0; index < 14; index++) {
-      await paint()
-      expect(timestamp - lastCharacterAt).toBeLessThan(240)
-      expect(text(view.container, 'assistant:1')).toBe(answer)
-      expect(row(view.container, 'tool:1')).toBeNull()
-      expect(row(view.container, 'assistant:1')?.getAttribute('data-status')).toBe('running')
-    }
-    await paint()
-    expect(timestamp - lastCharacterAt).toBe(240)
-    expect(row(view.container, 'tool:1')?.textContent).toBe('complete tool:1official action')
+    await until(() => text(view.container, 'assistant:1') === answer)
     expect(row(view.container, 'assistant:1')?.getAttribute('data-status')).toBe('settled')
+    expect(row(view.container, 'tool:1')).not.toBeNull()
   })
 
   it('holds a drained live block through network silence until explicit block closure arrives', async () => {
@@ -566,14 +601,12 @@ describe('session playback injected into the official flow and keyed renderers',
     await until(() => row(view.container, 'tool:1') !== null)
   })
 
-  it.each(['text', 'reasoning'] as const)('keeps the %s source cursor and adopts the readable prefix when its visual group changes', async (kind) => {
-    const highlights = new Map<string, Set<Range>>()
-    vi.stubGlobal('Highlight', class extends Set<Range> {})
-    vi.stubGlobal('CSS', { highlights, supports: () => true })
-    const fadingText = () => [...highlights.values()].flatMap(bucket => [...bucket]).map(range => range.toString())
-    const f = fixture({ children: false, settings: { logarithmicFade: true } })
+  it.each(['text', 'reasoning'] as const)('keeps the %s source cursor and adopts the readable prefix when its visual group changes', async (kind: 'text' | 'reasoning') => {
+    const f = fixture({ children: false, expanded: false, settings: { thinkAutoExpand: true } })
     const view = render(f.tree())
-    const answer = 'one source, one playback cursor '.repeat(40)
+    const answer = kind === 'reasoning'
+      ? `${'one source, one playback cursor '.repeat(20)}\n\ncontinued body`
+      : 'one source, one playback cursor '.repeat(40)
     const part = kind === 'reasoning' ? 'reasoning' : 'response'
     const live = assistant('assistant:1', answer, { status: 'running', sealed: [false], blocks: [{ kind, text: answer }] })
     await act(async () => {
@@ -590,24 +623,18 @@ describe('session playback injected into the official flow and keyed renderers',
       view.rerender(f.tree())
     })
     expect(text(view.container, 'assistant:1')).toBe(before)
-    expect(fadingText()).toEqual([])
     await paint(4)
     const after = text(view.container, 'assistant:1') ?? ''
     expect(after.startsWith(before)).toBe(true)
     expect(after.length).toBeGreaterThan(before.length)
-    expect(fadingText().length).toBeGreaterThan(0)
     const output = row(view.container, 'assistant:1')!.querySelector('[data-block="0"]')!
-    expect([...highlights.values()].flatMap(bucket => [...bucket]).every(range =>
-      !output.contains(range.startContainer) || range.startOffset >= before.length)).toBe(true)
+    expect(output.textContent).toContain(after.slice(before.length, before.length + 4))
   })
 
   it.each([
     ['text', 'file'], ['reasoning', 'file'], ['text', 'reference'], ['reasoning', 'reference'],
-  ] as const)('reparses a real %s Markdown %s link without replay and still paces a new suffix', async (kind, link) => {
-    const highlights = new Map<string, Set<Range>>()
-    vi.stubGlobal('Highlight', class extends Set<Range> {})
-    vi.stubGlobal('CSS', { highlights, supports: () => true })
-    const f = fixture({ markdown: true, children: false, settings: { logarithmicFade: true } })
+  ] as const)('reparses a real %s Markdown %s link without replay and still paces a new suffix', async (kind: 'text' | 'reasoning', link: 'file' | 'reference') => {
+    const f = fixture({ markdown: true, children: false, expanded: true, settings: { thinkAutoExpand: false } })
     const view = render(f.tree())
     const answer = link === 'file' ? 'read [source](</tmp/source.ts>)'
       : '[source][ref]\n\nsecond paragraph\n\nthird paragraph\n\n[ref]: https://example.test/source'
@@ -621,12 +648,10 @@ describe('session playback injected into the official flow and keyed renderers',
     await paint(240)
     const first = row(view.container, 'assistant:1')!
     expect(first.querySelector(selector)).toBeNull()
-    if (link === 'reference') expect(text(view.container, 'assistant:1')).toContain('[source][ref]')
-    expect([...highlights.values()].flatMap(bucket => [...bucket])).toHaveLength(0)
+    if (link === 'reference') expect(text(view.container, 'assistant:1')).toContain(kind === 'reasoning' ? 'third paragraph' : '[source][ref]')
     await publish('settled')
     expect(row(view.container, 'assistant:1')).toBe(first)
-    expect(first.querySelector(selector)?.textContent).toBe('source')
-    expect([...highlights.values()].flatMap(bucket => [...bucket])).toHaveLength(0)
+    await until(() => first.querySelector(selector)?.textContent === 'source')
     const rendered = text(view.container, 'assistant:1')!
     const suffix = 'new suffix continues streaming '.repeat(10)
     await publish('running', suffix)
@@ -728,6 +753,56 @@ describe('session playback injected into the official flow and keyed renderers',
     expectCompleteNativeOutput()
   })
 
+  it.each([
+    ['single-line', 'Thought', 'Thought'],
+    ['later paragraph', 'First\n\nSecond\nmore', 'First'],
+  ])('keeps a streaming non-tail reasoning summary native for %s blocks', async (_case: string, reasoning: string, summary: string) => {
+    const f = fixture({ expanded: false, settings: { thinkAutoExpand: false } })
+    const view = render(f.tree())
+    const blocks: AssistantBlock[] = [
+      { kind: 'reasoning', text: reasoning },
+      { kind: 'text', text: 'answer follows reasoning' },
+    ]
+    await act(async () => {
+      f.set([assistant('assistant:1', '', { status: 'running', blocks })])
+      view.rerender(f.tree())
+    })
+
+    await until(() => text(view.container, 'assistant:1', 0) === summary)
+    expect(text(view.container, 'assistant:1', 0)).toBe(summary)
+
+    await act(async () => {
+      f.set([assistant('assistant:1', '', { status: 'settled', blocks })])
+      view.rerender(f.tree())
+    })
+    expect(text(view.container, 'assistant:1', 0)).toBe(summary)
+  })
+
+  it('keeps signature metadata out of the streamed reasoning Body Slot text', async () => {
+    const f = fixture({ expanded: true, settings: { thinkAutoExpand: false } })
+    const view = render(f.tree())
+    const signature = '<signature>private metadata</signature>\n\n'
+    const reasoning = `${signature}visible reasoning`
+    await act(async () => {
+      f.set([assistant('assistant:1', '', { status: 'running', blocks: [{ kind: 'reasoning', text: reasoning }] })])
+      view.rerender(f.tree())
+    })
+    await paint(3)
+
+    const slotCalls = f.slot.mock.calls as unknown as readonly (readonly [string, Record<string, unknown>])[]
+    const latestBody = (): Record<string, unknown> | undefined => [...slotCalls].reverse()
+      .find(call => call[0] === 'conversation.chat.reasoning.body')?.[1]
+    expect(latestBody()).toMatchObject({ rawText: reasoning, text: '' })
+    expect(view.container.textContent).not.toContain('private metadata')
+
+    await until(() => latestBody()?.text === 'visible reasoning')
+    expect(latestBody()).toMatchObject({ rawText: reasoning, text: 'visible reasoning' })
+    const deliveredText = slotCalls.filter(call => call[0] === 'conversation.chat.reasoning.body')
+      .map(call => String(call[1].text ?? ''))
+    expect(deliveredText.every(value => !value.includes('<signature>') && !value.includes('private metadata'))).toBe(true)
+    expect(view.container.textContent).not.toContain('private metadata')
+  })
+
   it('keeps the official disclosure state and skips the remaining time of folded reasoning', async () => {
     const f = fixture({ expanded: true })
     const view = render(f.tree())
@@ -758,9 +833,8 @@ describe('session playback injected into the official flow and keyed renderers',
     expect(row(view.container, 'assistant:1')?.querySelector('[data-block="1"]')?.hasAttribute('hidden')).toBe(false)
   })
 
-  it.each(['visibility', 'native'] as const)('keeps the ordinary queue moving across %s events and bounds a long frame gap', async channel => {
-    const f = fixture({ settings: { logarithmicFade: false,
-      debugTuningEnabled: true, debugTuning: { ...DEFAULT_STREAM_SETTINGS.debugTuning,
+  it.each(['visibility', 'native'] as const)('keeps the ordinary queue moving across %s events and bounds a long frame gap', async (channel: 'visibility' | 'native') => {
+    const f = fixture({ settings: {       debugTuningEnabled: true, debugTuning: { ...DEFAULT_STREAM_SETTINGS.debugTuning,
         revealScale: 1, maxRevealCps: 600, cadenceClamp: 4, queuePressure: 0.85 } } })
     const view = render(f.tree())
     const answer = 'ordinary queue before background events '.repeat(20)
@@ -836,9 +910,10 @@ describe('session playback injected into the official flow and keyed renderers',
   })
 
   it('uses protocol order when reasoning group members and response seats have different visual order', async () => {
-    const f = fixture({ settings: { thinkAutoExpand: false } })
+    const f = fixture({ expanded: false, settings: { thinkAutoExpand: false } })
     const view = render(f.tree())
-    const reasoning = 'earliest protocol reasoning '.repeat(20)
+    const reasoning = `${'earliest protocol reasoning '.repeat(20)}\n\n`
+    const summary = reasoning.slice(0, reasoning.indexOf('\n'))
     const response = 'last protocol response '.repeat(16)
     await act(async () => {
       f.group('process:1', ['tool:1', { key: 'assistant:1', groupPart: 'reasoning' }])
@@ -850,12 +925,11 @@ describe('session playback injected into the official flow and keyed renderers',
     let paced = false
     await until(() => text(view.container, 'assistant:1', 1, 'response') === response, () => {
       const visible = text(view.container, 'assistant:1', 0, 'reasoning') ?? ''
-      paced ||= visible.length > 0 && visible.length < reasoning.length
-      if (visible !== reasoning) {
-        expect(row(view.container, 'tool:1')).toBeNull()
+      paced ||= visible.length > 0 && visible.length < summary.length
+      if (visible !== summary) {
         expect(text(view.container, 'assistant:1', 1, 'response') ?? '').toBe('')
       }
-      if (row(view.container, 'tool:1')) expect(visible).toBe(reasoning)
+      if (row(view.container, 'tool:1')) expect(visible).toBe(summary)
       if ((text(view.container, 'assistant:1', 1, 'response') ?? '') !== '') {
         expect(row(view.container, 'tool:1')).not.toBeNull()
       }
@@ -870,10 +944,10 @@ describe('session playback injected into the official flow and keyed renderers',
   })
 
   it('paces a first long reasoning block and keeps the native disclosures of two blocks independent', async () => {
-    const f = fixture({ settings: { thinkAutoExpand: false } })
+    const f = fixture({ expanded: false, settings: { thinkAutoExpand: false } })
     const view = render(f.tree())
-    const first = 'first independent reasoning '.repeat(80)
-    const second = 'second independent reasoning '.repeat(80)
+    const first = `${'first independent reasoning '.repeat(16)}\n\nfirst body continuation`
+    const second = `${'second independent reasoning '.repeat(80)}\n\nsecond body continuation`
     await act(async () => {
       f.set([assistant('assistant:1', '', { status: 'running', sealed: [true, true, true], blocks: [
         { kind: 'reasoning', text: first }, { kind: 'reasoning', text: second }, { kind: 'text', text: 'final answer' },
@@ -885,7 +959,8 @@ describe('session playback injected into the official flow and keyed renderers',
     expect(firstPrefix.length).toBeGreaterThan(0)
     expect(firstPrefix.length).toBeLessThan(first.length)
     expect(text(view.container, 'assistant:1', 1) ?? '').toBe('')
-    fireEvent.click(view.getByRole('button', { name: 'toggle assistant:1' }))
+    await until(() => view.getAllByRole('button', { name: 'toggle assistant:1' }).length === 2)
+    fireEvent.click(view.getAllByRole('button', { name: 'toggle assistant:1' })[1]!)
     await until(() => (text(view.container, 'assistant:1', 1) ?? '').length > 0)
     const secondPrefix = text(view.container, 'assistant:1', 1)!
     expect(secondPrefix.length).toBeLessThan(second.length)
@@ -907,7 +982,7 @@ describe('session playback injected into the official flow and keyed renderers',
   })
 
   it('auto-expands a settled reasoning batch while its playback is still pending', async () => {
-    const f = fixture({ expanded: false, settings: { thinkAutoExpand: true, logarithmicFade: false } })
+    const f = fixture({ expanded: false, settings: { thinkAutoExpand: true } })
     const view = render(f.tree())
     const reasoning = 'settled but not yet presented reasoning '.repeat(80)
     await act(async () => {
@@ -931,7 +1006,7 @@ describe('session playback injected into the official flow and keyed renderers',
   })
 
   it('keeps automatically opened reasoning and its progress unchanged by background signals', async () => {
-    const f = fixture({ expanded: false, settings: { thinkAutoExpand: true, logarithmicFade: false } })
+    const f = fixture({ expanded: false, settings: { thinkAutoExpand: true } })
     const view = render(f.tree())
     const reasoning = 'automatically opened running reasoning '.repeat(80)
     const publish = async (value: string) => act(async () => {
@@ -991,7 +1066,7 @@ describe('session playback injected into the official flow and keyed renderers',
   })
 
   it('shows an initially mounted running prefix and existing tools immediately, then paces only appended text', async () => {
-    const f = fixture({ settings: { logarithmicFade: false } })
+    const f = fixture({ settings: {  } })
     const history = assistant('assistant:0', 'existing closed history', { closed: true })
     const answer = 'initial running prefix '.repeat(24)
     const initial = assistant('assistant:1', answer, { status: 'running' })
@@ -1027,7 +1102,7 @@ describe('session playback injected into the official flow and keyed renderers',
   })
 
   it('adopts a first cold history replacement that arrives after an empty mount, including running text and tools', async () => {
-    const f = fixture({ cold: true, settings: { logarithmicFade: false } })
+    const f = fixture({ cold: true, settings: {  } })
     const view = render(f.tree())
     expect(view.container.querySelector('[data-node]')).toBeNull()
     const existing = 'running history received after entry '.repeat(24)
@@ -1053,7 +1128,7 @@ describe('session playback injected into the official flow and keyed renderers',
   })
 
   it('keeps a live suffix animated when the first cold baseline and append share one React commit', async () => {
-    const f = fixture({ cold: true, settings: { logarithmicFade: false } })
+    const f = fixture({ cold: true, settings: {  } })
     const view = render(f.tree())
     const baseline = 'baseline prefix before the same React commit '
     const latest = `${baseline}${'live suffix received before rendering '.repeat(30)}`
@@ -1074,7 +1149,7 @@ describe('session playback injected into the official flow and keyed renderers',
   })
 
   it('captures a fresh baseline when leaving A for B and returning to A', async () => {
-    const f = fixture({ settings: { logarithmicFade: false } })
+    const f = fixture({ settings: {  } })
     const view = render(f.tree())
     const answer = 'session A queued before departure '.repeat(40)
     await act(async () => { f.set([assistant('assistant:1', answer, { status: 'running' })]); view.rerender(f.tree()) })
@@ -1097,8 +1172,8 @@ describe('session playback injected into the official flow and keyed renderers',
     expect(text(view.container, 'assistant:1')!.length).toBeLessThan(latest.length)
   })
 
-  it.each(['complete', 'prefix'] as const)('preserves %s playback through actual official attempt retirement and durable settlement', async progress => {
-    const f = fixture({ settings: { logarithmicFade: false } })
+  it.each(['complete', 'prefix'] as const)('preserves %s playback through actual official attempt retirement and durable settlement', async (progress: 'complete' | 'prefix') => {
+    const f = fixture({ settings: {  } })
     const view = render(f.tree())
     const answer = 'real official settlement should retain playback '.repeat(16)
     const official = retiringAssistant(answer)
@@ -1143,7 +1218,7 @@ describe('session playback injected into the official flow and keyed renderers',
   })
 
   it('paces an actual official attempt retired before React ever publishes its live node', async () => {
-    const f = fixture({ settings: { logarithmicFade: false } })
+    const f = fixture({ settings: {  } })
     const view = render(f.tree())
     const answer = 'official coalesced retirement '.repeat(30)
     const official = retiringAssistant(answer)
@@ -1163,8 +1238,8 @@ describe('session playback injected into the official flow and keyed renderers',
     await until(() => text(view.container, key) === answer)
   })
 
-  it.each([false, true])('preserves a live suffix retired before its first React publication (existing prefix: %s)', async existing => {
-    const f = fixture({ settings: { logarithmicFade: false } })
+  it.each([false, true])('preserves a live suffix retired before its first React publication (existing prefix: %s)', async (existing: boolean) => {
+    const f = fixture({ settings: {  } })
     const answer = 'coalesced official retirement '.repeat(30)
     const initial = existing ? 'already visible prefix ' : ''
     const live = assistant('assistant:1', initial, { status: 'running', wireIndices: [8], seqs: [100], attempt: 'coalesced' })
@@ -1286,8 +1361,8 @@ describe('session playback injected into the official flow and keyed renderers',
     expect((node as AssistantOwner['node']).data.blocks[1]).toEqual({ kind: 'reasoning', text: reasoning })
   })
 
-  it.each(['loading', 'pending'] as const)('keeps native output complete while settings are %s and adopts it without replay when ready', async phase => {
-    const f = fixture({ ready: false, settings: { enabled: phase === 'loading', logarithmicFade: false } })
+  it.each(['loading', 'pending'] as const)('keeps native output complete while settings are %s and adopts it without replay when ready', async (phase: 'loading' | 'pending') => {
+    const f = fixture({ ready: false, settings: { enabled: phase === 'loading' } })
     const history = assistant('assistant:0', 'already loaded closed history', { closed: true })
     const answer = 'native text received before settings are ready '.repeat(12)
     f.set([history, assistant('assistant:1', answer, { status: 'running' }), tool('tool:1')])
@@ -1334,8 +1409,8 @@ describe('session playback injected into the official flow and keyed renderers',
     expect(text(view.container, 'assistant:1')).toBe(complete)
   })
 
-  it.each(['drained', 'setting-disabled'] as const)('folds only automatically opened reasoning when playback is %s', async condition => {
-    const f = fixture({ expanded: false, settings: { thinkAutoExpand: true, logarithmicFade: false } })
+  it.each(['drained', 'setting-disabled'] as const)('folds only automatically opened reasoning when playback is %s', async (condition: 'drained' | 'setting-disabled') => {
+    const f = fixture({ expanded: false, settings: { thinkAutoExpand: true } })
     const view = render(f.tree())
     const reasoning = 'reasoning that was opened only for playback '.repeat(16)
     await act(async () => {
@@ -1361,7 +1436,7 @@ describe('session playback injected into the official flow and keyed renderers',
   })
 
   it('preserves a manual reasoning expansion after playback drains and automatic expansion is disabled', async () => {
-    const f = fixture({ expanded: false, settings: { thinkAutoExpand: true, logarithmicFade: false } })
+    const f = fixture({ expanded: false, settings: { thinkAutoExpand: true } })
     const view = render(f.tree())
     const reasoning = 'manually retained reasoning disclosure '.repeat(16)
     const publish = async (value: string) => act(async () => {
@@ -1391,7 +1466,7 @@ describe('session playback injected into the official flow and keyed renderers',
   })
 
   it('keeps identical reasoning blocks independently folded when the closed block receives more text', async () => {
-    const f = fixture({ settings: { thinkAutoExpand: false, logarithmicFade: false } })
+    const f = fixture({ settings: { thinkAutoExpand: false } })
     const view = render(f.tree())
     const shared = 'identical reasoning text in independently owned disclosures '.repeat(6)
     const publish = async (second: string, response = '') => act(async () => {
@@ -1408,14 +1483,18 @@ describe('session playback injected into the official flow and keyed renderers',
     fireEvent.click(view.getAllByRole('button', { name: 'toggle assistant:1' })[1]!)
     expect(output(0)?.hasAttribute('hidden')).toBe(false)
     expect(output(1)?.hasAttribute('hidden')).toBe(true)
-    const appended = `${shared}${' hidden continuation must not borrow the other block disclosure '.repeat(40)}`
+    // This non-tail row follows native first-line summary semantics. Its hidden
+    // body continuation consumes no queue budget while the response progresses.
+    const appended = `${shared}\n\n${'hidden continuation must not borrow the other block disclosure '.repeat(40)}`
     const answer = 'visible response after the folded block '.repeat(12)
     await publish(appended, answer)
-    await paint(8)
-    expect(output(0)?.hasAttribute('hidden')).toBe(false)
-    expect(output(1)?.hasAttribute('hidden')).toBe(true)
-    expect(text(view.container, 'assistant:1', 1)).toBe(appended)
-    expect(text(view.container, 'assistant:1', 2)!.length).toBeGreaterThan(0)
+    await until(() => (text(view.container, 'assistant:1', 2) ?? '').length > 0, () => {
+      expect(output(0)?.hasAttribute('hidden')).toBe(false)
+      expect(output(1)?.hasAttribute('hidden')).toBe(true)
+    })
+    expect(text(view.container, 'assistant:1', 1)).toBe(shared)
+    const slotCalls = f.slot.mock.calls as unknown as readonly (readonly [string, Record<string, unknown>])[]
+    expect(slotCalls.some(call => call[0] === 'conversation.chat.reasoning.body' && call[1].rawText === appended)).toBe(false)
     expect(text(view.container, 'assistant:1', 2)!.length).toBeLessThan(answer.length)
     fireEvent.click(view.getAllByRole('button', { name: 'toggle assistant:1' })[0]!)
     expect(output(0)?.hasAttribute('hidden')).toBe(true)
@@ -1425,8 +1504,8 @@ describe('session playback injected into the official flow and keyed renderers',
     expect(output(1)?.hasAttribute('hidden')).toBe(false)
   })
 
-  it.each([true, false])('keeps protocol barriers and paces post-tool text when keepStreamOnToolCall=%s', async keepStreamOnToolCall => {
-    const f = fixture({ settings: { keepStreamOnToolCall, logarithmicFade: false } })
+  it.each([true, false])('keeps protocol barriers and paces post-tool text when keepStreamOnToolCall=%s', async (keepStreamOnToolCall: boolean) => {
+    const f = fixture({ settings: { keepStreamOnToolCall } })
     const view = render(f.tree())
     const before = 'text before the tool protocol boundary '.repeat(20)
     const after = 'text after the tool protocol boundary '.repeat(20)
@@ -1462,7 +1541,7 @@ describe('session playback injected into the official flow and keyed renderers',
   })
 
   it('does not adopt queued pre-tool text through an earlier unsealed head when tool-call smoothing is disabled', async () => {
-    const f = fixture({ settings: { keepStreamOnToolCall: false, logarithmicFade: false } })
+    const f = fixture({ settings: { keepStreamOnToolCall: false } })
     const view = render(f.tree())
     const queued = 'queued text that can become immediate only at the head '.repeat(16)
     const head = (sealed: boolean) => assistant('assistant:0', 'open earlier head', {
@@ -1490,7 +1569,7 @@ describe('session playback injected into the official flow and keyed renderers',
     const gates = new Map<string, HostProps>()
     // This tests the real playback-to-FollowHost acknowledgement contract. The
     // geometric follower is replaced only so its completion signal is controlled.
-    vi.spyOn(followHost, 'FollowHost').mockImplementation(props => {
+    vi.spyOn(followHost, 'FollowHost').mockImplementation((props: HostProps) => {
       const child = props.children as ReactElement<{ node?: SourceNode }>
       const key = child.props.node?.key
       if (key !== undefined && props.onEntranceSettled !== undefined) gates.set(key, props)
@@ -1504,7 +1583,7 @@ describe('session playback injected into the official flow and keyed renderers',
     port.setAttribute('data-conversation-scroll', '')
     Object.defineProperty(port, 'clientHeight', { configurable: true, value: 500 })
     document.body.appendChild(port)
-    const f = fixture({ settings: { controlScroll: true, logarithmicFade: false } })
+    const f = fixture({ settings: { controlScroll: true } })
     const view = render(f.tree(), { container: port })
     try {
       const answer = 'text after both native cards finish entering '.repeat(20)
@@ -1528,14 +1607,16 @@ describe('session playback injected into the official flow and keyed renderers',
       expect(gates.get('tool:1')?.entrance).toBe(true)
       expect(row(view.container, 'assistant:3')).toBeNull()
       await act(async () => { firstFinished() })
-      expect(row(view.container, 'tool:2')).not.toBeNull()
+      // The native card title follows its entrance in the same queue.
+      await until(() => row(view.container, 'tool:2') !== null)
       expect(gates.get('tool:2')?.entrance).toBe(true)
       expect(row(view.container, 'assistant:3')).toBeNull()
       await act(async () => { firstFinished() })
       await paint(12)
       expect(row(view.container, 'assistant:3')).toBeNull()
       await act(async () => { gates.get('tool:2')!.onEntranceSettled!() })
-      await paint(8)
+      await until(() => (text(view.container, 'assistant:3') ?? '').length > 0)
+      await paint(4)
       expect(text(view.container, 'assistant:3')!.length).toBeGreaterThan(0)
       expect(text(view.container, 'assistant:3')!.length).toBeLessThan(answer.length)
       expect(gates.get('tool:1')?.entrance).toBe(false)

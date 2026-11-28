@@ -1,0 +1,30 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  color: var(--dsw-alias-label-primary, #111);
+  font-size: var(--dsh-content-font-size, 16px);
+  line-height: calc(24px + var(--dsh-content-font-delta, 4px));
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.root :not(pre) > code {
+  display: inline;
+  line-height: inherit;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: baseline;
+}
+
+@supports (text-box-trim: trim-both) {
+  .root :is(p, h1, h2, h3, h4, h5, h6, blockquote) {
+    text-box-trim: trim-both;
+    text-box-edge: text;
+  }
+}

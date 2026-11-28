@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { StoredEntry } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ChatFlowSlotProps } from '@deepseek-ai/dsh-client-ui-chat/client'
 import { SessionPlaybackFlow } from './sessionPlaybackReact.tsx'
-import type { StreamSmoothingPreset } from './useSmoothStreamContent.ts'
+import type { StreamSmoothingPreset } from './streamPresets.ts'
 import type { StreamSettings } from '../settings.ts'
 
 const CHAT_FLOW_SLOT = 'conversation.chat.flow'

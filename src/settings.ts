@@ -89,8 +89,6 @@ export interface StreamSettings {
    * it by hand — and stops the running state from re-owning the disclosure.
    */
   thinkAutoExpand: boolean
-  /** Logarithmic text fade for the answer and expanded thinking body. */
-  logarithmicFade: boolean
   /**
    * Fast fold acceleration: detaches collapsed tool process nodes from the layout
    * tree using display: none, eliminating streaming reflow lag in long conversations.
@@ -117,7 +115,6 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   controlScroll: true,
   motionPreference: 'force-smooth',
   thinkAutoExpand: true,
-  logarithmicFade: true,
   fastFold: true,
   fastPipeline: true,
   keepStreamOnToolCall: true,

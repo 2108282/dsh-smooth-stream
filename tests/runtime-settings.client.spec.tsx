@@ -22,28 +22,29 @@ afterEach(() => { localStorage.clear() })
 describe('current runtime settings compatibility', () => {
   it.each(['replay', 'catch-up', 'latest', { obsolete: true }])(
     'ignores retired RPC fields while retaining current preferences: %j',
-    async backgroundRecovery => {
+    async (backgroundRecovery: 'replay' | 'catch-up' | 'latest' | { obsolete: boolean }) => {
       const call = vi.fn(async () => ({ ok: true, value: {
         ...currentView, backgroundRecovery, foregroundRecoveryDelayMs: 'obsolete-delay',
       } }))
       const api = createSmoothStreamSettingsApi({ rpc: { call } } as unknown as ConnectionHandle)
       const loaded = await api.read()
       expect(loaded).toMatchObject({
-        controlScroll: false, motionPreference: 'force-reduced', thinkAutoExpand: false, logarithmicFade: false,
+        controlScroll: false, motionPreference: 'force-reduced', thinkAutoExpand: false,
       })
+      expect(loaded).not.toHaveProperty('logarithmicFade')
       expect(loaded).not.toHaveProperty('backgroundRecovery')
       expect(loaded).not.toHaveProperty('foregroundRecoveryDelayMs')
-      const legacy = { ...DEFAULT_STREAM_SETTINGS, backgroundRecovery, foregroundRecoveryDelayMs: -999 }
+      const legacy = { ...DEFAULT_STREAM_SETTINGS, backgroundRecovery, foregroundRecoveryDelayMs: -999, logarithmicFade: false }
       const written = await api.write(legacy)
       expect(written).not.toHaveProperty('backgroundRecovery')
       expect(written).not.toHaveProperty('foregroundRecoveryDelayMs')
+      expect(written).not.toHaveProperty('logarithmicFade')
       const payload = call.mock.calls.at(-1)
       expect(payload).toEqual([STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.write, {
         enabled: legacy.enabled,
         controlScroll: legacy.controlScroll,
         motionPreference: legacy.motionPreference,
         thinkAutoExpand: legacy.thinkAutoExpand,
-        logarithmicFade: legacy.logarithmicFade,
         fastFold: legacy.fastFold,
         fastPipeline: legacy.fastPipeline,
         keepStreamOnToolCall: legacy.keepStreamOnToolCall,
@@ -66,8 +67,10 @@ describe('current runtime settings compatibility', () => {
     controller.start()
     await vi.waitFor(() => expect(controller.getSnapshot()).toMatchObject({
       status: 'ready', controlScroll: false, motionPreference: 'force-reduced',
-      thinkAutoExpand: false, logarithmicFade: false,
+      thinkAutoExpand: false,
     }))
+    expect(controller.getSnapshot()).not.toHaveProperty('logarithmicFade')
+    expect(controller.values()).not.toHaveProperty('logarithmicFade')
     expect(controller.values()).not.toHaveProperty('backgroundRecovery')
     expect(controller.values()).not.toHaveProperty('foregroundRecoveryDelayMs')
     controller.stop()

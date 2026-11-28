@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, type ReactNode } from 'react'
 import { useConversationFollow } from './teleprompterGlide.ts'
-import css from './TypewriterAssistantNodeView.module.css'
+import css from './FollowHost.module.css'
 
 /**
  * Document-flow host that owns conversation-port follow while `active`.

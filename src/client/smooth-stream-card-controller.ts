@@ -26,7 +26,6 @@ export interface SmoothStreamCardState {
   controlScroll: boolean
   motionPreference: StreamMotionPreference
   thinkAutoExpand: boolean
-  logarithmicFade: boolean
   fastFold: boolean
   fastPipeline: boolean
   keepStreamOnToolCall: boolean
@@ -59,7 +58,7 @@ export class SmoothStreamCardController {
   private readonly store = createSnapshotStore<SmoothStreamCardState>(this.projection())
   private loaded: StreamSettingsView | undefined
   private loadedDebug: StreamDebugSettingsView | undefined
-  private stagedBase: Pick<StreamSettings, 'enabled' | 'controlScroll' | 'motionPreference' | 'thinkAutoExpand' | 'logarithmicFade' | 'fastFold' | 'fastPipeline' | 'keepStreamOnToolCall'> | undefined
+  private stagedBase: Pick<StreamSettings, 'enabled' | 'controlScroll' | 'motionPreference' | 'thinkAutoExpand' | 'fastFold' | 'fastPipeline' | 'keepStreamOnToolCall'> | undefined
   private stagedDebug: Pick<StreamSettings, 'debugEnabled' | 'debugTuningEnabled' | 'debugTuning'> | undefined
   private saving = false
   private failed = false
@@ -97,14 +96,13 @@ export class SmoothStreamCardController {
       hooks: { smoothStreamCard: this.store },
       edit: (patch) => {
         if (this.saving) return
-        if (patch.enabled !== undefined || patch.controlScroll !== undefined || patch.motionPreference !== undefined || patch.thinkAutoExpand !== undefined || patch.logarithmicFade !== undefined || patch.fastFold !== undefined || patch.fastPipeline !== undefined || patch.keepStreamOnToolCall !== undefined) {
+        if (patch.enabled !== undefined || patch.controlScroll !== undefined || patch.motionPreference !== undefined || patch.thinkAutoExpand !== undefined || patch.fastFold !== undefined || patch.fastPipeline !== undefined || patch.keepStreamOnToolCall !== undefined) {
           this.stagedBase = {
             ...this.baseValues(),
             ...(patch.enabled === undefined ? {} : { enabled: patch.enabled }),
             ...(patch.controlScroll === undefined ? {} : { controlScroll: patch.controlScroll }),
             ...(patch.motionPreference === undefined ? {} : { motionPreference: patch.motionPreference }),
             ...(patch.thinkAutoExpand === undefined ? {} : { thinkAutoExpand: patch.thinkAutoExpand }),
-            ...(patch.logarithmicFade === undefined ? {} : { logarithmicFade: patch.logarithmicFade }),
             ...(patch.fastFold === undefined ? {} : { fastFold: patch.fastFold }),
             ...(patch.fastPipeline === undefined ? {} : { fastPipeline: patch.fastPipeline }),
             ...(patch.keepStreamOnToolCall === undefined ? {} : { keepStreamOnToolCall: patch.keepStreamOnToolCall }),
@@ -153,13 +151,12 @@ export class SmoothStreamCardController {
     }
   }
 
-  private baseValues(): Pick<StreamSettings, 'enabled' | 'controlScroll' | 'motionPreference' | 'thinkAutoExpand' | 'logarithmicFade' | 'fastFold' | 'fastPipeline' | 'keepStreamOnToolCall'> {
+  private baseValues(): Pick<StreamSettings, 'enabled' | 'controlScroll' | 'motionPreference' | 'thinkAutoExpand' | 'fastFold' | 'fastPipeline' | 'keepStreamOnToolCall'> {
     return this.stagedBase ?? {
       enabled: this.loaded?.enabled ?? DEFAULT_STREAM_SETTINGS.enabled,
       controlScroll: this.loaded?.controlScroll ?? DEFAULT_STREAM_SETTINGS.controlScroll,
       motionPreference: this.loaded?.motionPreference ?? DEFAULT_STREAM_SETTINGS.motionPreference,
       thinkAutoExpand: this.loaded?.thinkAutoExpand ?? DEFAULT_STREAM_SETTINGS.thinkAutoExpand,
-      logarithmicFade: this.loaded?.logarithmicFade ?? DEFAULT_STREAM_SETTINGS.logarithmicFade,
       fastFold: this.loaded?.fastFold ?? DEFAULT_STREAM_SETTINGS.fastFold,
       fastPipeline: this.loaded?.fastPipeline ?? DEFAULT_STREAM_SETTINGS.fastPipeline,
       keepStreamOnToolCall: this.loaded?.keepStreamOnToolCall ?? DEFAULT_STREAM_SETTINGS.keepStreamOnToolCall,
@@ -208,7 +205,6 @@ export class SmoothStreamCardController {
         controlScroll: true,
         motionPreference: 'auto' as const,
         thinkAutoExpand: DEFAULT_STREAM_SETTINGS.thinkAutoExpand,
-        logarithmicFade: DEFAULT_STREAM_SETTINGS.logarithmicFade,
         fastFold: DEFAULT_STREAM_SETTINGS.fastFold,
         fastPipeline: DEFAULT_STREAM_SETTINGS.fastPipeline,
         keepStreamOnToolCall: DEFAULT_STREAM_SETTINGS.keepStreamOnToolCall,
@@ -226,7 +222,6 @@ export class SmoothStreamCardController {
         controlScroll: fallback.controlScroll,
         motionPreference: fallback.motionPreference,
         thinkAutoExpand: fallback.thinkAutoExpand,
-        logarithmicFade: fallback.logarithmicFade,
         fastFold: fallback.fastFold,
         fastPipeline: fallback.fastPipeline,
         keepStreamOnToolCall: fallback.keepStreamOnToolCall,

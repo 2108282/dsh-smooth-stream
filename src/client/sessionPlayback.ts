@@ -23,8 +23,6 @@ export interface PlaybackDisplay {
 export interface PlaybackConfiguration {
   charsPerSecond?: number
   maxLagChars?: number
-  /** Hold visible animated text until its final character has finished appearing. */
-  settleDelayMs?: number
   tuning?: Partial<StreamDebugTuning>
 }
 
@@ -41,7 +39,6 @@ interface SegmentState {
   points: string[]
   displayText: string
   consumed: number
-  lastRevealAt: number | undefined
   sealed: boolean
   hidden: boolean
   entered: boolean
@@ -82,7 +79,6 @@ export class SessionPlayback {
   private readonly now: () => number
   private charsPerSecond = DEFAULT_CHARS_PER_SECOND
   private maxLagChars = DEFAULT_MAX_LAG_CHARS
-  private settleDelayMs = 0
   private tuning: StreamDebugTuning = { ...DEFAULT_STREAM_DEBUG_TUNING }
   private readonly owners = new Map<string, Map<string, PlaybackSegment>>()
   private readonly states = new Map<string, SegmentState>()
@@ -198,7 +194,7 @@ export class SessionPlayback {
       const state = this.states.get(segment.id)!
       this.clearPresentation(segment.id, state)
       this.enterState(segment.id, state)
-      this.consumeTo(segment.id, state, state.points.length, false)
+      this.consumeTo(segment.id, state, state.points.length)
       state.fraction = 0
     }
     this.queuePublish()
@@ -213,7 +209,7 @@ export class SessionPlayback {
       const state = this.states.get(segment.id)!
       this.clearPresentation(segment.id, state)
       this.enterState(segment.id, state)
-      this.consumeTo(segment.id, state, state.points.length, false)
+      this.consumeTo(segment.id, state, state.points.length)
       state.fraction = 0
       if (!state.sealed) break
     }
@@ -249,16 +245,6 @@ export class SessionPlayback {
         changed = true
       }
     }
-    if (Number.isFinite(configuration.settleDelayMs) && configuration.settleDelayMs! >= 0
-      && this.settleDelayMs !== configuration.settleDelayMs) {
-      this.settleDelayMs = configuration.settleDelayMs!
-      for (const [id, state] of this.states) {
-        if (state.lastRevealAt === undefined) continue
-        if (this.settleDelayMs === 0) state.lastRevealAt = undefined
-        this.dirtyDisplays.add(id)
-      }
-      changed = true
-    }
     if (configuration.tuning) {
       for (const key of Object.keys(DEFAULT_STREAM_DEBUG_TUNING) as (keyof StreamDebugTuning)[]) {
         const value = configuration.tuning[key]
@@ -286,7 +272,6 @@ export class SessionPlayback {
         points: nextPoints,
         displayText: '',
         consumed: 0,
-        lastRevealAt: undefined,
         sealed: segment.sealed,
         hidden: segment.hidden === true,
         entered: false,
@@ -303,7 +288,6 @@ export class SessionPlayback {
         this.cancelPendingFrame()
         this.resetClock()
         state.consumed = 0
-        state.lastRevealAt = undefined
         state.displayText = ''
         state.entered = false
         state.presentationPending = presentationPending
@@ -314,11 +298,9 @@ export class SessionPlayback {
         } else if (state.sealed && state.consumed >= previousPoints.length) {
           // A replacement of completed history is adopted without replaying it.
           state.consumed = nextPoints.length
-          state.lastRevealAt = undefined
           state.displayText = state.entered ? segment.text : ''
         } else {
           state.consumed = 0
-          state.lastRevealAt = undefined
           state.displayText = ''
           state.fraction = 0
         }
@@ -346,7 +328,6 @@ export class SessionPlayback {
       if (baseline > 0 || completeBaseline) {
         // Entry history is already visible. Only its live suffix takes part in
         // the reveal clock, and repeated baselines never roll progress back.
-        if (baseline > state.consumed || completeBaseline) state.lastRevealAt = undefined
         state.consumed = Math.max(state.consumed, baseline)
         state.entered = true
         state.displayText = nextPoints.slice(0, state.consumed).join('')
@@ -358,14 +339,12 @@ export class SessionPlayback {
 
   private applyImmediateState(id: string, state: SegmentState): void {
     if (!state.animate) {
-      state.lastRevealAt = undefined
       state.entered = true
       state.consumed = state.points.length
       state.displayText = state.text
       state.fraction = 0
       this.dirtyDisplays.add(id)
     } else if (state.hidden) {
-      state.lastRevealAt = undefined
       state.consumed = state.points.length
       if (state.entered) state.displayText = state.text
       state.fraction = 0
@@ -383,6 +362,11 @@ export class SessionPlayback {
     if (index === -1) return
     for (const segment of this.ordered.slice(index + 1)) {
       const state = this.states.get(segment.id)!
+      // A reasoning summary and its body share one source cursor. The preview
+      // may be replaced when the native row folds/unfolds; never rewind that
+      // body's already visible snapshot while the summary generation changes.
+      const summaryBase = [...reopened].find(id => id.endsWith(':summary'))?.slice(0, -':summary'.length)
+      if (summaryBase !== undefined && segment.id === summaryBase) continue
       if (!state.entered || state.entryBaseline || !state.animate || !this.isComplete(state)) continue
       // Keep consumed progress: a previously shown successor returns whole as
       // soon as the reopened predecessor drains, without replaying old text.
@@ -404,14 +388,9 @@ export class SessionPlayback {
       compareOrder(left.order, right.order) || left.id.localeCompare(right.id))
   }
 
-  private isSettling(state: SegmentState): boolean {
-    return state.lastRevealAt !== undefined && state.animate && !state.hidden
-      && this.now() - state.lastRevealAt < this.settleDelayMs
-  }
-
   private isComplete(state: SegmentState): boolean {
     return state.entered && state.consumed >= state.points.length && state.sealed
-      && !state.presentationPending && !this.isSettling(state)
+      && !state.presentationPending
   }
 
   private clearPresentation(id: string, state: SegmentState): void {
@@ -427,16 +406,11 @@ export class SessionPlayback {
     this.dirtyDisplays.add(id)
   }
 
-  private consumeTo(id: string, state: SegmentState, consumed: number, settle = true): void {
-    if (!settle && state.lastRevealAt !== undefined) {
-      state.lastRevealAt = undefined
-      this.dirtyDisplays.add(id)
-    }
+  private consumeTo(id: string, state: SegmentState, consumed: number): void {
     if (consumed <= state.consumed) return
     const previous = state.consumed
     state.consumed = consumed
     if (state.entered) state.displayText += state.points.slice(previous, consumed).join('')
-    state.lastRevealAt = settle && state.animate && !state.hidden && this.settleDelayMs > 0 ? this.now() : undefined
     this.dirtyDisplays.add(id)
   }
 
@@ -453,13 +427,7 @@ export class SessionPlayback {
   private pump(): void {
     for (const segment of this.ordered) {
       const state = this.states.get(segment.id)!
-      if (this.isComplete(state)) {
-        if (state.lastRevealAt !== undefined) {
-          state.lastRevealAt = undefined
-          this.dirtyDisplays.add(segment.id)
-        }
-        continue
-      }
+      if (this.isComplete(state)) continue
       if (state.hidden) {
         this.enterState(segment.id, state)
         this.consumeTo(segment.id, state, state.points.length)
@@ -480,7 +448,7 @@ export class SessionPlayback {
     const head = this.firstIncomplete()
     const state = head ? this.states.get(head.id)! : undefined
     const needsFrame = this.enabled && state !== undefined && !state.hidden
-      && (state.consumed < state.points.length || (state.sealed && this.isSettling(state)))
+      && state.consumed < state.points.length
     if (!needsFrame) {
       if (this.frame !== undefined) this.cancelPendingFrame()
       this.resetClock()

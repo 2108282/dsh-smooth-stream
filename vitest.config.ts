@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -6,6 +6,8 @@ import { defineConfig, type Plugin } from 'vitest/config'
 
 const root = fileURLToPath(new URL('.', import.meta.url))
 const require = createRequire(import.meta.url)
+const dependenciesRoot = realpathSync(resolve(root, 'node_modules'))
+const testingLibraryDomRoot = realpathSync(dirname(require.resolve('@testing-library/dom/package.json')))
 
 type ExportTarget = string | { [condition: string]: ExportTarget } | null
 interface PackageManifest {
@@ -41,8 +43,11 @@ function harnessSourcesPlugin(): Plugin {
     for (const resolver of [require, ...(importer ? [createRequire(importer)] : [])]) {
       try {
         const file = resolver.resolve(`${name}/package.json`)
+        const linkedDir = resolve(root, 'node_modules', ...name.split('/'))
         const info = {
-          dir: dirname(file),
+          // Keep root-installed packages on their node_modules symlink path so
+          // Vite resolves their ordinary peer/dev dependencies from this test graph.
+          dir: existsSync(join(linkedDir, 'package.json')) ? linkedDir : dirname(file),
           manifest: JSON.parse(readFileSync(file, 'utf8')) as PackageManifest,
         }
         packages.set(name, info)
@@ -77,12 +82,15 @@ function harnessSourcesPlugin(): Plugin {
   return {
     name: 'harness-published-sources',
     enforce: 'pre',
-    resolveId(source, importer) {
+    resolveId(source: string, importer: string | undefined) {
       if (!source.startsWith('@deepseek-ai/')) return null
       const [scope, basename, ...parts] = source.split('/')
       const info = packageInfo(`${scope}/${basename}`, importer)
       if (!info) return null
       const key = parts.length ? `./${parts.join('/')}` : '.'
+      if (key === './client' && basename === 'dsh-client-ui-renderer') {
+        return existingFile(resolve(info.dir, 'src/client/index.ts'))
+      }
       const exports = info.manifest.exports
       if (!exports) return null
       if (key in exports) return sourceTarget(info.dir, exports[key])
@@ -103,8 +111,12 @@ function harnessSourcesPlugin(): Plugin {
 export default defineConfig({
   root,
   plugins: [harnessSourcesPlugin()],
+  server: {
+    fs: { allow: [root, dependenciesRoot, testingLibraryDomRoot] },
+  },
   resolve: {
     dedupe: ['@deepseek-ai/cordis', 'react', 'react-dom'],
+    preserveSymlinks: true,
     alias: {
       // Alias before Vite externalization as well as source resolution: every
       // Service/Context consumer must use this exact installed Cordis module.
@@ -114,6 +126,10 @@ export default defineConfig({
       'react/jsx-dev-runtime': resolve(root, 'node_modules/react/jsx-dev-runtime.js'),
       'react-dom': resolve(root, 'node_modules/react-dom'),
       'react-dom/client': resolve(root, 'node_modules/react-dom/client.js'),
+      clsx: resolve(root, 'node_modules/clsx'),
+      zustand: resolve(root, 'node_modules/zustand'),
+      immer: resolve(root, 'node_modules/immer'),
+      '@testing-library/dom': resolve(root, 'node_modules/@testing-library/dom'),
       '@deepseek-ai/dsh-client-runtime/client': resolve(root, 'repro/shims/client-runtime.ts'),
       '@deepseek-ai/dsh-client-runtime': resolve(root, 'repro/shims/client-runtime.ts'),
     },

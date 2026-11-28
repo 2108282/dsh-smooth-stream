@@ -2,9 +2,8 @@
  * End-of-render audit rig.
  *
  * Composes the plugin's REAL engine components (FollowHost,
- * useSmoothStreamContent, useFpsGuard, AnimatedDisclosure) inside a port of
- * the host ChatView scroll contract, and replays the full end-of-render
- * sequence the production TypewriterAssistantNodeView goes through:
+ * useSmoothStreamContent, useFpsGuard) inside a port of the host ChatView scroll
+ * contract, and replays a standalone end-of-render sequence:
  *
  *   streaming ──► producer complete ──► outer follow hands over to the text
  *   arm's inner follower ──► completion drain ──► live→settled tree swap ──►
@@ -22,7 +21,6 @@ import { createRoot } from 'react-dom/client'
 import { FollowHost } from '../src/client/FollowHost.tsx'
 import { useSmoothStreamContent } from '../src/client/useSmoothStreamContent.ts'
 import { useFpsGuard } from '../src/client/useFpsGuard.ts'
-import { AnimatedDisclosure } from '../src/client/AnimatedDisclosure.tsx'
 import { debugRuntime } from '../src/client/debugRuntime.ts'
 import { hasRecentConversationFollow, notifyFollowCommit } from '../src/client/teleprompterGlide.ts'
 
@@ -144,14 +142,10 @@ function ThinkBlock({ text, running }: { text: string; running: boolean }) {
   useEffect(() => { setExpanded(running) }, [running])
   return (
     <div className="think" data-state={running ? 'running' : 'ok'}>
-      <AnimatedDisclosure
-        icon={<span className="thinkGlyph" />}
-        title="Think"
-        open={expanded}
-        onToggle={() => { setExpanded(value => !value) }}
-      >
+      <details open={expanded} onToggle={event => { setExpanded(event.currentTarget.open) }}>
+        <summary>Think</summary>
         <div className="thinkBody">{text}</div>
-      </AnimatedDisclosure>
+      </details>
     </div>
   )
 }

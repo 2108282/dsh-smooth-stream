@@ -1,6 +1,6 @@
 # dsh-smooth-stream
 
-> **Main rebuild candidate 0.11.0-rebuild.4**: Based on `origin/main` commit `d0c96a4651e175d393799168c11b42a9a743649a` (baseline package version 0.10.9), with unified session playback rebuilt inside the independent injection plugin. The earlier candidate based on the 0.10.10 fix branch is superseded for this task. This revision adopts existing content from the Session source snapshot on entry and removes background pausing, recovery modes, and recovery coordination. See the [candidate notes](docs/changes-0.11.0-rebuild.4.md). Full validation, building, and packaging remain pending. This candidate has not been installed or reviewed on a live UI; the older performance and feel descriptions below are not evidence of candidate device validation.
+> **Main rebuild candidate 0.11.0-rebuild.5**: Based on `origin/main` commit `d0c96a4651e175d393799168c11b42a9a743649a` (baseline package version 0.10.9), with unified session playback rebuilt inside the independent injection plugin. This revision places reply text, visible native-card text, collapsed reasoning summaries, and expanded reasoning bodies on one playback queue, and removes the old wrappers and fade path. See the [rebuild.5 notes](docs/changes-0.11.0-rebuild.5.md). All 349 tests, strict type checking, and the build pass. The current profile still runs rebuild.4 pending manual replacement; live-page visual verification remains outstanding.
 
 > **Transform jumpy AI outputs into a calm, teleprompter-smooth reading experience.**  
 > Physics-based stream rendering and zero-reflow viewport tracking for the DeepSeek Harness (`dsh`) Web UI.
@@ -61,14 +61,14 @@ Traditional chat UIs bind DOM rendering and scrolling directly to arrival events
 - Reasoning and tool executions remain expanded while streaming.
 - Once a turn settles, intermediate processes cleanly fold behind a minimalist `Processed in Xs` summary row, keeping the conversation view focused on final answers.
 
-### 4. Session-Scoped Protocol Playback (0.11.0-rebuild.4 Candidate)
+### 4. Session-Scoped Protocol Playback (0.11.0-rebuild.5 Candidate)
 
-This candidate uses one playback queue per injected Flow and orders visible content by conversation protocol metadata rather than DOM grouping. See the [candidate notes](docs/changes-0.11.0-rebuild.4.md) for behavior and verification boundaries.
+This candidate uses one playback queue per injected Flow and orders visible content by conversation protocol metadata rather than DOM grouping. See the [candidate notes](docs/changes-0.11.0-rebuild.5.md) for behavior and verification boundaries.
 
-- Response text, expanded reasoning, and tool cards follow protocol sequence; tool cards retain the official renderer and enter atomically.
+- Response text, collapsed reasoning summaries, expanded reasoning bodies, and visible native-card text follow protocol sequence with one character budget. Cards retain their official components and interaction, then reveal visible text progressively after entry.
 - A predecessor releases its successor only after an explicit block-end or durable settlement boundary. Network silence or a temporarily drained character buffer is not treated as protocol completion.
 - On entry, the Session source snapshot supplies the existing response prefix, reasoning, and tools for immediate display. Late history, older-page navigation, and session re-entry do not replay; newly arriving live content continues in protocol order.
-- The injected session remains owned while settings load, preserving its entry baseline. The fallback Native renderer conservatively adopts all current text on every mount and can animate later additions.
+- The session Flow remains in control while settings load and preserves the entry baseline. Once ready, only source-confirmed live additions enter the animation queue; the official renderer continues to own content and interaction.
 - The plugin no longer pauses on background events or offers background recovery modes or coordination. The WebView may still throttle or freeze execution; continuous background execution and a jump to the latest position on return are not guaranteed.
 - The candidate retains the mainline renderer fallback. This page's inherited performance and motion claims are not evidence of live-device validation for this candidate.
 
@@ -106,21 +106,21 @@ Verified by local browser-level audit suites:
 
 ### Installation
 
-**`0.11.0-rebuild.4` has not been published to npm; full validation, building, and packaging remain pending.** The commands below apply only once `dsh-smooth-stream-0.11.0-rebuild.4.tgz` has actually been produced and verified. Installing by npm package name or using an older `dist` download URL will not install this candidate.
+**`0.11.0-rebuild.5` has not been published to npm.** Source, `lib` build artifacts, and the full test suite are ready. This round does not produce a `.tgz` archive; installing by npm package name or using an older `dist` download URL will not install this candidate.
 
-Use its absolute path in DSH's **Plugins → Add plugin** flow. Alternatively, use the existing CLI from your DeepSeek Harness checkout:
+Use the absolute path of the built local plugin directory in DSH's **Plugins → Add plugin** flow. Alternatively, use the existing CLI from your DeepSeek Harness checkout:
 
 ```sh
-pnpm dsh plugin --profile web add /absolute/path/dsh-smooth-stream-0.11.0-rebuild.4.tgz
+pnpm dsh plugin --profile web add /absolute/path/dsh-smooth-stream-unified
 ```
 
 If `dsh` is in your system `PATH`:
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-smooth-stream-0.11.0-rebuild.4.tgz
+dsh plugin --profile web add /absolute/path/dsh-smooth-stream-unified
 ```
 
-Replace `web` with the intended profile. Follow the plugin manager's application result after installation; a load log alone does not validate page behavior or animation quality. This round updates source and documentation only. It does not produce a new archive, install, publish, or restart DSH.
+Replace `web` with the intended profile. If you create an archive yourself, its actual `.tgz` absolute path can replace the directory. Follow the plugin manager's application result after installation; a load log alone does not validate page behavior or animation quality. Plugin replacement is left to the user; this round does not install, publish to npm, or restart DSH.
 
 To uninstall: `pnpm dsh plugin --profile web remove dsh-smooth-stream`.
 
@@ -130,12 +130,12 @@ To uninstall: `pnpm dsh plugin --profile web remove dsh-smooth-stream`.
 
 | DSH kernel | This plugin |
 |---|---|
-| `0.2.2-rc.2` | Validated against the new `ui-conversation`, `ui-chat` and `ui-renderer` contracts |
-| `0.1.x` | Use an earlier compatible release; this branch requires `>=0.2.2-rc.2 <0.3.0` |
+| `0.2.3-alpha.2` | Validated against the current `ui-conversation`, `ui-chat`, `ui-renderer`, and settings contracts |
+| `0.1.x` | Use an earlier compatible release; this branch requires `>=0.2.3-alpha.2 <0.3.0` |
 
-The adapter paces the text supplied to the shipped assistant renderer. Its registration keeps the official locale, child Slots, image loading, translation, context menus and presentation hooks. Auto-expansion wraps the official disclosure Hook, preserving manual choices and Turn resets. The injected Flow owns one protocol-ordered playback queue and character budget; tool cards enter atomically with their official renderer. Suspense hiding preserves the playback engine; a true unmount disposes it. A new Flow captures a fresh Session entry baseline so existing content does not replay on re-entry. The mainline Native fallback conservatively adopts its current full text on each mount.
+The official keyed renderer remains responsible for content and interaction. Assistant, tool, and other visible chat-card text share one SessionPlayback queue; nodes not taken over are returned to the official renderer. Reasoning summaries and expanded bodies share the playback clock.
 
-Fast dispatch remains optional and feature-detected. It accelerates only `animation-frame` publications on compatible binding instances and restores the original methods when unloaded. History is displayed immediately. The settings UI uses `settings.section` and `settings.plugins.tab`.
+Fast dispatch remains optional and feature-detected. It accelerates only `animation-frame` publications on compatible binding instances and restores the original methods when unloaded. History is displayed immediately. Settings use `settings.section`; current DSH also surfaces that section from the plugin page. This build requires Node.js `^24.22.3 || >=26.13.1`.
 - **Never statically import runtime symbols from `@deepseek-ai/*` packages.** The host CLI starts via `node --import tsx/esm`, and tsx applies the host `tsconfig` `paths` mapping, so a bare `@deepseek-ai/*` import from an external plugin may be redirected into the host's own sources — any host-side rename or removal then explodes at boot as a module instantiation error. Type-only imports (`import type`) are unaffected.
 
 ## Presets & Configuration
@@ -152,20 +152,18 @@ The plugin defaults to `preset: balanced`. You can tune the cadence in your prof
 
 ## User Preferences
 
-Open **Settings → Smooth stream**, or **Settings → Plugins → Smooth stream**, in the Web UI:
+Open **Settings → Smooth stream**, or open the plugin's configuration from the Plugins page:
 
-**Logarithmic fade** (on by default) adapts the tail from 24 to at most 160 graphemes according to reveal speed, fading answers and expanded thinking from 0% opacity over 240ms with a reversed logarithmic curve that stays translucent longer. Text settles even during network pauses. Turning it off preserves text pacing and scrolling. It follows the motion preference and skips code, formulas and thinking summaries. Browsers without text-range highlighting support retain the existing reveal behavior.
-
-For a local preview, run `pnpm build:repro`, serve the repository with `python3 -m http.server 8765 --bind 127.0.0.1`, and open `http://127.0.0.1:8765/repro/index.html?demo=fade`. This uses the real reveal/fade hooks with synthetic rich-text fixtures. Run `node scripts/verify-logarithmic-fade.mjs` to check and record it (Chrome and `pnpm exec playwright-core install ffmpeg` required; override the Chrome path with `CHROME_BIN`). Reports and recordings go to the ignored `repro/artifacts/logarithmic-fade/` directory.
+Local reveal/follow repro: run `pnpm build:repro`, serve the repository root with `python3 -m http.server 8765 --bind 127.0.0.1`, and open `http://127.0.0.1:8765/repro/index.html`. It reuses `useSmoothStreamContent` and `FollowHost` to exercise the host scrolling contract under fast output; it does not simulate the injected session Flow, protocol ordering, or official-card SessionPlayback. Session queue behavior is covered by `tests/session-playback.client.spec.tsx`.
 
 - **Enable smooth streaming** (default on): Toggles custom stream rendering and follow. Disabling instantly falls back to built-in Harness rendering.
 - **Auto-expand thinking**: Uses the official disclosure Hook and preserves manual choices and Turn resets. Automatically opened reasoning closes when playback drains or the setting is disabled. Existing reasoning is adopted by the entry baseline. Background events no longer close plugin-opened reasoning or suppress reopening; manual disclosure keeps its official behavior. Collapsed reasoning synchronizes its snapshot without invisible reveal debt; newly arriving expanded content is paced.
-- **Keep tool introductions streaming**: Paces preceding text before admitting a tool card. Disabling it skips that text animation while retaining explicit protocol-end barriers. Tool card contents keep the official renderer.
+- **Keep tool introductions streaming**: Paces preceding text before admitting a tool card. Disabling it skips that text animation while retaining explicit protocol-end barriers. Tool cards keep the official renderer, and their visible text joins the shared playback queue.
 - **Control scrolling**: Smoothly follows while the reader remains pinned and yields when the reader scrolls upward, the host takes control, or a native input fold owns the scroll clock. Long frames use the ordinary 32ms motion cap. Background events no longer discard and rebuild follower geometry or trigger a jump to the latest position. Disabling this setting releases plugin-owned follow styles and spacing.
 - **Collapse finished work** (default on): Folds thoughts and tool steps into a summary line once the turn settles.
 - **Show render diagnostics** (default off): Opens a live HUD on the right side to inspect FPS, character backlog, spring state, and adjust physical parameters in real time.
 
-The main Flow captures existing response prefixes, reasoning, and tools from the Session source snapshot on entry. Initial or late-arriving history, older pages, and session re-entry display immediately. Settings loading preserves Flow ownership and its baseline; newly arriving live content remains eligible for protocol-ordered playback. The fallback Native renderer adopts all current text on every mount, so mount-time content is not typed again.
+The shared Session Flow plays supported chat nodes in protocol order with one character budget for response text, collapsed reasoning summaries, expanded reasoning bodies, and visible native-card text. It does not replay by tool-tree DOM order. Successors wait for visible predecessor text to drain and for an explicit protocol-end boundary; card entry is also acknowledged before the queue advances. The Session source snapshot supplies the entry baseline, so initial or late-arriving history, older pages, and session re-entry display immediately. While reasoning is collapsed, its hidden body keeps its existing snapshot synchronized and its visible summary is paced separately. Expanding adopts the existing body snapshot and paces only later additions. The host renderer and visibility Hook remain responsible for process-group headings, while the running status and composer Todo panel stay outside the chat-node queue.
 
 Background pausing, recovery modes, and recovery coordination have been removed. Ordinary frame budgets and long-frame caps remain. Browser or WebView scheduling determines whether execution continues in the background; returning to the foreground does not trigger a plugin recovery batch or a forced jump to the latest position.
 

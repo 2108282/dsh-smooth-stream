@@ -1,13 +1,13 @@
 {
   "name": "dsh-smooth-stream",
-  "version": "0.11.0-rebuild.4",
+  "version": "0.11.0-rebuild.5",
   "description": "Fluid streaming rendering and silky scrolling for DeepSeek Harness replies, including Markdown, code blocks, tables, and tool results.",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.23.0",
   "engines": {
-    "node": "^22.19.0 || >=24.0.0",
-    "dsh": ">=0.2.2-rc.2 <0.3.0"
+    "node": "^24.22.3 || >=26.13.1",
+    "dsh": ">=0.2.3-alpha.2 <0.3.0"
   },
   "repository": {
     "type": "git",
@@ -64,6 +64,7 @@
     "docs/changes-0.11.0-rebuild.2.md",
     "docs/changes-0.11.0-rebuild.3.md",
     "docs/changes-0.11.0-rebuild.4.md",
+    "docs/changes-0.11.0-rebuild.5.md",
     "LICENSE"
   ],
   "dsh": {
@@ -78,8 +79,7 @@
         "@deepseek-ai/dsh-client-ui-chat",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-settings-plugins"
+        "@deepseek-ai/dsh-client-ui-settings"
       ]
     }
   },
@@ -99,15 +99,14 @@
     "probe:stability": "node scripts/verify-follow-stability.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/cordis": "~4.2.0-alpha.1",
     "@deepseek-ai/dsh-client-connection": "*",
     "@deepseek-ai/dsh-client-locale": "*",
-    "@deepseek-ai/dsh-client-ui-chat": ">=0.2.2-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-client-ui-chat": ">=0.2.3-alpha.2 <0.3.0",
     "@deepseek-ai/dsh-client-ui-conversation": "*",
     "@deepseek-ai/dsh-client-ui-primitives": "*",
-    "@deepseek-ai/dsh-client-ui-renderer": ">=0.2.2-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-client-ui-renderer": ">=0.2.3-alpha.2 <0.3.0",
     "@deepseek-ai/dsh-client-ui-settings": "*",
-    "@deepseek-ai/dsh-client-ui-settings-plugins": "*",
     "@deepseek-ai/dsh-client-ui-slots": "*",
     "@deepseek-ai/dsh-host-webserver": "*",
     "@deepseek-ai/dsh-settings": "*",
@@ -130,9 +129,6 @@
     "@deepseek-ai/dsh-client-ui-settings": {
       "optional": true
     },
-    "@deepseek-ai/dsh-client-ui-settings-plugins": {
-      "optional": true
-    },
     "@deepseek-ai/dsh-client-ui-slots": {
       "optional": true
     },
@@ -144,24 +140,26 @@
     }
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.1.0",
-    "@deepseek-ai/dsh-client-connection": "0.2.2-rc.2",
-    "@deepseek-ai/dsh-client-locale": "0.2.2-rc.2",
-    "@deepseek-ai/dsh-client-store": "0.2.2-rc.2",
-    "@deepseek-ai/dsh-client-test-runtime": "0.2.2-rc.2",
-    "@deepseek-ai/dsh-client-ui-chat": "0.2.2-rc.2",
-    "@deepseek-ai/dsh-client-ui-context-menu": "0.2.2-rc.2",
-    "@deepseek-ai/dsh-client-ui-conversation": "0.2.2-rc.2",
-    "@deepseek-ai/dsh-client-ui-primitives": "0.2.2-rc.2",
-    "@deepseek-ai/dsh-client-ui-renderer": "0.2.2-rc.2",
-    "@deepseek-ai/dsh-client-ui-settings": "0.2.2-rc.2",
-    "@deepseek-ai/dsh-client-ui-settings-plugins": "0.2.2-rc.2",
-    "@deepseek-ai/dsh-client-ui-slots": "0.2.2-rc.2",
-    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.2",
-    "@deepseek-ai/dsh-settings": "0.2.2-rc.2",
-    "@deepseek-ai/schemastery": "~3.19.0",
+    "@deepseek-ai/cordis": "4.2.0-alpha.1",
+    "@deepseek-ai/dsh-client-connection": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-api-session-controller": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-locale": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-session": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-store": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-test-runtime": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-chat": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-context-menu": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-settings": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-host-webserver": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-settings": "0.2.3-alpha.2",
+    "@deepseek-ai/schemastery": "~3.20.0-alpha.1",
     "@shikijs/langs": "^4.6.0",
     "@testing-library/react": "^16.3.0",
+    "@testing-library/dom": "^10.4.1",
     "@types/node": "^22.20.0",
     "@types/react": "~18.3.1",
     "@types/react-dom": "~18.3.0",
@@ -192,6 +190,7 @@
     "simple-icons": "16.31.0",
     "tsdown": "^0.22.2",
     "typescript": "^5.9.2",
+    "use-sync-external-store": "1.6.0",
     "vitest": "^4.1.8",
     "zustand": "~4.5.7"
   }

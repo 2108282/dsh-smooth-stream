@@ -167,7 +167,7 @@ describe('predictive runway physical budget', () => {
     expect(model.spacer.style.height).toBe(ORIGINAL.spacer)
   })
 
-  it.each(['settling', 'settled'] as const)('reclaims existing completion space when the budget is lowered while %s', async phase => {
+  it.each(['settling', 'settled'] as const)('reclaims existing completion space when the budget is lowered while %s', async (phase: 'settling' | 'settled') => {
     tune(72)
     const { model, update } = mount()
     await frames(30)
@@ -187,7 +187,7 @@ describe('predictive runway physical budget', () => {
     expect(model.spacer.style.height).toBe(ORIGINAL.spacer)
   })
 
-  it.each(['active', 'settling', 'settled'] as const)('restores only owned styles when scroll control is disabled while %s', async phase => {
+  it.each(['active', 'settling', 'settled'] as const)('restores only owned styles when scroll control is disabled while %s', async (phase: 'active' | 'settling' | 'settled') => {
     tune(72)
     const { model, update } = mount()
     await frames(30)

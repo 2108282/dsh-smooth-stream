@@ -57,7 +57,6 @@ export type SmoothStreamLocaleKey =
   | 'motionForceSmooth' | 'motionForceSmoothHint'
   | 'motionForceReduced' | 'motionForceReducedHint'
   | 'thinkAutoExpand' | 'thinkAutoExpandHint'
-  | 'logarithmicFade' | 'logarithmicFadeHint'
   | 'fastFold' | 'fastFoldHint'
   | 'fastPipeline' | 'fastPipelineHint'
   | 'keepStreamOnToolCall' | 'keepStreamOnToolCallHint'
@@ -86,9 +85,9 @@ export type SmoothStreamLocaleKey =
 /** English copy. */
 export const en: Record<SmoothStreamLocaleKey, string> = {
   title: 'Smooth stream',
-  description: 'How replies are revealed while they stream.',
+  description: 'How visible text in replies, native cards, and thinking summaries and bodies is paced while streaming.',
   enabled: 'Enable smooth streaming',
-  enabledHint: 'Let this plugin render and follow streaming replies. Turn off to use the built-in Harness renderer.',
+  enabledHint: 'Pace visible text in assistant replies and native cards, plus collapsed thinking summaries and expanded thinking bodies, and follow the stream. Turn off to use the built-in Harness renderer.',
   controlScroll: 'Take over scrolling',
   controlScrollHint: 'On by default; smooth-stream writes the conversation scroll position. Turn off to leave bottom-follow to Harness.',
   motionPreference: 'Motion',
@@ -100,8 +99,6 @@ export const en: Record<SmoothStreamLocaleKey, string> = {
   motionForceReduced: 'Always raw',
   motionForceReducedHint: 'Render raw text even when the system allows motion.',
   thinkAutoExpand: 'Auto-expand thinking',
-  logarithmicFade: 'Logarithmic fade',
-  logarithmicFadeHint: 'Fade new answer and expanded thinking text into view. Follows the motion preference.',
   fastFold: 'Fast fold acceleration',
   fastFoldHint: 'Detach collapsed tool steps from the layout tree using display: none, eliminating reflow stutter during streaming in long conversations.',
   fastPipeline: 'Fast dispatch pipeline (Heal DSH 3-frame throttle)',
@@ -191,9 +188,9 @@ export const en: Record<SmoothStreamLocaleKey, string> = {
 /** Simplified Chinese copy. */
 export const zh: Record<SmoothStreamLocaleKey, string> = {
   title: '丝滑流式',
-  description: '回复在流式输出时如何逐字展现。',
+  description: '控制助手回复、原生卡片可见文字，以及思考摘要与正文的流式播放方式。',
   enabled: '启用丝滑流式渲染',
-  enabledHint: '由本插件渲染并跟随流式回复；关闭后使用 Harness 内置渲染。',
+  enabledHint: '逐字播放助手回复、原生卡片可见文字及折叠思考摘要/展开正文，并跟随流式进度；关闭后使用 Harness 内置渲染。',
   controlScroll: '接管滚动',
   controlScrollHint: '默认开启，由丝滑流式写入会话滚动位置；关闭后贴底滚动交给 Harness。',
   motionPreference: '动效偏好',
@@ -205,8 +202,6 @@ export const zh: Record<SmoothStreamLocaleKey, string> = {
   motionForceReduced: '始终原始',
   motionForceReducedHint: '即使系统允许动效，也直接呈现原始文本。',
   thinkAutoExpand: '自动展开思考',
-  logarithmicFade: '对数淡入',
-  logarithmicFadeHint: '让回答正文和展开的思考文字由淡变实，遵循动效偏好。',
   fastFold: '折叠彻底跳过排版（长对话极速出字）',
   fastFoldHint: '收起已完成的工具步骤时使用 display: none 彻底脱离排版树，根除长对话下出字与滚动的严重卡顿（仅失去针对收缩内容的 Ctrl+F 页面搜索）。',
   fastPipeline: '解除 DSH 官方 3 帧限制（极速吐字自愈）',

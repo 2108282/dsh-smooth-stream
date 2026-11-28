@@ -4,17 +4,16 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: the connection and settings slot declarations.
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
-import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
+import type {} from '@deepseek-ai/dsh-api-session-controller/client'
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client'
-import { NativeAssistantNodeView } from './NativeAssistantNodeView.tsx'
-import { SessionPlaybackNode, useSessionPlayback } from './sessionPlaybackReact.tsx'
+import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
+import { useSessionPlayback, SessionPlaybackNode } from './sessionPlaybackReact.tsx'
 import { installRendererAdapter } from './rendererAdapter.ts'
 import { installFlowPresentationAdapter } from './flowPresentationAdapter.tsx'
 import { installConversationPipeline } from './conversationPipeline.ts'
 import { installEntryBaselineSource } from './entryBaseline.ts'
 import { streamOrderDefinition } from './streamOrder.ts'
-import { wrapFollowNodeView, type FollowWrapProps } from './TypewriterToolNodeView.tsx'
 import { SmoothStreamCard } from './SmoothStreamCard.tsx'
 import { SmoothStreamCardController } from './smooth-stream-card-controller.ts'
 import { createSmoothStreamSettingsApi } from './smooth-stream-settings-api.ts'
@@ -32,23 +31,13 @@ import { DEFAULT_STREAM_SETTINGS, type StreamSettings } from '../settings.ts'
  */
 export const inject = ['slots']
 
-type AssistantProps = ChatNodeViewProps<'assistant-step'>
-
 const STREAM_MODES: readonly string[] = ['typewriter', 'teleprompter']
 const STREAM_PRESETS: readonly string[] = ['realtime', 'balanced', 'silky']
-
-/**
- * The assistant renderer owns its own character queue and conversation
- * follower, so wrapping it again would create two scroll owners. Human input
- * stays immediate; every Agent-owned output renderer goes through the same
- * generic follow boundary. This is deliberately keyed by the owner that
- * provides the renderer, not by individual tool names, so new Context,
- * Command, and Tool rows are covered automatically.
- */
 const SKIP_WRAP = new Set(['user', 'steering', 'command-input', 'turn-process', 'turn-tail'])
+const MANAGED_NODE_KINDS = new Set(['assistant-step', 'tool-call', 'context', 'command', 'system-prompt'])
 
 /** React function/class or an exotic component such as memo/forwardRef/lazy. */
-function isWrappableComponent(value: unknown): value is ComponentType<FollowWrapProps> {
+function isWrappableComponent(value: unknown): value is ComponentType<any> {
   return typeof value === 'function'
     || (value !== null && typeof value === 'object' && '$$typeof' in value)
 }
@@ -132,7 +121,6 @@ class SettingsCell {
       && next.controlScroll === this.value.controlScroll
       && next.motionPreference === this.value.motionPreference
       && next.thinkAutoExpand === this.value.thinkAutoExpand
-      && next.logarithmicFade === this.value.logarithmicFade
       && next.fastFold === this.value.fastFold
       && next.fastPipeline === this.value.fastPipeline
       && next.keepStreamOnToolCall === this.value.keepStreamOnToolCall
@@ -220,11 +208,6 @@ export function apply(ctx: ClientContext): void {
   healDshConversationPipeline(ctx, settings)
   ctx.inject(['sessions'], scopedCtx => installEntryBaselineSource(scopedCtx.sessions))
   ctx.inject(['uiConversation'], scopedCtx => scopedCtx.uiConversation.events.register(streamOrderDefinition()))
-  const useControlScroll = (): boolean => useSyncExternalStore(
-    settings.subscribe,
-    () => settings.getSnapshot().controlScroll,
-    () => settings.getSnapshot().controlScroll,
-  )
   // The card talks to the plugin-owned loopback RPC, so the core settings
   // namespace allowlist cannot make it disappear. The stream still applies
   // with defaults when the optional Settings UI or Connection is absent.
@@ -257,31 +240,25 @@ export function apply(ctx: ClientContext): void {
     syncDebug()
     card.start()
     settingsCtx.effect(() => settingsCtx.locale.register(SETTINGS_NS, { zh, en }), 'dsh-smooth-stream: settings dictionaries')
+    const t = settingsCtx.locale.bind(SETTINGS_NS)
 
-    const SmoothStreamSectionView = (props: any) => createElement(
-      'div',
-      { style: { width: '100%', maxWidth: '760px', minHeight: '240px', display: 'flex', flexDirection: 'column', gap: '16px', padding: '4px 0 24px 0' } },
-      createElement('h2', { style: { margin: 0, fontSize: '18px', fontWeight: 600 } }, '平滑流式输出'),
-      createElement('p', { style: { color: 'var(--dsw-alias-label-tertiary)', margin: 0, fontSize: '13px' } }, '流畅打字机渲染、丝滑平稳滚动与思考过程折叠配置。'),
-      createElement('ul', { style: { listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column' } }, createElement(SmoothStreamCard as any, { ...props, cardController: card, defaultOpen: true })),
-    )
+    const SmoothStreamSectionView = (props: any) => {
+      const translate: (key: keyof typeof en) => string = typeof props.t === 'function' ? props.t : t
+      return createElement(
+        'div',
+        { style: { width: '100%', maxWidth: '760px', minHeight: '240px', display: 'flex', flexDirection: 'column', gap: '16px', padding: '4px 0 24px 0' } },
+        createElement('h2', { style: { margin: 0, fontSize: '18px', fontWeight: 600 } }, translate('title')),
+        createElement('p', { style: { color: 'var(--dsw-alias-label-tertiary)', margin: 0, fontSize: '13px' } }, translate('description')),
+        createElement('ul', { style: { listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column' } }, createElement(SmoothStreamCard as any, { ...props, cardController: card, defaultOpen: true })),
+      )
+    }
 
     // 1. 注册为全局设置左侧一级菜单「平滑流式」
     settingsCtx.slots.inject('settings.section', () => settingsCtx.slots.register({
       name: 'settings.section',
       id: 'smooth-stream',
       order: 25,
-      label: () => '平滑流式',
-      locale: SETTINGS_NS,
-      inject: () => card.inject(),
-    }, SmoothStreamSectionView))
-
-    // 2. 像 dsh-agy 一样注册进官方内置插件页面下的二级 Tab（官方原生插槽，更新永不消失）
-    settingsCtx.slots.inject('settings.plugins.tab', () => settingsCtx.slots.register({
-      name: 'settings.plugins.tab',
-      id: 'smooth-stream-tab',
-      order: 15,
-      label: () => '平滑流式',
+      label: () => t('title'),
       locale: SETTINGS_NS,
       inject: () => card.inject(),
     }, SmoothStreamSectionView))
@@ -302,39 +279,18 @@ export function apply(ctx: ClientContext): void {
   })
 
   ctx.slots.inject('conversation.chat.flow', () => installFlowPresentationAdapter(ctx, settings,
-    (key, component) => isWrappableComponent(component) && !SKIP_WRAP.has(key), config.preset))
+    (key, component) => MANAGED_NODE_KINDS.has(key) && !SKIP_WRAP.has(key) && isWrappableComponent(component), config.preset))
 
-  ctx.slots.inject('conversation.chat.node', () => {
-    const release = installRendererAdapter(ctx, (key, original) => {
-      if (!isWrappableComponent(original) || SKIP_WRAP.has(key)) return original
-      const Inner = original
-      // Stable across settings/parent updates: do not reset tool-local hooks.
-      const Follow = key === 'assistant-step' ? undefined
-        : wrapFollowNodeView(Inner as ComponentType<FollowWrapProps>, useControlScroll)
-      return function SmoothStreamRendererAdapter(props: AssistantProps & FollowWrapProps) {
-        const preferences = useSyncExternalStore(settings.subscribe, settings.getSnapshot, settings.getSnapshot)
-        const ready = useSyncExternalStore(settings.subscribe,
-          () => settings.takeoverEnabled(), () => settings.takeoverEnabled())
-        const playback = useSessionPlayback()
-        if (!ready || !preferences.enabled) return createElement(Inner, props)
-        if (playback !== null) return createElement(SessionPlaybackNode, { Inner, owner: props })
-        if (key === 'assistant-step') {
-          return createElement(NativeAssistantNodeView, {
-            Inner: Inner as unknown as ComponentType<AssistantProps>,
-            owner: props as AssistantProps,
-            preferences: {
-              controlScroll: preferences.controlScroll,
-              motionPreference: preferences.motionPreference,
-              logarithmicFade: preferences.logarithmicFade,
-              thinkAutoExpand: preferences.thinkAutoExpand,
-              keepStreamOnToolCall: preferences.keepStreamOnToolCall,
-              preset: config.preset,
-            },
-          })
-        }
-        return createElement(Follow ?? Inner, props)
-      }
-      })
-    return release
-  })
+  ctx.slots.inject('conversation.chat.node', () => installRendererAdapter(ctx, (key, original) => {
+    if (!MANAGED_NODE_KINDS.has(key) || SKIP_WRAP.has(key) || !isWrappableComponent(original)) return original
+    const Inner = original
+    return function SmoothStreamRendererAdapter(props: Record<string, unknown>) {
+      const preferences = useSyncExternalStore(settings.subscribe, settings.getSnapshot, settings.getSnapshot)
+      const ready = useSyncExternalStore(settings.subscribe,
+        () => settings.takeoverEnabled(), () => settings.takeoverEnabled())
+      const playback = useSessionPlayback()
+      if (!ready || !preferences.enabled || playback === null) return createElement(Inner, props)
+      return createElement(SessionPlaybackNode, { Inner, owner: props })
+    }
+  }))
 }

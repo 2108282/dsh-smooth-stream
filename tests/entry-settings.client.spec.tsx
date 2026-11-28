@@ -12,7 +12,7 @@ import { debugRuntime } from '../src/client/debugRuntime.ts'
 afterEach(() => { cleanup(); debugRuntime.resetRuntime(); localStorage.clear() })
 
 describe('live entry settings', () => {
-  it.each([undefined, true, false])('retains takeover while settings load (cached enabled: %s)', async cachedEnabled => {
+  it.each([undefined, true, false])('keeps standalone nodes in the official renderer while settings load (cached enabled: %s)', async (cachedEnabled: boolean | undefined) => {
     if (cachedEnabled !== undefined) localStorage.setItem('dsh-smooth-stream:settings', JSON.stringify({
       ...DEFAULT_STREAM_SETTINGS, enabled: cachedEnabled,
     }))
@@ -39,13 +39,16 @@ describe('live entry settings', () => {
     try {
       await act(async () => { await Promise.resolve() })
       expect(view.getByText('tool result')).toBeTruthy()
-      expect(view.container.querySelector('[data-entrance]') !== null).toBe(cachedEnabled !== false)
+      expect(view.container.querySelector('[data-entrance]')).toBeNull()
       await act(async () => {
         resolveSettings({ ...DEFAULT_STREAM_SETTINGS, enabled: cachedEnabled ?? true,
           installation: 'development', writable: true, version: '0.11.0', canUpgrade: false })
         await settingsRead
       })
-      expect(view.container.querySelector('[data-entrance]') !== null).toBe(cachedEnabled !== false)
+      expect(view.getByText('tool result')).toBeTruthy()
+      expect(view.container.querySelector('[data-entrance]')).toBeNull()
+      const face = ctx.slots.entries('settings.section')[0]!.inject!() as unknown as SmoothStreamCardFace
+      expect(face.hooks.smoothStreamCard.getSnapshot().enabled).toBe(cachedEnabled ?? true)
     } finally {
       await act(async () => { await fiber.dispose() })
     }
@@ -83,7 +86,7 @@ describe('live entry settings', () => {
     const view = render(createElement(entry.component as ComponentType<typeof props>, props))
     fireEvent.click(view.getByRole('button'))
     expect(view.getByText('count:1')).toBeTruthy()
-    await act(async () => { face.edit({ logarithmicFade: false }) })
+    await act(async () => { face.edit({ thinkAutoExpand: false }) })
     expect(view.getByText('count:1')).toBeTruthy()
     expect(mounts).toBe(1)
     await act(async () => { face.edit({ controlScroll: true }) })

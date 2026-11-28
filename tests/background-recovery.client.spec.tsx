@@ -27,7 +27,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 describe('ordinary playback across lifecycle signals', () => {
-  it.each(['dsha:background', 'dsha:foreground', 'pagehide', 'pageshow', 'blur', 'focus', 'visibilitychange'])('does not pause or flush on %s', async event => {
+  it.each(['dsha:background', 'dsha:foreground', 'pagehide', 'pageshow', 'blur', 'focus', 'visibilitychange'])('does not pause or flush on %s', async (event: 'dsha:background' | 'dsha:foreground' | 'pagehide' | 'pageshow' | 'blur' | 'focus' | 'visibilitychange') => {
     const view = render(createElement(Probe, { text: 'x'.repeat(200) }))
     await paint(3)
     const before = view.container.textContent!.length
@@ -40,7 +40,7 @@ describe('ordinary playback across lifecycle signals', () => {
     expect(view.container.textContent!.length).toBeLessThan(200)
   })
 
-  it.each([{}, { steadyCps: 120 }, { inputComplete: true }])('bounds stalled frame time for %j', async options => {
+  it.each([{}, { steadyCps: 120 }, { inputComplete: true }])('bounds stalled frame time for %j', async (options: { steadyCps?: number; inputComplete?: boolean }) => {
     const measure = async (interval: number) => {
       time = 0
       const view = render(createElement(Probe, { text: 'x'.repeat(2000), ...options }))
@@ -75,7 +75,7 @@ describe('ordinary playback across lifecycle signals', () => {
     expect(view.container.textContent).toBe('replacement😀')
   })
 
-  it.each([true, false])('replays an enabled snapshot only when explicitly requested (%s)', async replayOnEnable => {
+  it.each([true, false])('replays an enabled snapshot only when explicitly requested (%s)', async (replayOnEnable: boolean) => {
     const text = 'queued '.repeat(30)
     let hold = true
     const shouldHoldBack = () => hold

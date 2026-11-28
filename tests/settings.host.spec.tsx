@@ -79,8 +79,8 @@ async function mountHost(baseUrl: string, sharedHome?: string): Promise<{
 
 describe('smooth-stream host settings', () => {
   it.each(['replay', 'catch-up', 'latest', { obsolete: true }])(
-    'ignores retired recovery settings from saved files and older clients: %j',
-    async backgroundRecovery => {
+    'ignores retired recovery and fade settings from saved files and older clients: %j',
+    async (backgroundRecovery: 'replay' | 'catch-up' | 'latest' | { obsolete: boolean }) => {
       const home = mkdtempSync(join(tmpdir(), 'dsh-smooth-stream-legacy-home-'))
       tempDirs.add(home)
       mkdirSync(join(home, 'storages'))
@@ -98,10 +98,11 @@ describe('smooth-stream host settings', () => {
       }), 'utf8')
       const host = await mountHost(profileBaseUrl(`link:${process.cwd()}`), home)
       const expected = {
-        enabled: false, controlScroll: false, motionPreference: 'force-reduced', logarithmicFade: false,
+        enabled: false, controlScroll: false, motionPreference: 'force-reduced',
       }
       const read = await host.registration.handler(STREAM_SETTINGS_RPC.read, {}, signal(), peer)
       expect(read).toMatchObject({ ok: true, value: expected })
+      expect(read).not.toHaveProperty('value.logarithmicFade')
       expect(read).not.toHaveProperty('value.backgroundRecovery')
       expect(read).not.toHaveProperty('value.foregroundRecoveryDelayMs')
       expect(await host.registration.handler(STREAM_SETTINGS_RPC.debugRead, {}, signal(), peer))
@@ -113,6 +114,7 @@ describe('smooth-stream host settings', () => {
       expect(written).not.toHaveProperty('value.backgroundRecovery')
       const persisted = JSON.parse(readFileSync(host.settingsFile, 'utf8'))
       expect(persisted).toMatchObject({ ...expected, thinkAutoExpand: false, debugTuningEnabled: true, debugTuning: tuning })
+      expect(persisted).not.toHaveProperty('logarithmicFade')
       expect(persisted).not.toHaveProperty('backgroundRecovery')
       expect(persisted).not.toHaveProperty('foregroundRecoveryDelayMs')
       await host.fiber.dispose()
@@ -145,7 +147,7 @@ describe('smooth-stream host settings', () => {
     await host.fiber.dispose()
   })
 
-  it.each([false, true])('preserves legacy effective tuning when debugEnabled=%s', async debugEnabled => {
+  it.each([false, true])('preserves legacy effective tuning when debugEnabled=%s', async (debugEnabled: boolean) => {
     const host = await mountHost(profileBaseUrl(`link:${process.cwd()}`))
     await host.registration.handler(STREAM_SETTINGS_RPC.debugWrite, { debugEnabled }, signal(), peer)
     const home = process.env.DSH_HOME as string
@@ -170,10 +172,11 @@ describe('smooth-stream host settings', () => {
   it('persists updates, preserves omitted values, and rejects invalid input atomically', async () => {
     const host = await mountHost(profileBaseUrl(`link:${process.cwd()}`))
     const { registration } = host
-    expect(await registration.handler(STREAM_SETTINGS_RPC.write, { enabled: false, logarithmicFade: false }, signal(), peer))
-      .toMatchObject({ ok: true, value: { enabled: false, logarithmicFade: false } })
+    const legacyWrite = await registration.handler(STREAM_SETTINGS_RPC.write, { enabled: false, logarithmicFade: false }, signal(), peer)
+    expect(legacyWrite).toMatchObject({ ok: true, value: { enabled: false } })
+    expect(legacyWrite).not.toHaveProperty('value.logarithmicFade')
     expect(await registration.handler(STREAM_SETTINGS_RPC.write, { controlScroll: false }, signal(), peer))
-      .toMatchObject({ ok: true, value: { enabled: false, controlScroll: false, logarithmicFade: false } })
+      .toMatchObject({ ok: true, value: { enabled: false, controlScroll: false } })
     const beforeInvalid = readFileSync(host.settingsFile, 'utf8')
     for (const invalid of [
       { enabled: true, thinkAutoExpand: 'false' },
@@ -189,7 +192,9 @@ describe('smooth-stream host settings', () => {
       })
       expect(readFileSync(host.settingsFile, 'utf8')).toBe(beforeInvalid)
     }
-    expect(JSON.parse(beforeInvalid)).toMatchObject({ enabled: false, controlScroll: false, logarithmicFade: false })
+    const persisted = JSON.parse(beforeInvalid)
+    expect(persisted).toMatchObject({ enabled: false, controlScroll: false })
+    expect(persisted).not.toHaveProperty('logarithmicFade')
     await host.fiber.dispose()
   })
 
@@ -206,7 +211,6 @@ describe('smooth-stream host settings', () => {
         controlScroll: DEFAULT_STREAM_SETTINGS.controlScroll,
         motionPreference: DEFAULT_STREAM_SETTINGS.motionPreference,
         thinkAutoExpand: DEFAULT_STREAM_SETTINGS.thinkAutoExpand,
-        logarithmicFade: DEFAULT_STREAM_SETTINGS.logarithmicFade,
         fastFold: DEFAULT_STREAM_SETTINGS.fastFold,
         fastPipeline: DEFAULT_STREAM_SETTINGS.fastPipeline,
         keepStreamOnToolCall: DEFAULT_STREAM_SETTINGS.keepStreamOnToolCall,

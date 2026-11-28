@@ -422,9 +422,6 @@
       "@deepseek-ai/dsh-client-ui-subagent": [
         "../deepseek-harness/packages/client/ui-subagent/src"
       ],
-      "@deepseek-ai/dsh-client-ui-settings-plugins": [
-        "../deepseek-harness/packages/client/ui-settings-plugins/src"
-      ],
       "@deepseek-ai/dsh-client-ui-jobs": [
         "../deepseek-harness/packages/client/ui-jobs/src"
       ],
@@ -451,9 +448,6 @@
       ],
       "@deepseek-ai/dsh-client-ui-settings-models": [
         "../deepseek-harness/packages/client/ui-settings-models/src"
-      ],
-      "@deepseek-ai/dsh-client-ui-settings-plugin-inventory": [
-        "../deepseek-harness/packages/client/ui-settings-plugin-inventory/src"
       ],
       "@deepseek-ai/dsh-client-locale": [
         "../deepseek-harness/packages/client/locale/src"

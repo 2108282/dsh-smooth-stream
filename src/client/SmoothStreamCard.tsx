@@ -40,7 +40,6 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
       controlScroll: true,
       motionPreference: 'auto' as const,
       thinkAutoExpand: false,
-      logarithmicFade: true,
       fastFold: true,
       fastPipeline: true,
       keepStreamOnToolCall: true,
@@ -169,19 +168,6 @@ export function SmoothStreamCard(props: SmoothStreamCardProps) {
                     />
                   </span>
                   <span className={css.hint}>{t('fastPipelineHint')}</span>
-                </label>
-                <label className={state.enabled ? css.field : `${css.field} ${css.fieldDisabled}`}>
-                  <span className={css.fieldHead}>
-                    <span className={css.label}>{t('logarithmicFade')}</span>
-                    <input
-                      type="checkbox"
-                      className={css.toggle}
-                      checked={state.logarithmicFade}
-                      disabled={!state.writable || state.saving || !state.enabled}
-                      onChange={(event) => { edit({ logarithmicFade: event.target.checked }) }}
-                    />
-                  </span>
-                  <span className={css.hint}>{t('logarithmicFadeHint')}</span>
                 </label>
                 {/* Motion preference is a radio group, so this row is a div:
                     nesting the choice labels inside a field <label> would be

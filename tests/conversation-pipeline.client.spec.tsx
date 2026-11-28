@@ -91,7 +91,7 @@ afterEach(() => {
 })
 
 describe('installConversationPipeline', () => {
-  it.each(['set', 'function'] as const)('optimizes every existing binding from %s values in one frame', (form) => {
+  it.each(['set', 'function'] as const)('optimizes every existing binding from %s values in one frame', (form: 'set' | 'function') => {
     const first = new Binding()
     const second = new Binding()
     const outside = new Binding()

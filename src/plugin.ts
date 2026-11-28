@@ -62,7 +62,6 @@ export const StreamSettingsSchema: Schema<StreamSettings> = Schema.object({
     Schema.const('force-reduced'),
   ] as const).default(DEFAULT_STREAM_SETTINGS.motionPreference),
   thinkAutoExpand: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.thinkAutoExpand),
-  logarithmicFade: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.logarithmicFade),
   fastFold: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.fastFold),
   fastPipeline: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.fastPipeline),
   keepStreamOnToolCall: Schema.boolean().default(DEFAULT_STREAM_SETTINGS.keepStreamOnToolCall),
@@ -102,7 +101,7 @@ export function apply(ctx: Context, config: Config): void {
   // Old clients and saved files may still send these fields. Ignore them before
   // validation so their old values never affect current preferences or playback.
   function currentSettingsFields(value: Record<string, unknown>): Record<string, unknown> {
-    const { backgroundRecovery: _recovery, foregroundRecoveryDelayMs: _delay, ...current } = value
+    const { backgroundRecovery: _recovery, foregroundRecoveryDelayMs: _delay, logarithmicFade: _fade, ...current } = value
     return current
   }
 
@@ -156,7 +155,6 @@ export function apply(ctx: Context, config: Config): void {
           controlScroll: currentSettings.controlScroll,
           motionPreference: currentSettings.motionPreference,
           thinkAutoExpand: currentSettings.thinkAutoExpand,
-          logarithmicFade: currentSettings.logarithmicFade,
           fastFold: currentSettings.fastFold ?? DEFAULT_STREAM_SETTINGS.fastFold,
           fastPipeline: currentSettings.fastPipeline ?? DEFAULT_STREAM_SETTINGS.fastPipeline,
           keepStreamOnToolCall: currentSettings.keepStreamOnToolCall,
@@ -217,14 +215,14 @@ export function apply(ctx: Context, config: Config): void {
         }
         const next = currentSettingsFields(payload as Record<string, unknown>)
         const allowedKeys = new Set([
-          'enabled', 'controlScroll', 'motionPreference', 'thinkAutoExpand', 'logarithmicFade',
+          'enabled', 'controlScroll', 'motionPreference', 'thinkAutoExpand',
           'fastFold', 'fastPipeline', 'keepStreamOnToolCall', 'debugEnabled', 'debugTuningEnabled', 'debugTuning',
         ])
         if (Object.keys(next).some(key => !allowedKeys.has(key))) {
           return rejectedSettings('settings payload contains an unknown field')
         }
         const booleanKeys = [
-          'enabled', 'controlScroll', 'thinkAutoExpand', 'logarithmicFade',
+          'enabled', 'controlScroll', 'thinkAutoExpand',
           'fastFold', 'fastPipeline', 'keepStreamOnToolCall', 'debugEnabled', 'debugTuningEnabled',
         ] as const
         if (booleanKeys.some(key => key in next && typeof next[key] !== 'boolean')) {

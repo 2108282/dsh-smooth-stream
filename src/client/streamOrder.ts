@@ -108,7 +108,7 @@ function assistantKind(type: string): string {
 
 function settleMessage(state: StreamOrderState, match: ConversationMatch): StreamOrderState {
   if (match.event.type !== 'assistant/message') return state
-  const content = match.event.data.message.content
+  const content = match.event.data.message.content as readonly { type: string }[]
   const indices = state.data.blockIndices
   // An interrupted settlement may drop undispatched Tool calls. Never attach a
   // live raw index to a different dense content position in that case.

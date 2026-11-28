@@ -5,7 +5,7 @@
  * boot-config bridge is absent (client-only composition).
  */
 
-import type { StreamSmoothingPreset } from './client/useSmoothStreamContent.ts'
+import type { StreamSmoothingPreset } from './client/streamPresets.ts'
 
 /** Legacy render-mode value retained so existing overlays remain valid. */
 export type StreamMode = 'typewriter' | 'teleprompter'

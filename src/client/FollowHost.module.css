@@ -1,0 +1,4 @@
+.follow {
+  contain: layout style;
+  min-width: 0;
+}

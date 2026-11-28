@@ -1,3 +1,4 @@
+node_modules
 node_modules/
 # lib/ is committed so DSHA can install directly from Git repo
 *.tsbuildinfo

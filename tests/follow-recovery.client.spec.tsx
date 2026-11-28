@@ -133,7 +133,7 @@ afterEach(() => {
 })
 
 describe('conversation follow with ordinary frame timing', () => {
-  it.each([false, true])('keeps host handoff across arm mounts and lifecycle events (background=%s)', async background => {
+  it.each([false, true])('keeps host handoff across arm mounts and lifecycle events (background=%s)', async (background: boolean) => {
     const { model, remount } = mount()
     await paint(20)
     expect(model.port.hasAttribute('data-follow-owned')).toBe(true)
@@ -298,7 +298,7 @@ describe('conversation follow with ordinary frame timing', () => {
     expect(model.port.hasAttribute('data-follow-owned')).toBe(false)
   })
 
-  it.each(['lifecycle', 'long-frame'] as const)('keeps a reader who scrolled up released across a %s interval', async mode => {
+  it.each(['lifecycle', 'long-frame'] as const)('keeps a reader who scrolled up released across a %s interval', async (mode: 'lifecycle' | 'long-frame') => {
     const { model } = mount()
     await paint(20)
     fireEvent.wheel(model.port, { deltaY: -80 })

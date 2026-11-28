@@ -3,12 +3,13 @@ import {
   useMemo, useRef, useState, useSyncExternalStore, type ComponentType, type ReactNode,
 } from 'react'
 import type { AssistantBlock, ChatFlowSlotProps, ChatNode, ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client'
-import { PRESET_CONFIG, type StreamSmoothingPreset } from './useSmoothStreamContent.ts'
+import { PRESET_CONFIG, type StreamSmoothingPreset } from './streamPresets.ts'
 import type { SettingsSource } from './flowPresentationAdapter.tsx'
 import { SessionPlayback, type PlaybackDisplay, type PlaybackSegment } from './sessionPlayback.ts'
 import { createEntryBaseline, type EntryBaseline } from './entryBaseline.ts'
 import { FollowHost } from './FollowHost.tsx'
-import { FADE_DURATION_MS, useLogarithmicFade } from './useLogarithmicFade.ts'
+import { usePlaybackDomText } from './usePlaybackDomText.ts'
+import { reasoningSummary, reasoningPreviewProjection, visibleReasoningText } from './reasoningPlayback.ts'
 import { debugRuntime } from './debugRuntime.ts'
 import { notifyFollowCommit } from './teleprompterGlide.ts'
 import { DEFAULT_STREAM_SETTINGS, DEFAULT_STREAM_DEBUG_TUNING, type StreamSettings } from '../settings.ts'
@@ -24,6 +25,7 @@ function sourceIdentity(owner: string, node: SourceNode | undefined): string {
   return typeof node?.key === 'string' ? node.key : owner
 }
 function segmentId(sourceKey: string, index: number | string): string { return JSON.stringify([sourceKey, index]) }
+function summaryId(block: string): string { return `${block}:summary` }
 interface PlaybackBlockIdentity {
   key: string
   seq: number
@@ -49,13 +51,25 @@ export class PlaybackScope {
   private readonly animations = new Map<string, ReadonlySet<string>>()
   private readonly animatedSegments = new Map<string, number>()
   private readonly tools = new Map<string, SourceNode>()
+  private readonly orders = new Map<string, readonly number[]>()
   private revision = 0
   private readonly listeners = new Set<() => void>()
   private readonly flags = new Map<string, Map<string, boolean>>()
   private readonly registrations = new Map<string, symbol>()
+  private readonly admittedBlocks = new Set<string>()
   private readonly blockIdentities = new Map<string, { node: SourceNode; blocks: readonly PlaybackBlockIdentity[] }>()
   constructor(readonly baseline: EntryBaseline) {}
   isAnimated(id: string): boolean { return this.animatedSegments.has(id) }
+  hasAdmitted(id: string): boolean { return this.admittedBlocks.has(id) }
+  admit(id: string): void {
+    this.admittedBlocks.add(id)
+    if (this.admittedBlocks.size > 2048) this.admittedBlocks.delete(this.admittedBlocks.values().next().value!)
+  }
+  cardOrder(owner: string): readonly number[] { return this.orders.get(owner) ?? [] }
+  hasDisclosureState(id: string): boolean { return this.flag(`disclosure-known:${id}`) }
+  reasoningCollapsed(id: string): boolean {
+    return this.hasDisclosureState(id) ? !this.flag(`expanded:${id}`) : false
+  }
   private setAnimations(owner: string, ids: ReadonlySet<string>): void {
     for (const id of this.animations.get(owner) ?? []) {
       const count = this.animatedSegments.get(id)! - 1
@@ -121,6 +135,7 @@ export class PlaybackScope {
   }
   register(owner: string, segments: readonly SourceSegment[], node: SourceNode | undefined): void {
     const sourceKey = sourceIdentity(owner, node)
+    if (node?.kind !== 'assistant-step' && segments[0] !== undefined) this.orders.set(owner, segments[0].order)
     const previousTool = this.tools.get(owner)
     if (node?.kind === 'tool-call') this.tools.set(owner, node)
     else this.tools.delete(owner)
@@ -163,6 +178,7 @@ export class PlaybackScope {
         this.registrations.delete(owner)
         this.setAnimations(owner, new Set())
         this.animations.delete(owner)
+        this.orders.delete(owner)
         if (this.tools.delete(owner)) this.publish()
         this.playback.remove(owner)
       })
@@ -199,7 +215,7 @@ function PlaybackNodeSource({ flow, scope, nodeKey, groupPart, order, groupKey, 
       const live = scope.baseline.isLiveSeq(node.anchorSeq)
       return [{ id: segmentId(nodeKey, -1), order: [node.anchorSeq, ...order, 0],
         text: '', sealed: true, hidden, live, ...(live ? {} : { baselineChars: 0 }),
-        awaitPresentation: live && scope.preferences.controlScroll }]
+        awaitPresentation: live }]
     }
     const sealed = sealedBlocks(node)
     const identities = scope.blocks(node)
@@ -214,23 +230,36 @@ function PlaybackNodeSource({ flow, scope, nodeKey, groupPart, order, groupKey, 
       const text = block.kind === 'text' || block.kind === 'reasoning' ? block.text : ''
       const baseline = scope.baseline.readBlock({ turn: node.data.turn, step: node.data.step,
         attemptId: blockIdentity.attemptId, blockIndex: blockIdentity.wireIndex, blockSeq: blockIdentity.seq }, text)
-      return [{ id: ids[index]!, order: [blockIdentity.seq, ...order, index],
-        generation: JSON.stringify([blockIdentity.generation, baseline.generation]),
-        live: baseline.animate,
+      const id = ids[index]!
+      const generation = JSON.stringify([blockIdentity.generation, baseline.generation])
+      const suppressed = hidden || (!scope.preferences.keepStreamOnToolCall
+        && blockIdentity.seq <= toolBoundary && toolBoundary !== Infinity)
+      const reasoning = block.kind === 'reasoning'
+      const reasoningRunning = reasoning && node.data.status === 'running' && index === node.data.blocks.length - 1
+      const collapsed = reasoning && scope.reasoningCollapsed(id)
+      const body: SourceSegment = { id, order: [blockIdentity.seq, ...order, index, 1],
+        generation, live: baseline.animate,
         ...(!baseline.animate || baseline.initialText !== '' ? { baselineChars: Array.from(baseline.initialText).length } : {}),
-        text,
-        sealed: sealed[index] === true,
-        hidden: hidden || (!scope.preferences.keepStreamOnToolCall && blockIdentity.seq <= toolBoundary && toolBoundary !== Infinity)
-          || (block.kind === 'reasoning' && ((scope.flag(`disclosure-known:${ids[index]}`)
-          && !scope.flag(`expanded:${ids[index]}`)) || scope.flag(`reasoning-hidden:${owner}`))) }]
+        text, sealed: sealed[index] === true,
+        hidden: suppressed || (reasoning && (collapsed || scope.flag(`reasoning-hidden:${owner}`))) }
+      if (!reasoning) return [body]
+      const summary = reasoningSummary(text, reasoningRunning)
+      const initial = reasoningSummary(baseline.initialText, reasoningRunning)
+      const baselineChars = !baseline.animate ? Array.from(summary.text).length
+        : initial.paragraph === summary.paragraph ? Array.from(initial.text).length : 0
+      return [{ id: summaryId(id), order: [blockIdentity.seq, ...order, index, 0],
+        generation: JSON.stringify([generation, summary.paragraph]), live: baseline.animate,
+        ...(baselineChars > 0 || !baseline.animate ? { baselineChars } : {}),
+        text: summary.text, sealed: true,
+        hidden: suppressed || (reasoning && ((scope.hasDisclosureState(id) && !collapsed) || scope.flag(`reasoning-hidden:${owner}`))) }, body]
     })
   }, [node, owner, shape, controlRevision, hidden, groupPart, managedKinds, scope,
-    scope.preferences.controlScroll, scope.preferences.keepStreamOnToolCall, scope.baselineRevision])
+    scope.preferences.thinkAutoExpand, scope.preferences.keepStreamOnToolCall, scope.baselineRevision])
   useLayoutEffect(() => scope.retain(owner), [scope, owner])
   useLayoutEffect(() => groupKey === undefined ? undefined
     : scope.setFlag(`unmanaged:${groupKey}`, owner, node !== undefined && !managedKinds.has(node.kind)),
   [scope, groupKey, owner, node?.kind, managedKinds])
-  useLayoutEffect(() => { scope.register(owner, segments, node) }, [scope, owner, segments, node])
+  useEffect(() => { scope.register(owner, segments, node) }, [scope, owner, segments, node])
   return null
 }
 
@@ -302,14 +331,11 @@ function SessionPlaybackFlowScope({ Inner, props, settings, managedNodeKinds, bu
   const active = ready && preferences.enabled && preferences.motionPreference !== 'force-reduced'
     && !(preferences.motionPreference === 'auto' && reduced)
   scope.active = active
-  const settleDelayMs = preferences.logarithmicFade && typeof Highlight === 'function'
-    && typeof CSS !== 'undefined' && CSS.highlights !== undefined
-    && CSS.supports('color', 'color-mix(in srgb, currentColor 15%, transparent)') ? FADE_DURATION_MS : 0
   useLayoutEffect(() => {
     scope.speedCps = PRESET_CONFIG[preset].defaultCps * tuning.revealScale
-    scope.playback.configure({ charsPerSecond: PRESET_CONFIG[preset].defaultCps, tuning, settleDelayMs })
+    scope.playback.configure({ charsPerSecond: PRESET_CONFIG[preset].defaultCps, tuning })
     scope.playback.setEnabled(active)
-  }, [scope, active, preset, tuning, settleDelayMs])
+  }, [scope, active, preset, tuning])
   // Suspense hiding cleans up layout effects but retains this scope. Only a
   // passive lifetime cleanup may dispose it; the generation guards StrictMode.
   useEffect(() => {
@@ -332,7 +358,8 @@ function SessionPlaybackFlowScope({ Inner, props, settings, managedNodeKinds, bu
       return node.kind === 'assistant-step'
         ? node.data.blocks.some((block, index) => (member.groupPart === 'reasoning' ? block.kind === 'reasoning'
           : member.groupPart === 'response' ? block.kind !== 'reasoning' : true)
-          && scope.playback.read(ids[index]!).entered)
+          && (scope.playback.read(ids[index]!).entered || (block.kind === 'reasoning'
+             && scope.playback.read(summaryId(ids[index]!)).entered)))
         : scope.playback.read(segmentId(member.key, -1)).entered
     }) ?? false), [scope, group, builder, managedNodeKinds, key])
     const entered = useSyncExternalStore(scope.playback.subscribe, read, read)
@@ -363,7 +390,8 @@ export function SessionPlaybackNode({ Inner, owner }: { Inner: ComponentType<any
     return node.data.blocks.flatMap((block, index) => {
       if (owner.groupPart === 'reasoning' && block.kind !== 'reasoning') return []
       if (owner.groupPart === 'response' && block.kind === 'reasoning') return []
-      return block.kind === 'tool-call' ? [] : [all[index]!]
+      return block.kind === 'tool-call' ? [] : block.kind === 'reasoning'
+        ? [summaryId(all[index]!), all[index]!] : [all[index]!]
     })
   }, [node, owner.groupPart, sourceKey, scope])
   const previous = useRef<readonly PlaybackDisplay[]>([])
@@ -382,7 +410,7 @@ export function SessionPlaybackNode({ Inner, owner }: { Inner: ComponentType<any
   return createElement(SessionPlaybackAssistant, { Inner, owner: owner as unknown as AssistantProps, scope, ownerKey })
 }
 
-/** Cards enter whole; this host only follows their committed height. */
+/** Native cards retain their elements; visible text shares the session clock. */
 function SessionPlaybackAtomic({ Inner, owner, scope, sourceKey }: {
   Inner: ComponentType<any>; owner: NodeProps; scope: PlaybackScope; sourceKey: string
 }) {
@@ -391,7 +419,19 @@ function SessionPlaybackAtomic({ Inner, owner, scope, sourceKey }: {
   speed.current = scope.speedCps
   const extent = useRef<number | null>(null)
   const id = segmentId(sourceKey, -1)
-  const [entering, setEntering] = useState(() => scope.animatedOwners.has(sourceKey) && scope.playback.read(id).pending)
+  const [entering, setEntering] = useState(() => scope.preferences.controlScroll && scope.animatedOwners.has(sourceKey) && scope.playback.read(id).pending)
+  const revealInitial = useRef(scope.playback.read(id).pending)
+  const [captured, setCaptured] = useState(false)
+  const [textPending, setTextPending] = useState(false)
+  const ready = useCallback(() => { setCaptured(true) }, [])
+  const commit = useCallback(() => { notifyFollowCommit(root.current) }, [])
+  const ownerKey = identity(sourceKey, owner.groupPart)
+  const sourceOrder = scope.cardOrder(ownerKey)
+  const orderKey = sourceOrder.join(',')
+  const textOrder = useMemo(() => [...sourceOrder.slice(0, -1), 1], [orderKey])
+  usePlaybackDomText(root, { playback: scope.playback, owner: `${ownerKey}:visible`, order: textOrder,
+    animate: scope.isAnimated(id), enabled: scope.active, revealInitial: revealInitial.current,
+    onReady: ready, onPendingChange: setTextPending, onCommit: commit })
   const finish = useCallback(() => {
     extent.current = null
     setEntering(false)
@@ -399,15 +439,15 @@ function SessionPlaybackAtomic({ Inner, owner, scope, sourceKey }: {
   }, [scope, id])
   const awaiting = scope.playback.read(id).pending
   useLayoutEffect(() => {
+    if (!captured) return
     if (!awaiting) { extent.current = null; setEntering(false); return }
-    if (!entering) return
     const element = root.current
     const port = element?.closest<HTMLElement>('[data-conversation-scroll]')
     // No controlled scroll entrance exists without a measurable native port.
     // Release immediately instead of waiting for a callback that cannot arrive.
-    if (!scope.preferences.controlScroll || !port?.isConnected || port.clientHeight <= 0
+    if (!entering || !scope.preferences.controlScroll || !port?.isConnected || port.clientHeight <= 0
       || !element || element.getBoundingClientRect().height <= 0) finish()
-  }, [scope, entering, awaiting, scope.preferences.controlScroll, finish])
+  }, [scope, entering, awaiting, captured, scope.preferences.controlScroll, finish])
   const growth = useCallback((delta: number) => {
     if (!scope.preferences.controlScroll || !scope.playback.read(id).pending) return
     extent.current = (extent.current ?? 0) + delta
@@ -415,7 +455,7 @@ function SessionPlaybackAtomic({ Inner, owner, scope, sourceKey }: {
     notifyFollowCommit(root.current)
   }, [scope, id])
   return createElement(FollowHost, {
-    active: false, entrance: entering && scope.playback.read(id).pending,
+    active: textPending, entrance: entering && scope.playback.read(id).pending,
     onEntranceSettled: finish, onGrowth: scope.preferences.controlScroll ? growth : undefined,
     entranceExtentRef: extent, speedCpsRef: speed, hostRef: root,
     predictive: false, controlScroll: scope.preferences.controlScroll,
@@ -485,13 +525,23 @@ function SessionPlaybackAssistant({ Inner, owner, scope, ownerKey }: {
     const relevant = owner.groupPart === 'reasoning' ? block.kind === 'reasoning'
       : owner.groupPart === 'response' ? block.kind !== 'reasoning' : true
     if (!relevant || block.kind === 'tool-call') { projected.push(block); continue }
-    const display = scope.playback.read(ids[index]!)
-    pending ||= scope.isAnimated(ids[index]!) && display.pending
-    entered ||= display.entered
-    // Keep native block indices (and disclosure keys) even when protocol order
-    // interleaves a later dense block or a Tool card ahead of this one.
-    projected.push(!display.entered ? { kind: 'text', text: '' }
-      : block.kind === 'text' || block.kind === 'reasoning' ? { ...block, text: display.text } : block)
+    const id = ids[index]!
+    const display = scope.playback.read(id)
+    const summary = block.kind === 'reasoning' ? scope.playback.read(summaryId(id)) : undefined
+    if (display.entered || summary?.entered === true) scope.admit(id)
+    const admitted = scope.hasAdmitted(id) || display.entered || summary?.entered === true
+    pending ||= scope.isAnimated(id) && display.pending
+    pending ||= summary !== undefined && scope.isAnimated(summaryId(id)) && summary.pending
+    entered ||= admitted
+    const collapsed = block.kind === 'reasoning' && (!scope.hasDisclosureState(id) || scope.reasoningCollapsed(id))
+    const summaryText = block.kind === 'reasoning'
+      ? reasoningPreviewProjection(summary?.text ?? '', block.text) : ''
+    const text = block.kind !== 'reasoning' ? display.text
+      : collapsed ? summaryText
+        : display.text !== '' ? display.text
+          : admitted ? `<signature>${id}</signature>\u200B` : ''
+    projected.push(!admitted ? { kind: 'text', text: '' }
+      : block.kind === 'text' || block.kind === 'reasoning' ? { ...block, text } : block)
   }
   mountedReasoning.current = projected.flatMap((block, index) => block.kind === 'reasoning' && block.text.trim() !== ''
     && (owner.groupPart === undefined || owner.groupPart === 'reasoning') ? [ids[index]!] : [])
@@ -503,19 +553,25 @@ function SessionPlaybackAssistant({ Inner, owner, scope, ownerKey }: {
   const renderSlot = useMemo(() => {
     if (owner.renderSlot === undefined) return undefined
     const render = owner.renderSlot
-    const raw = new Map<string, { original: string; indices: number[] } | undefined>()
+    const raw = new Map<string, { original: string; indices: number[]; bodyText: string } | undefined>()
     for (const [index, block] of projected.entries()) {
       const original = node.data.blocks[index]
       if (block.kind !== 'reasoning' || original?.kind !== 'reasoning') continue
+      const bodyText = scope.playback.read(ids[index]!).text
       const previous = raw.get(block.text)
-      raw.set(block.text, !raw.has(block.text) ? { original: original.text, indices: [index] }
-        : previous?.original === original.text ? { ...previous, indices: [...previous.indices, index] } : undefined)
+      if (!raw.has(block.text)) {
+        raw.set(block.text, { original: original.text, indices: [index], bodyText })
+      } else if (previous === undefined || previous.original !== original.text || previous.bodyText !== bodyText) {
+        raw.set(block.text, undefined)
+      } else {
+        raw.set(block.text, { ...previous, indices: [...previous.indices, index] })
+      }
     }
     return ((name: string, props: Record<string, unknown>, ...args: unknown[]) => {
       if (name === 'conversation.chat.reasoning.body' && typeof props.rawText === 'string') {
         const source = raw.get(props.rawText)
         if (source !== undefined) {
-          const children = (render as Function)(name, { ...props, rawText: source.original }, ...args)
+          const children = (render as Function)(name, { ...props, rawText: source.original, text: visibleReasoningText(source.bodyText) }, ...args)
           // Equal text cannot identify a row. Its own disclosure hook registers
           // expansion precisely; never let one body's token expand another row.
           return source.indices.length === 1 ? createElement(ReasoningBodyRegistration, {
@@ -526,9 +582,6 @@ function SessionPlaybackAssistant({ Inner, owner, scope, ownerKey }: {
       return (render as Function)(name, props, ...args)
     }) as AssistantProps['renderSlot']
   }, [owner.renderSlot, node.data.blocks, projected, ownerKey, scope])
-  // The session cursor already owns this prefix. A fresh DOM host adopts it;
-  // only characters appended after attachment may start a new fade.
-  useLogarithmicFade(root, scope.preferences.logarithmicFade, pending, speed, true)
   if (!entered) return null
   return createElement(FollowHost, { active: pending, speedCpsRef: speed, revealedCharsRef: revealed,
     hostRef: root, controlScroll: scope.preferences.controlScroll, predictive: false,

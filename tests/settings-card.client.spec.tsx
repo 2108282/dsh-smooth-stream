@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apply, inject } from '../src/client/index.ts'
 import { SmoothStreamCard, type SmoothStreamCardProps } from '../src/client/SmoothStreamCard.tsx'
 import type { SmoothStreamCardFace } from '../src/client/smooth-stream-card-controller.ts'
-import { en } from '../src/client/locales.ts'
+import { en, zh } from '../src/client/locales.ts'
 import { debugRuntime } from '../src/client/debugRuntime.ts'
 import {
   STREAM_SETTINGS_RPC,
@@ -34,7 +34,6 @@ const developmentView: StreamSettingsView = {
     controlScroll: true,
     motionPreference: 'auto',
     thinkAutoExpand: true,
-    logarithmicFade: true,
     fastFold: true,
     fastPipeline: true,
     keepStreamOnToolCall: true,
@@ -99,7 +98,6 @@ async function bench(options: BenchOptions = {}): Promise<{
       const settings = payload as {
         enabled?: unknown
         thinkAutoExpand?: unknown
-        logarithmicFade?: boolean
         debugEnabled?: unknown
         debugTuningEnabled?: boolean
         debugTuning?: unknown
@@ -115,7 +113,6 @@ async function bench(options: BenchOptions = {}): Promise<{
         ...view,
         enabled: settings.enabled,
         thinkAutoExpand: settings.thinkAutoExpand,
-        logarithmicFade: settings.logarithmicFade ?? view.logarithmicFade,
       }
       if (typeof settings.debugEnabled === 'boolean' && typeof settings.debugTuning === 'object' && settings.debugTuning !== null) {
         debugView = { debugEnabled: settings.debugEnabled, debugTuningEnabled: settings.debugTuningEnabled ?? false, tuning: settings.debugTuning as StreamDebugSettingsView['tuning'] }
@@ -167,7 +164,6 @@ function declareCardSlot(slots: SlotRegistry): () => void {
     name: 'root',
     children: {
       'settings.section': { kind: 'list', scope: 'root' },
-      'settings.plugins.tab': { kind: 'list', scope: 'root' },
     },
   } as never, () => null)
 }
@@ -233,21 +229,16 @@ describe('smooth-stream settings card', () => {
     expect(debugRuntime.activeTuning().cadenceClamp).toBe(5)
   })
 
-  it('defaults old responses to fade enabled and saves the independent switch', async () => {
-    const { logarithmicFade: _fade, ...oldView } = developmentView
-    const { ctx, slots, call } = await bench({ readValue: oldView })
+  it('ignores a retired fade field in legacy responses and omits its control', async () => {
+    const { ctx, slots } = await bench({ readValue: { ...developmentView, logarithmicFade: false } })
     declareCardSlot(slots)
     await ctx.plugin({ inject: [...inject], apply }).await()
     const face = cardFace(slots)
     await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().status).toBe('ready'))
-    expect(face.hooks.smoothStreamCard.getSnapshot().logarithmicFade).toBe(true)
+    expect(face.hooks.smoothStreamCard.getSnapshot()).not.toHaveProperty('logarithmicFade')
     render(<SmoothStreamCard {...cardProps(face)} />)
     fireEvent.click(screen.getByRole('button', { name: /smooth stream/i }))
-    fireEvent.click(screen.getByRole('checkbox', { name: /logarithmic fade/i }))
-    expect(face.hooks.smoothStreamCard.getSnapshot()).toMatchObject({ logarithmicFade: false, dirty: true })
-    face.save()
-    await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot()).toMatchObject({ logarithmicFade: false, dirty: false }))
-    expect(call).toHaveBeenCalledWith(STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.write, expect.objectContaining({ logarithmicFade: false }))
+    expect(screen.queryByRole('checkbox', { name: /fade/i })).toBeNull()
   })
 
   it('uses shared feature defaults when an older response omits newer settings', async () => {
@@ -277,13 +268,15 @@ describe('smooth-stream settings card', () => {
     expect(inject).toEqual(['slots'])
   })
 
-  it('registers settings section and Plugins tab entries in the native slots', async () => {
+  it('registers only the settings section in the native slots', async () => {
     const { ctx, slots } = await bench()
     declareCardSlot(slots)
     await ctx.plugin({ inject: [...inject], apply }).await()
 
-    expect(slots.entries('settings.section').map(entry => entry.options.id)).toContain('smooth-stream')
-    expect(slots.entries('settings.plugins.tab').map(entry => entry.options.id)).toContain('smooth-stream-tab')
+    const entries = slots.entries('settings.section')
+    expect(entries.map(entry => entry.options.id)).toEqual(['smooth-stream'])
+    expect(typeof entries[0]?.options.label).toBe('function')
+    expect([en.title, zh.title]).toContain((entries[0]?.options.label as () => string)())
   })
 
   it('keeps the plugin entry visible when the core settings API filters third-party namespaces', async () => {
@@ -354,7 +347,6 @@ describe('smooth-stream settings card', () => {
       controlScroll: true,
       motionPreference: 'auto',
       thinkAutoExpand: false,
-      logarithmicFade: true,
       fastFold: true,
       fastPipeline: true,
       keepStreamOnToolCall: true,
@@ -410,7 +402,7 @@ describe('smooth-stream settings card', () => {
     face.edit({ thinkAutoExpand: false })
     face.save()
     await vi.waitFor(() => expect(face.hooks.smoothStreamCard.getSnapshot().dirty).toBe(false))
-    const payload = call.mock.calls.findLast(args => args[1] === STREAM_SETTINGS_RPC.write)![2]
+    const payload = call.mock.calls.findLast((args: readonly unknown[]) => args[1] === STREAM_SETTINGS_RPC.write)![2]
     expect(payload).toMatchObject({ controlScroll: false, motionPreference: 'auto', thinkAutoExpand: false })
     expect(payload).not.toHaveProperty('backgroundRecovery')
     expect(payload).not.toHaveProperty('foregroundRecoveryDelayMs')
@@ -465,7 +457,6 @@ describe('smooth-stream settings card', () => {
       controlScroll: true,
       motionPreference: 'auto',
       thinkAutoExpand: true,
-      logarithmicFade: true,
       fastFold: true,
       fastPipeline: true,
       keepStreamOnToolCall: true,
