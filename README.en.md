@@ -1,6 +1,6 @@
 # dsh-smooth-stream
 
-> **Main rebuild candidate 0.11.0-rebuild.7**: Bounds playback queue scans in long-history sessions, skips full sorting when an owner's membership and order are unchanged, reuses code-point arrays for appended text, and connects the follower's shared backpressure. See the [rebuild.7 notes](docs/changes-0.11.0-rebuild.7.md). All 382 tests, strict type checking, and the build pass. This round does not replace the profile installation; live-page visuals and device frame rates remain unverified.
+> **Main rebuild candidate 0.11.0-rebuild.8**: Filters card rescans caused by follow geometry, skips repeated ledger eviction scans during long-history streaming, and avoids whole-Flow baseline updates for ordinary live text deltas. Also fixes reversed dragging at the floor and repeated keyboard-resize layout work. See the [rebuild.8 notes](docs/changes-0.11.0-rebuild.8.md). Live-page motion and device input latency still need verification.
 
 > **Transform jumpy AI outputs into a calm, teleprompter-smooth reading experience.**  
 > Physics-based stream rendering and zero-reflow viewport tracking for the DeepSeek Harness (`dsh`) Web UI.

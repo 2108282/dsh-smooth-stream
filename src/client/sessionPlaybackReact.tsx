@@ -380,7 +380,8 @@ function SessionPlaybackFlowScope({ Inner, props, settings, managedNodeKinds, bu
       nodeKey: entry.key, groupPart: entry.groupPart, order: [index, 0], managedKinds: managedNodeKinds })
     : createElement(PlaybackGroupSource, { key: `group:${entry.key}`, flow: props, scope,
       groupKey: entry.key, order: [index], managedKinds: managedNodeKinds }))
-  return createElement(PlaybackContext.Provider, { value: { scope, active } }, ...sources,
+  const context = useMemo(() => ({ scope, active }), [scope, active])
+  return createElement(PlaybackContext.Provider, { value: context }, ...sources,
     createElement(Inner, { ...props, key: 'official-flow', useGroupAction, useChatGroup: useChatGroup as ChatFlowSlotProps['useChatGroup'] }))
 }
 

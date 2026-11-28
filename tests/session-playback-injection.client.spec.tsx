@@ -3,7 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { MarkdownDelegateProvider, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
-  createElement, StrictMode, Suspense, useRef, useState, useSyncExternalStore,
+  createElement, memo, StrictMode, Suspense, useRef, useState, useSyncExternalStore,
   type ComponentType, type ReactElement, type ReactNode,
 } from 'react'
 import type { AssistantBlock, ChatConversationViewNode, ChatFlowSlotProps, ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client'
@@ -12,6 +12,7 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionPlaybackFlow, SessionPlaybackNode, useSessionPlayback } from '../src/client/sessionPlaybackReact.tsx'
+import { SessionPlayback } from '../src/client/sessionPlayback.ts'
 import { installEntryBaselineSource, type EntryBaselineBinding, type EntryBaselineWindow } from '../src/client/entryBaseline.ts'
 import * as followHost from '../src/client/FollowHost.tsx'
 import type { SettingsSource } from '../src/client/flowPresentationAdapter.tsx'
@@ -432,6 +433,58 @@ function text(container: HTMLElement, key: string, block = 0, groupPart?: string
 }
 
 describe('session playback injected into the official flow and keyed renderers', () => {
+  it('keeps historical renderers and registrations idle across continuing live delta packets', async () => {
+    const f = fixture()
+    const history = Array.from({ length: 40 }, (_, index) => assistant(`assistant:${index}`, `history ${index}`, { closed: true }))
+    f.set(history)
+    const view = render(f.tree())
+    let answer = 'live prefix '.repeat(12)
+    await act(async () => {
+      f.set([...history, assistant('assistant:100', answer, { status: 'running' })])
+      view.rerender(f.tree())
+    })
+    await paint(2)
+    const prefix = text(view.container, 'assistant:100')!
+    expect(prefix.length).toBeGreaterThan(0)
+    expect(prefix.length).toBeLessThan(answer.length)
+    const upsert = vi.spyOn(SessionPlayback.prototype, 'upsert')
+    f.seenNodes.length = 0
+    f.seenFlows.length = 0
+
+    // Publish through the raw entry source and keyed Chat source, without a
+    // parent rerender that would itself legitimately render the entire fixture.
+    for (const suffix of [' first delta', ' second delta', ' third delta']) {
+      answer += suffix
+      await act(async () => { f.set([...history, assistant('assistant:100', answer, { status: 'running' })]) })
+      await paint(1)
+    }
+    expect(f.seenFlows).toHaveLength(0)
+    expect(f.seenNodes.length).toBeGreaterThan(0)
+    expect(f.seenNodes.every(props => props.node.key === 'assistant:100')).toBe(true)
+    expect(upsert.mock.calls.length).toBeGreaterThan(0)
+    expect(upsert.mock.calls.every(([owner]: Parameters<SessionPlayback['upsert']>) => owner === JSON.stringify(['assistant:100', '']))).toBe(true)
+    expect(text(view.container, 'assistant:100')!.length).toBeGreaterThan(prefix.length)
+    expect(text(view.container, 'assistant:0')).toBe('history 0')
+  })
+
+  it('keeps the playback context stable through baseline-only history notifications', async () => {
+    const f = fixture()
+    const history = [assistant('assistant:0', 'already read', { closed: true })]
+    f.set(history)
+    const Inner = memo(f.FlowInner)
+    const props = f.props()
+    const settings: SettingsSource = { getSnapshot: f.preferences.getSnapshot, subscribe: f.preferences.subscribe }
+    render(createElement(SessionPlaybackFlow, { Inner, props, settings, managedNodeKinds: new Set(['assistant-step']) }))
+    await act(async () => { await Promise.resolve() })
+    f.seenNodes.length = 0
+    f.seenFlows.length = 0
+
+    // Prepend retains its global baseline notification, but has no new row here.
+    await act(async () => { f.set(history, undefined, 'prepend') })
+    expect(f.seenFlows).toHaveLength(0)
+    expect(f.seenNodes).toHaveLength(0)
+  })
+
   it('keeps the same playback scope alive while Suspense temporarily hides the flow', async () => {
     const f = fixture()
     const settings: SettingsSource = {

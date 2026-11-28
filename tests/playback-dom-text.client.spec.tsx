@@ -641,6 +641,53 @@ describe('usePlaybackDomText', () => {
     expect(observe).not.toHaveBeenCalled()
   })
 
+  it('does not rescan live cards when shared follow geometry changes', async () => {
+    const playback = engine()
+    const upsert = vi.spyOn(playback, 'upsert')
+    const view = render(<section data-testid="transcript">
+      {Array.from({ length: 5 }, (_, card) => <Probe key={card} playback={playback}
+        owner={`live:${card}`} order={[card]}>
+        {Array.from({ length: 100 }, (_, text) => <span key={text}>card-{card}-text-{text}</span>)}
+      </Probe>)}
+    </section>)
+    await settle()
+    upsert.mockClear()
+    const styles = vi.spyOn(window, 'getComputedStyle')
+    const transcript = view.getByTestId('transcript')
+    for (let frame = 1; frame <= 3; frame++) {
+      transcript.style.transform = `translate3d(0, ${frame}px, 0)`
+      transcript.style.willChange = 'transform'
+      transcript.style.paddingBottom = `${frame}px`
+      transcript.style.minHeight = `${frame + 200}px`
+      await settle()
+    }
+    expect(upsert).not.toHaveBeenCalled()
+    expect(styles).not.toHaveBeenCalled()
+    await paint()
+    expect(view.container.querySelector('span')!.textContent).toBe('c')
+  })
+
+  it('keeps ancestor class rules that hide descendants observable', async () => {
+    const playback = engine()
+    const style = document.createElement('style')
+    style.textContent = '.fold-native .folded-output { display: none }'
+    document.head.appendChild(style)
+    const view = render(<section data-testid="ancestor"><Probe playback={playback}>
+      <span className="folded-output">abcdef</span><em>tail</em>
+    </Probe></section>)
+    try {
+      await settle()
+      view.getByTestId('ancestor').className = 'fold-native'
+      await settle()
+      expect(view.container.querySelector('span')!.textContent).toBe('abcdef')
+      await paint()
+      expect(view.container.querySelector('em')!.textContent).toBe('t')
+      view.getByTestId('ancestor').className = ''
+      await settle()
+      expect(view.container.querySelector('span')!.textContent).toBe('abcdef')
+    } finally { style.remove() }
+  })
+
   it('leaves history, input controls, SVG, live regions, and button names native', async () => {
     const playback = engine()
     const upsert = vi.spyOn(playback, 'upsert')

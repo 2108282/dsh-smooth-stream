@@ -113,6 +113,30 @@ function hiddenOutside(root: HTMLElement): boolean {
   return false
 }
 
+/** Follow geometry changes cannot hide text or change disclosure state. */
+const FOLLOW_STYLE_PROPERTIES = new Set([
+  'transform', 'will-change', 'clip-path', 'overflow-anchor', 'scroll-behavior',
+  'padding-bottom', 'margin-top', 'margin-bottom', 'min-height',
+])
+function styleMutationAffectsVisibility(mutation: MutationRecord): boolean {
+  const target = mutation.target
+  if (!(target instanceof Element)) return true
+  // Let the browser parse CSS so quoted values, semicolons and priorities are
+  // compared correctly. Class and custom-property changes remain conservative:
+  // an ancestor selector or inherited variable may hide only a descendant.
+  const previous = target.ownerDocument.createElement('span').style
+  const current = target.ownerDocument.createElement('span').style
+  previous.cssText = mutation.oldValue ?? ''
+  current.cssText = target.getAttribute('style') ?? ''
+  const properties = new Set([...Array.from(previous), ...Array.from(current)])
+  for (const property of properties) {
+    if (FOLLOW_STYLE_PROPERTIES.has(property)) continue
+    if (previous.getPropertyValue(property) !== current.getPropertyValue(property)
+      || previous.getPropertyPriority(property) !== current.getPropertyPriority(property)) return true
+  }
+  return false
+}
+
 /** DisclosureRow mounts its detail body on expansion rather than hiding it. */
 function openedBody(node: Node): boolean {
   if (!(node instanceof Element) || node.closest('[data-tool]') === null) return false
@@ -830,14 +854,19 @@ function createBridge(root: HTMLElement, playback: SessionPlayback, owner: strin
     subtree: true, childList: true, characterData: true, characterDataOldValue: true,
     attributes: true, attributeOldValue: true, attributeFilter: OBSERVED_ATTRIBUTES,
   })
-  const ancestorObserver = typeof MutationObserver === 'undefined' ? undefined : new MutationObserver(() => {
+  const ancestorObserver = typeof MutationObserver === 'undefined' ? undefined : new MutationObserver(mutations => {
+    // Follow geometry is written on shared ancestors every frame. Ignore those
+    // records before any style reads or text scans. Keep class/custom-property
+    // changes conservative: they may hide descendants through CSS selectors.
+    if (!mutations.some(mutation => mutation.attributeName !== 'style'
+      || styleMutationAffectsVisibility(mutation))) return
     // A full visibility refresh covers pending host changes too. Local scans
     // leave newly queued records for the next delivery rather than dropping them.
     drain()
     scan()
   })
   for (let ancestor = root.parentElement; ancestor !== null; ancestor = ancestor.parentElement) {
-    ancestorObserver?.observe(ancestor, { attributes: true, attributeFilter: OBSERVED_ATTRIBUTES })
+    ancestorObserver?.observe(ancestor, { attributes: true, attributeOldValue: true, attributeFilter: OBSERVED_ATTRIBUTES })
   }
   const unsubscribe = playback.subscribeChanges(changedIds => {
     if (stopped) return

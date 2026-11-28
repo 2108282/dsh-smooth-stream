@@ -743,16 +743,17 @@ function completionSettleGuardsPort(port: HTMLElement): boolean {
  * next turn) still takes over normally and the settle yields.
  */
 
-function readingAnchorOf(port: HTMLElement): HTMLElement | null {
-  const flow = flowElementOf(port)
-  if (flow === null) return null
-  let anchor: HTMLElement | null = null
-  for (const child of shiftSurfacesOf(port)) {
+function readingAnchorOf(port: HTMLElement, surfaces: readonly HTMLElement[]): HTMLElement | null {
+  if (flowElementOf(port) === null) return null
+  // Only the last matching row is the reading anchor. Searching backwards
+  // avoids querying every historical tool/think subtree on each live frame.
+  for (let index = surfaces.length - 1; index >= 0; index--) {
+    const child = surfaces[index]!
     if (child.getAttribute('data-chat-flow-kind') === 'assistant' || child.querySelector('[data-variant="think"]') !== null) {
-      anchor = child
+      return child
     }
   }
-  return anchor ?? shiftSurfacesOf(port).at(-1) ?? null
+  return surfaces.at(-1) ?? null
 }
 
 /**
@@ -765,7 +766,8 @@ function readingAnchorOf(port: HTMLElement): HTMLElement | null {
  * correction as a fresh jump and oscillate.
  */
 function measureReadingAnchor(port: HTMLElement): { anchor: HTMLElement; index: number; top: number; delta: number } | null {
-  const anchor = readingAnchorOf(port)
+  const surfaces = shiftSurfacesOf(port)
+  const anchor = readingAnchorOf(port, surfaces)
   if (anchor === null) {
     followGuardAnchors.delete(port)
     return null
@@ -779,8 +781,7 @@ function measureReadingAnchor(port: HTMLElement): { anchor: HTMLElement; index: 
   const pad = flowPadOf(port)
   const scrollTop = port.scrollTop
   const scrollHeight = port.scrollHeight
-  const flow = flowElementOf(port)
-  const index = flow === null ? -1 : shiftSurfacesOf(port).indexOf(anchor)
+  const index = surfaces.indexOf(anchor)
   const stored = followGuardAnchors.get(port)
   if (stored === undefined) {
     followGuardAnchors.set(port, { element: anchor, top, index, shift, pad, scrollTop, scrollHeight })
@@ -1705,6 +1706,19 @@ export function useConversationFollow(
     let mutations: MutationObserver | null = null
     let observedTail: HTMLElement | null = null
     let statusWasPresent: boolean | null = null
+    let viewportHeight: number | null = null
+    let viewportResizing = false
+    const sampleViewport = (next: HTMLElement): void => {
+      const height = next.clientHeight
+      viewportResizing = viewportHeight !== null && height !== viewportHeight
+      viewportHeight = height
+      if (viewportResizing) {
+        invalidatePaintLimit(next)
+        // A keyboard resize changes the viewport, not the source content.
+        // Do not feed it into completion-anchor compensation.
+        followGuardAnchors.delete(next)
+      }
+    }
     let trajectoryPositionPx: number | null = null
     let trajectoryVelocityPxPerMs = 0
     let trajectoryTargetVelocityPxPerMs = 0
@@ -1879,6 +1893,22 @@ export function useConversationFollow(
       followScrollLedgers.set(next, next.scrollTop)
     }
 
+    const releaseForReader = (next: HTMLElement): void => {
+      if (!following || !isLeader(next) || hostOwnsScroll || followHostScrollPorts.has(next)) return
+      following = false
+      readerGestureIntent = false
+      readerReleased = true
+      followReaderHolds.set(next, { atMs: performance.now() })
+      // Release in the input task. A reveal/resize observer may run before
+      // the next animation frame and must not overwrite this reader intent.
+      handBackVisual(next)
+      animatedH = next.scrollHeight
+      reservePx = 0
+      velocityPxPerSec = 0
+      drop(next)
+      finishEntrance()
+    }
+
     const markGesture = (event: Event): void => {
       interacting = true
       if (event.type === 'wheel') {
@@ -1890,13 +1920,15 @@ export function useConversationFollow(
       } else if (event.type === 'touchmove') {
         const touch = (event as TouchEvent).touches[0]
         if (touch !== undefined) {
-          if (touchStartY === null) touchStartY = touch.clientY
-          // A downward finger drag moves the transcript toward older content.
-          if (touch.clientY - touchStartY > 1) readerGestureIntent = true
+          // Compare adjacent samples so reversing at the floor releases
+          // immediately, even before passing the original finger position.
+          if (touchStartY !== null && touch.clientY - touchStartY > 1) readerGestureIntent = true
+          touchStartY = Math.min(touchStartY ?? touch.clientY, touch.clientY)
         }
       } else if (event.type === 'touchend' || event.type === 'touchcancel') {
         touchStartY = null
       }
+      if (readerGestureIntent && port !== null) releaseForReader(port)
       if (interactTimer !== null) clearTimeout(interactTimer)
       interactTimer = setTimeout(() => {
         interacting = false
@@ -2015,6 +2047,11 @@ export function useConversationFollow(
     const restoreBeforePaint = (): void => {
       if (port !== null && hostInputFoldActive(port)) { yieldToInputFold(port); return }
       if (!controlScrollRef.current || !following || port === null || (followSpaceEpochs.get(port) ?? 0) !== spaceEpoch) return
+      if (!isLeader(port) && followLeaders.has(port)) return
+      // IME animation can resize the port and its flow/tail in one delivery.
+      // The existing RAF handles the latest height once; observers must not
+      // run another write/read layout pass for each intermediate notification.
+      if (viewportHeight !== null && (port.clientHeight !== viewportHeight || viewportResizing)) return
       if (hostOwnsScroll || followHostScrollPorts.has(port)) {
         hostOwnsScroll = true
         followScrollLedgers.set(port, port.scrollTop)
@@ -2207,6 +2244,13 @@ export function useConversationFollow(
       const nextPort = root.closest<HTMLElement>('[data-conversation-scroll]')
       if (nextPort === null) return
       bindPort(nextPort)
+      // Pending successors share the same port but do not own its motion.
+      // Stand down before tail discovery or any historical/geometry scans.
+      if (primed && !isLeader(nextPort) && followLeaders.has(nextPort)) {
+        finishEntrance()
+        return
+      }
+      sampleViewport(nextPort)
       observeTailSurface()
       resetHostScrollOwnershipForNewTurn(nextPort)
       hostOwnsScroll = followHostScrollPorts.has(nextPort)
@@ -2595,7 +2639,7 @@ export function useConversationFollow(
       // even refresh the baseline: its measurement would store the very
       // jump the owning guard is about to correct and neutralize its next
       // pass.
-      if (isLeader(nextPort)) {
+      if (isLeader(nextPort) && !viewportResizing) {
         if (!activeRef.current) enforceReadingAnchor(nextPort)
         else measureReadingAnchor(nextPort)
       }
@@ -2840,9 +2884,11 @@ export function useConversationFollow(
           stopSettleListeners()
           return
         }
-        if (interacting && (readerGestureIntent || readerScrolledUp(host))) {
+        if (!following || (interacting && (readerGestureIntent || readerScrolledUp(host)))) {
           readerGestureIntent = false
-          handBackVisual(host)
+          if (following) handBackVisual(host)
+          following = false
+          followReaderHolds.set(host, { atMs: performance.now() })
           clearVisual(host)
           followCompletionSettle.delete(host)
           followLeaders.delete(host)
@@ -2851,6 +2897,7 @@ export function useConversationFollow(
           stopSettleListeners()
           return
         }
+        sampleViewport(host)
         const dt = Math.min(FOLLOW_MAX_FRAME_MS, Math.max(0, now - settleLast))
         const tuning = debugRuntime.activeTuning()
         reservePx = Math.min(reservePx, Math.max(0, tuning.runwayPx))
@@ -2882,7 +2929,7 @@ export function useConversationFollow(
         // engine's own glide, so the per-frame poll only answers real host
         // motion. While the pad retires, extent motion is OUR OWN glide —
         // the hold stands down.
-        const guardDelta = !settleRetiring && !followActivePorts.has(host)
+        const guardDelta = !viewportResizing && !settleRetiring && !followActivePorts.has(host)
           ? enforceReadingAnchor(host, true)
           : null
         settleQuietMs = !settleRetiring && (guardDelta === null || Math.abs(guardDelta) <= 0.5) ? settleQuietMs + dt : 0

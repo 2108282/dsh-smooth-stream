@@ -133,6 +133,69 @@ afterEach(() => {
 })
 
 describe('conversation follow with ordinary frame timing', () => {
+  it.each([false, true])('releases a reversed touch at the floor before the next frame (settling=%s)', async (settling: boolean) => {
+    const { model, complete } = mount()
+    await paint(20)
+    if (settling) {
+      model.base += 26
+      await act(async () => notifyFollowCommit(model.row))
+      complete()
+    }
+    fireEvent.touchStart(model.port, { touches: [{ clientY: 300 }] })
+    // Scroll toward the floor, then reverse without lifting the finger. The
+    // new Y is still above the original touch, but this move reads history.
+    fireEvent.touchMove(model.port, { touches: [{ clientY: 100 }] })
+    fireEvent.touchMove(model.port, { touches: [{ clientY: 120 }] })
+    expect(model.port.hasAttribute('data-follow-owned')).toBe(false)
+    expect(shift(model.transcript)).toBe(0)
+    const readerTop = model.port.scrollTop
+    model.base += 26
+    await act(async () => notifyFollowCommit(model.row))
+    expect(model.port.scrollTop).toBe(readerTop)
+    await paint(4)
+    expect(model.port.scrollTop).toBe(readerTop)
+  })
+
+  it('preserves a short upward wheel intent across a reveal commit before animation runs', async () => {
+    const { model } = mount()
+    await paint(20)
+    fireEvent.wheel(model.port, { deltaY: -1 })
+    const releasedTop = model.port.scrollTop
+    model.base += 26
+    await act(async () => notifyFollowCommit(model.row))
+    expect(model.port.hasAttribute('data-follow-owned')).toBe(false)
+    expect(model.port.scrollTop).toBe(releasedTop)
+    await paint()
+    expect(model.port.scrollTop).toBe(releasedTop)
+  })
+  it('coalesces viewport resize observations instead of measuring and writing layout in every callback', async () => {
+    const callbacks: ResizeObserverCallback[] = []
+    class Observer {
+      constructor(callback: ResizeObserverCallback) { callbacks.push(callback) }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal('ResizeObserver', Observer)
+    const { model } = mount()
+    await paint(20)
+    const rect = vi.mocked(model.transcript.getBoundingClientRect)
+    rect.mockClear()
+    const before = model.transcript.style.minHeight
+    model.viewport -= 60
+    for (let delivery = 0; delivery < 8; delivery++) {
+      act(() => { for (const callback of callbacks) callback([], {} as ResizeObserver) })
+    }
+    expect(rect).not.toHaveBeenCalled()
+    expect(model.transcript.style.minHeight).toBe(before)
+    await paint()
+    expect(model.port.scrollTop).toBe(model.port.scrollHeight - model.port.clientHeight)
+    expect(rect.mock.calls.length).toBeLessThanOrEqual(1)
+    expect(Number.isFinite(shift(model.transcript))).toBe(true)
+    await paint(3)
+    expect(model.port.hasAttribute('data-follow-owned')).toBe(true)
+  })
+
   it.each([false, true])('keeps host handoff across arm mounts and lifecycle events (background=%s)', async (background: boolean) => {
     const { model, remount } = mount()
     await paint(20)

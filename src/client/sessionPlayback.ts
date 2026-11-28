@@ -117,6 +117,8 @@ export class SessionPlayback {
   private headIndex = 0
   private readonly dirtyDisplays = new Set<string>()
   private readonly displays = new Map<string, PlaybackDisplay>()
+  /** Only state creation or active membership changes can alter eviction candidates. */
+  private ledgerNeedsTrim = false
   private readonly listeners = new Set<() => void>()
   private readonly changeListeners = new Set<PlaybackChangeListener>()
   private enabled = true
@@ -324,6 +326,7 @@ export class SessionPlayback {
       }
       if (stateChanged || previousSegment === undefined || previousOwner !== nextOwner) this.rewindHead(id)
     }
+    if (activeChanged) this.ledgerNeedsTrim = true
     if (activeChanged || orderChanged) this.rebuildOrder()
     this.rehideSuccessors(reopened)
     if (!this.enabled) this.adoptAll()
@@ -491,6 +494,7 @@ export class SessionPlayback {
         touched: ++this.touchSequence,
       }
       this.states.set(segment.id, state)
+      this.ledgerNeedsTrim = true
     } else {
       const retry = state.generation !== segment.generation || (state.sealed && !segment.sealed)
       if (retry) {
@@ -591,6 +595,7 @@ export class SessionPlayback {
   }
 
   private rebuildActive(): void {
+    this.ledgerNeedsTrim = true
     const previousIds = new Set(this.active.keys())
     this.active.clear()
     this.activeOwners.clear()
@@ -831,6 +836,11 @@ export class SessionPlayback {
   }
 
   private trimLedger(): void {
+    if (!this.ledgerNeedsTrim) return
+    this.ledgerNeedsTrim = false
+    // Text updates touch active states only, so neither the inactive candidates
+    // nor their LRU order changes until membership changes or a state is added.
+    // Avoid rescanning a large all-active history on every streaming delta.
     if (this.states.size <= LEDGER_LIMIT) return
     const active = new Set(this.active.keys())
     const candidates = [...this.states.entries()]

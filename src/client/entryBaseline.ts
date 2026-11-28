@@ -248,6 +248,7 @@ class Baseline implements EntryBaseline {
     const initial = this.sourceRevision === undefined
     const contiguous = initial || window.revision === this.sourceRevision! + 1
     this.sourceRevision = window.revision
+    let presentationChanged = true
     if (initial || !contiguous || window.change.kind === 'replace') {
       // A discontinuity cannot prove which tail entries were live. Rebaseline
       // conservatively, and invalidate any queue owned by the old source epoch.
@@ -262,31 +263,42 @@ class Baseline implements EntryBaseline {
       // An older page must not reset the live tail or its queued prefix.
       this.consume(window.change.entries ?? [], false, true)
     } else if (window.change.kind === 'append') {
-      this.consume(window.change.entries ?? [], this.ready)
+      presentationChanged = this.consume(window.change.entries ?? [], this.ready)
     } else if (window.change.kind === 'settle-assistant') {
       this.settle(window.change.attemptId, window.change.entry)
     }
     // settle-assistant retires transient entries; their provenance must survive
     // the official durable handoff until this entry lifetime ends or is replaced.
-    if (open) this.ready = true
-    this.publish()
+    if (open && !this.ready) { this.ready = true; presentationChanged = true }
+    if (presentationChanged) this.publish()
   }
 
-  private consume(entries: readonly Entry[], live: boolean, preserve = false): void {
+  private consume(entries: readonly Entry[], live: boolean, preserve = false): boolean {
+    let presentationChanged = false
     for (const entry of entries) {
       const event = entry.event
+      // Once a block is already live, further text only extends its known length.
+      // Its frozen entry prefix and generation stay equal; useChatNode publishes
+      // the changed content without waking every historical Flow source.
+      const data = event.type === 'assistant/live-chunk' ? event.data as ChunkData | null : undefined
+      const chunk = data?.chunk
+      const previous = typeof data?.turn === 'number' && typeof data.step === 'number'
+        && typeof data.attemptId === 'string' && typeof chunk?.index === 'number'
+        ? this.blocks.get(blockKey(data.turn, data.step, data.attemptId, chunk.index)) : undefined
+      const deltaKind = chunk?.type === 'text-delta' ? 'text'
+        : chunk?.type === 'reasoning-delta' ? 'reasoning' : undefined
+      if (!live || previous?.live !== true || previous.kind !== deltaKind || typeof chunk?.text !== 'string') {
+        presentationChanged = true
+      }
       if (live) {
         this.liveSeqs.add(Number(event.seq))
         if (event.type === 'assistant/message' && event.surfaceOp === 'append') this.liveMessages.add(Number(event.seq))
       }
       if (event.type !== 'assistant/live-chunk') continue
-      const data = event.data as ChunkData | null
-      if (data === null || typeof data !== 'object' || typeof data.attemptId !== 'string'
+      if (data === null || data === undefined || typeof data !== 'object' || typeof data.attemptId !== 'string'
         || typeof data.turn !== 'number' || typeof data.step !== 'number') continue
-      const chunk = data.chunk
       if (chunk === undefined || typeof chunk.index !== 'number') continue
       const key = blockKey(data.turn, data.step, data.attemptId, chunk.index)
-      const previous = this.blocks.get(key)
       if (preserve && previous !== undefined) continue
       const type = chunk.type
       if (type !== 'block-start' && type !== 'text-delta' && type !== 'reasoning-delta' && type !== 'block-end') continue
@@ -311,6 +323,7 @@ class Baseline implements EntryBaseline {
       block.live ||= live
       this.blocks.set(key, block)
     }
+    return presentationChanged
   }
 
   private settle(attemptId: string | undefined, entry: Entry | undefined): void {

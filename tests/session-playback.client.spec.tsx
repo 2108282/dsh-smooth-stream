@@ -604,6 +604,82 @@ describe('SessionPlayback', () => {
     expect(isComplete.mock.calls.length).toBeLessThanOrEqual(16)
   })
 
+  it.each(['upsert', 'updateSegments', 'patch'] as const)('does not scan the ledger during active tail appends through %s', async (method: 'upsert' | 'updateSegments' | 'patch') => {
+    const playback = createPlayback()
+    const history = Array.from({ length: 3000 }, (_, index) => segment(`history:${index}`, [index], 'done'))
+    playback.upsert('history', history, false)
+    playback.upsert('live', [segment('live', [3000], 'a', false)], true)
+    await settle()
+    const internals = playback as unknown as { states: Map<string, unknown>; active: Map<string, unknown> }
+    const entries = vi.spyOn(internals.states, 'entries')
+    const activeKeys = vi.spyOn(internals.active, 'keys')
+
+    for (let index = 1; index <= 20; index++) {
+      const updates = [segment('live', [3000], 'a'.repeat(index + 1), false)]
+      if (method === 'patch') playback.patch('live', updates, [], true)
+      else playback[method]('live', updates, true)
+      await settle()
+      paint()
+      await settle()
+    }
+
+    expect(entries).not.toHaveBeenCalled()
+    expect(activeKeys).not.toHaveBeenCalled()
+    expect(internals.states.size).toBe(3001)
+    expect(playback.read('live').text).toBe('a'.repeat(20))
+    expect(playback.read('history:0').text).toBe('done')
+  })
+
+  it.each(['remove', 'upsert', 'patch'] as const)('evicts retired states by last touch while protecting active states after %s', async (method: 'remove' | 'upsert' | 'patch') => {
+    const playback = createPlayback()
+    // The oldest state stays active even though all 2049 states exceed the cap.
+    playback.upsert('protected', [segment('protected', [-1], 'keep')], false)
+    const history = Array.from({ length: 2048 }, (_, index) => segment(`history:${index}`, [index], 'done'))
+    playback.upsert('history', history, false)
+    playback.updateSegments('history', [history[0]!], false)
+    await settle()
+    const internals = playback as unknown as { states: Map<string, unknown> }
+    expect(internals.states.size).toBe(2049)
+
+    if (method === 'remove') playback.remove('history')
+    else if (method === 'patch') playback.patch('history', [], history.map(source => source.id), false)
+    else playback.upsert('history', [], false)
+    await settle()
+
+    expect(internals.states.size).toBe(2048)
+    expect(internals.states.has('protected')).toBe(true)
+    expect(internals.states.has('history:0')).toBe(true)
+    expect(internals.states.has('history:1')).toBe(false)
+    expect(internals.states.has('history:2')).toBe(true)
+    expect(playback.read('protected').text).toBe('keep')
+
+    playback.upsert('remount', [history[0]!], true)
+    await settle()
+    expect(playback.read('history:0')).toMatchObject({ text: 'done', entered: true, pending: false })
+  })
+
+  it('refreshes retained state recency on remount before later eviction', async () => {
+    const playback = createPlayback()
+    playback.upsert('protected', [segment('protected', [-1], 'keep')], false)
+    const history = Array.from({ length: 2047 }, (_, index) => segment(`history:${index}`, [index], 'done'))
+    playback.upsert('history', history, false)
+    playback.remove('history')
+    await settle()
+    playback.upsert('refresh', [history[0]!], true)
+    await settle()
+    expect(playback.read('history:0').text).toBe('done')
+    playback.remove('refresh')
+    playback.upsert('new', [segment('new', [3000], 'new')], false)
+    await settle()
+
+    const internals = playback as unknown as { states: Map<string, unknown> }
+    expect(internals.states.size).toBe(2048)
+    expect(internals.states.has('history:0')).toBe(true)
+    expect(internals.states.has('history:1')).toBe(false)
+    expect(internals.states.has('protected')).toBe(true)
+    expect(playback.read('new').text).toBe('new')
+  })
+
   it('rewinds the queue cursor when an earlier completed source reopens', async () => {
     const playback = createPlayback()
     playback.upsert('early', [{ ...segment('early', [1], 'early'), generation: 1 }], false)

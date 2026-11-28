@@ -1,6 +1,6 @@
 import { StrictMode, useMemo, useSyncExternalStore } from 'react'
 import { act, cleanup, render } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createEntryBaseline, getFallbackEntryBaseline, installEntryBaselineSource,
   type EntryBaselineBinding, type EntryBaselineWindow, type EntryBlockSource,
@@ -86,6 +86,50 @@ describe('session entry baseline', () => {
     })
     expect(view.container.textContent).toBe('old😀|true')
     expect(baseline.readBlock(source(), rendered).initialText).toBe('old😀')
+  })
+
+  it.each(['text', 'reasoning'])('ingests continuing live %s deltas without publishing unchanged entry baselines', (kind: string) => {
+    const delta = `${kind}-delta`
+    const { baseline, publish } = fixture('open', [chunk(1, 'block-start', '', 0, 'attempt-a', kind), chunk(2, delta, 'old')])
+    const listener = vi.fn()
+    disposers.push(baseline.subscribe(listener))
+    publish('append', [chunk(3, delta, '+live')])
+    expect(listener).toHaveBeenCalledTimes(1)
+    const first = baseline.readBlock(source(), 'old+live')
+    const revision = baseline.getSnapshot()
+    listener.mockClear()
+
+    publish('append', [chunk(4, delta, '+tail'), chunk(5, delta, '😀')])
+    expect(listener).not.toHaveBeenCalled()
+    expect(baseline.getSnapshot()).toBe(revision)
+    expect(baseline.readBlock(source(), 'old+live+tail😀')).toEqual(first)
+    expect(baseline.isLiveSeq(5)).toBe(true)
+
+    // Length accounting still sees the quiet packets: a correcting block-end
+    // must adopt its authoritative text and notify the presentation subscribers.
+    publish('append', [{ type: 'transient', event: { type: 'assistant/live-chunk', seq: 6,
+      data: { turn: 1, step: 0, attemptId: 'attempt-a', chunk: { type: 'block-end', index: 0,
+        block: { type: kind, text: 'corrected' } } } } }])
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(baseline.readBlock(source(), 'corrected').initialText).toBe('corrected')
+  })
+
+  it('publishes prepend, settlement, replacement, and binding changes after quiet live packets', () => {
+    const { baseline, publish, bind } = fixture()
+    const listener = vi.fn()
+    disposers.push(baseline.subscribe(listener))
+    publish('append', [chunk(1, 'block-start'), chunk(2, 'text-delta', 'live')])
+    listener.mockClear()
+    publish('append', [chunk(3, 'text-delta', ' tail')])
+    expect(listener).not.toHaveBeenCalled()
+    publish('prepend', [chunk(-2, 'block-start', '', 0, 'older'), chunk(-1, 'text-delta', 'history', 0, 'older')])
+    publish('settle-assistant')
+    publish('replace', [chunk(1, 'block-start'), chunk(2, 'text-delta', 'replacement')])
+    expect(listener).toHaveBeenCalledTimes(3)
+    expect(baseline.readBlock(source(), 'replacement')).toMatchObject({ initialText: 'replacement', animate: false })
+    bind(undefined)
+    expect(baseline.readBlock(source(), 'unbound').animate).toBe(false)
+    expect(listener).toHaveBeenCalledTimes(4)
   })
 
   it('accepts an open empty session as ready without a timer', () => {
