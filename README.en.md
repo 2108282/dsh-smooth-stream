@@ -1,6 +1,6 @@
 # dsh-smooth-stream
 
-> **Main rebuild candidate 0.11.0-rebuild.5**: Based on `origin/main` commit `d0c96a4651e175d393799168c11b42a9a743649a` (baseline package version 0.10.9), with unified session playback rebuilt inside the independent injection plugin. This revision places reply text, visible native-card text, collapsed reasoning summaries, and expanded reasoning bodies on one playback queue, and removes the old wrappers and fade path. See the [rebuild.5 notes](docs/changes-0.11.0-rebuild.5.md). All 349 tests, strict type checking, and the build pass. The current profile still runs rebuild.4 pending manual replacement; live-page visual verification remains outstanding.
+> **Main rebuild candidate 0.11.0-rebuild.6**: Optimizes incremental native-card text rendering and local scans on top of unified session playback. Unchanged renderer commits skip rescanning, playback frames update only changed text, and structural edits preserve source identities and hidden snapshot paths. See the [rebuild.6 notes](docs/changes-0.11.0-rebuild.6.md). All 377 tests, strict type checking, and the build pass. This round does not replace the profile installation; live-page visuals and device frame rates remain unverified.
 
 > **Transform jumpy AI outputs into a calm, teleprompter-smooth reading experience.**  
 > Physics-based stream rendering and zero-reflow viewport tracking for the DeepSeek Harness (`dsh`) Web UI.
@@ -61,9 +61,9 @@ Traditional chat UIs bind DOM rendering and scrolling directly to arrival events
 - Reasoning and tool executions remain expanded while streaming.
 - Once a turn settles, intermediate processes cleanly fold behind a minimalist `Processed in Xs` summary row, keeping the conversation view focused on final answers.
 
-### 4. Session-Scoped Protocol Playback (0.11.0-rebuild.5 Candidate)
+### 4. Session-Scoped Protocol Playback (0.11.0-rebuild.6 Candidate)
 
-This candidate uses one playback queue per injected Flow and orders visible content by conversation protocol metadata rather than DOM grouping. See the [candidate notes](docs/changes-0.11.0-rebuild.5.md) for behavior and verification boundaries.
+This candidate uses one playback queue per injected Flow and orders visible content by conversation protocol metadata rather than DOM grouping. See the [candidate notes](docs/changes-0.11.0-rebuild.6.md) for behavior and verification boundaries.
 
 - Response text, collapsed reasoning summaries, expanded reasoning bodies, and visible native-card text follow protocol sequence with one character budget. Cards retain their official components and interaction, then reveal visible text progressively after entry.
 - A predecessor releases its successor only after an explicit block-end or durable settlement boundary. Network silence or a temporarily drained character buffer is not treated as protocol completion.
@@ -106,7 +106,7 @@ Verified by local browser-level audit suites:
 
 ### Installation
 
-**`0.11.0-rebuild.5` has not been published to npm.** Source, `lib` build artifacts, and the full test suite are ready. This round does not produce a `.tgz` archive; installing by npm package name or using an older `dist` download URL will not install this candidate.
+**`0.11.0-rebuild.6` has not been published to npm.** Source, `lib` build artifacts, and the full test suite are ready. This round does not produce a `.tgz` archive; installing by npm package name or using an older `dist` download URL will not install this candidate.
 
 Use the absolute path of the built local plugin directory in DSH's **Plugins → Add plugin** flow. Alternatively, use the existing CLI from your DeepSeek Harness checkout:
 

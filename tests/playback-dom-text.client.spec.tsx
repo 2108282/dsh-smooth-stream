@@ -55,6 +55,31 @@ function registered(spy: ReturnType<typeof vi.spyOn>, owner = 'card:visible'): r
   return call?.[1] as readonly PlaybackSegment[] ?? []
 }
 
+function patched(spy: ReturnType<typeof vi.spyOn>, owner = 'card:visible'): readonly PlaybackSegment[] {
+  const call = [...spy.mock.calls].reverse().find(call => call[0] === owner)
+  return call?.[1] as readonly PlaybackSegment[] ?? []
+}
+
+function watchTextData(text: Text): { reads: () => number; restore: () => void } {
+  let prototype: object | null = Object.getPrototypeOf(text)
+  let descriptor: PropertyDescriptor | undefined
+  while (prototype !== null && descriptor === undefined) {
+    descriptor = Object.getOwnPropertyDescriptor(prototype, 'data')
+    prototype = Object.getPrototypeOf(prototype)
+  }
+  if (descriptor?.get === undefined || descriptor.set === undefined) throw new Error('Text.data descriptor unavailable')
+  let reads = 0
+  Object.defineProperty(text, 'data', {
+    configurable: true,
+    get() { reads++; return descriptor!.get!.call(text) },
+    set(value: string) { descriptor!.set!.call(text, value) },
+  })
+  return {
+    reads: () => reads,
+    restore: () => { delete (text as unknown as Record<string, unknown>).data },
+  }
+}
+
 beforeEach(() => {
   frames = new Map()
   time = 0
@@ -103,6 +128,390 @@ describe('usePlaybackDomText', () => {
     expect(playback.read('tail').text).toBe('t')
   })
 
+  it('presents only playback-dirty text nodes instead of reading every indexed node', async () => {
+    const playback = engine()
+    const view = render(<Probe playback={playback}>
+      <span data-testid="active">ab</span><span data-testid="idle">cd</span>
+    </Probe>)
+    await settle()
+    const idle = view.getByTestId('idle').firstChild as Text
+    let prototype: object | null = Object.getPrototypeOf(idle)
+    let descriptor: PropertyDescriptor | undefined
+    while (prototype !== null && descriptor === undefined) {
+      descriptor = Object.getOwnPropertyDescriptor(prototype, 'data')
+      prototype = Object.getPrototypeOf(prototype)
+    }
+    if (descriptor?.get === undefined || descriptor.set === undefined) throw new Error('Text.data descriptor unavailable')
+    let reads = 0
+    Object.defineProperty(idle, 'data', {
+      configurable: true,
+      get() { reads++; return descriptor!.get!.call(idle) },
+      set(value: string) { descriptor!.set!.call(idle, value) },
+    })
+    await paint()
+    expect(view.getByTestId('active').textContent).toBe('a')
+    expect(reads).toBe(0)
+    delete (idle as unknown as Record<string, unknown>).data
+  })
+
+  it('registers appended subtrees without reading unrelated indexed text nodes', async () => {
+    const playback = engine()
+    const patch = vi.spyOn(playback, 'patch')
+    const view = render(<Probe playback={playback}>
+      <span>ab</span><span data-testid="idle">cd</span>
+    </Probe>)
+    await settle()
+    const idle = watchTextData(view.getByTestId('idle').firstChild as Text)
+    const root = view.getByTestId('card:visible')
+    const appended = document.createElement('strong')
+    appended.textContent = 'new'
+    act(() => root.appendChild(appended))
+    await settle()
+    expect(patched(patch).map(segment => segment.text)).toEqual(['new'])
+    expect(appended.textContent).toBe('')
+    expect(idle.reads()).toBe(0)
+    idle.restore()
+  })
+
+  it('rescans only a replaced subtree and removes its former sources', async () => {
+    const playback = engine()
+    const patch = vi.spyOn(playback, 'patch')
+    const view = render(<Probe playback={playback}>
+      <section data-testid="target"><span>old text</span></section>
+      <aside data-testid="idle">idle text</aside>
+    </Probe>)
+    await settle()
+    const idle = watchTextData(view.getByTestId('idle').firstChild as Text)
+    const target = view.getByTestId('target')
+    const replacement = document.createElement('strong')
+    replacement.textContent = 'replacement'
+    act(() => target.replaceChildren(replacement))
+    await settle()
+    expect(registered(patch).map(segment => segment.text)).toEqual(['replacement'])
+    expect(patch.mock.calls.at(-1)?.[2]).toHaveLength(1)
+    expect(replacement.textContent).toBe('')
+    expect(idle.reads()).toBe(0)
+    idle.restore()
+  })
+
+  it('snapshots newly appended hidden subtrees on later reveal without scanning siblings', async () => {
+    const playback = engine()
+    const view = render(<Probe playback={playback} revealInitial={false}>
+      <span>history</span><aside data-testid="idle">idle</aside>
+    </Probe>)
+    await settle()
+    const idle = watchTextData(view.getByTestId('idle').firstChild as Text)
+    const hidden = document.createElement('section')
+    hidden.hidden = true
+    hidden.innerHTML = '<span>folded history</span>'
+    act(() => view.getByTestId('card:visible').appendChild(hidden))
+    await settle()
+    expect(hidden.textContent).toBe('folded history')
+    act(() => { hidden.hidden = false })
+    await settle()
+    expect(hidden.textContent).toBe('folded history')
+    expect(idle.reads()).toBe(0)
+    idle.restore()
+  })
+
+  it('rescans only an attribute-affected subtree while preserving its native text snapshot', async () => {
+    const playback = engine()
+    const view = render(<Probe playback={playback}>
+      <section data-testid="target"><span>local result</span></section>
+      <aside data-testid="idle">unrelated result</aside>
+    </Probe>)
+    await settle()
+    const idle = watchTextData(view.getByTestId('idle').firstChild as Text)
+    const target = view.getByTestId('target')
+    act(() => { target.hidden = true })
+    await settle()
+    expect(target.textContent).toBe('local result')
+    act(() => { target.hidden = false })
+    await settle()
+    expect(target.textContent).toBe('local result')
+    expect(idle.reads()).toBe(0)
+    idle.restore()
+  })
+
+  it('recomputes Unicode history baseline after an unfinished non-prefix edit', async () => {
+    const playback = engine()
+    const view = render(<Probe playback={playback} revealInitial={false}><span>😀abc</span></Probe>)
+    await settle()
+    view.rerender(<Probe playback={playback} revealInitial={false}><span>😀abcX</span></Probe>)
+    await settle()
+    view.rerender(<Probe playback={playback} revealInitial={false}><span>😀aYZ</span></Probe>)
+    await settle()
+    expect(view.container.querySelector('span')!.textContent).toBe('😀a')
+  })
+
+  it('restores the current prefix when the host rewrites an unchanged full source', async () => {
+    const playback = engine()
+    playback.upsert('gate', [{ id: 'gate', order: [0], text: '', sealed: false }], true)
+    await settle()
+    const view = render(<Probe playback={playback} order={[1]}><span>abcd</span></Probe>)
+    await settle()
+    const node = view.container.querySelector('span')!.firstChild as Text
+    expect(node.data).toBe('')
+    act(() => { node.data = 'abcd' })
+    await settle()
+    expect(node.data).toBe('')
+  })
+
+  it('adopts changed button labels immediately and refreshes queue order without a DOM rescan', async () => {
+    const playback = engine()
+    const patch = vi.spyOn(playback, 'patch')
+    const buttonView = render(<Probe playback={playback}><button>Open</button></Probe>)
+    await settle()
+    buttonView.rerender(<Probe playback={playback}><button>Open more</button></Probe>)
+    await settle()
+    expect(buttonView.getByRole('button').textContent).toBe('Open more')
+    expect(frames.size).toBe(0)
+
+    const orderView = render(<>
+      <Probe playback={playback} owner="order:first" order={[1]}><span>A</span></Probe>
+      <Probe playback={playback} owner="order:second" order={[2]}><span>B</span></Probe>
+    </>)
+    await settle()
+    orderView.rerender(<>
+      <Probe playback={playback} owner="order:first" order={[3]}><span>A</span><i /></Probe>
+      <Probe playback={playback} owner="order:second" order={[2]}><span>B</span></Probe>
+    </>)
+    await settle()
+    expect(registered(patch, 'order:first')[0]!.order).toEqual([3, 0])
+    await paint()
+    expect(orderView.getByTestId('order:first').textContent).toBe('')
+    expect(orderView.getByTestId('order:second').textContent).toBe('B')
+  })
+
+  it('preserves source identities on remount after inserting a preceding sibling', async () => {
+    const playback = engine()
+    const upsert = vi.spyOn(playback, 'upsert')
+    const first = render(<Probe playback={playback}><span>abcd</span><aside>efgh</aside></Probe>)
+    await settle()
+    const before = new Map(registered(upsert).map(segment => [segment.text, segment.id]))
+    await paint(5)
+    const addition = document.createElement('em')
+    addition.textContent = 'new'
+    act(() => first.getByTestId('card:visible').prepend(addition))
+    await settle()
+    first.unmount()
+    await settle()
+    const second = render(<Probe playback={playback}><em>new</em><span>abcd</span><aside>efgh</aside></Probe>)
+    await settle()
+    const after = new Map(registered(upsert).map(segment => [segment.text, segment.id]))
+    expect(after.get('abcd')).toBe(before.get('abcd'))
+    expect(after.get('efgh')).toBe(before.get('efgh'))
+    await paint(3)
+    expect(second.container.querySelector('span')!.textContent).toBe('abcd')
+    expect(second.container.querySelector('aside')!.textContent).toBe('e')
+  })
+
+  it('keeps hidden snapshots associated with their nodes after a sibling insertion', async () => {
+    const playback = engine()
+    const view = render(<Probe playback={playback}>
+      <span>active</span><section data-testid="hidden" hidden>hidden history</section>
+    </Probe>)
+    await settle()
+    const addition = document.createElement('em')
+    addition.textContent = 'new'
+    act(() => view.getByTestId('card:visible').prepend(addition))
+    await settle()
+    act(() => { view.getByTestId('hidden').hidden = false })
+    await settle()
+    expect(view.getByTestId('hidden').textContent).toBe('hidden history')
+  })
+
+  it('does not adopt live content inserted at a former hidden sibling path', async () => {
+    const playback = engine()
+    const patch = vi.spyOn(playback, 'patch')
+    const view = render(<Probe playback={playback}>
+      <section data-testid="hidden" hidden>hidden history</section><aside>active</aside>
+    </Probe>)
+    await settle()
+    const addition = document.createElement('section')
+    addition.textContent = 'brand new live output'
+    act(() => view.getByTestId('card:visible').prepend(addition))
+    await settle()
+    expect(addition.textContent).toBe('')
+    expect(registered(patch).find(segment => segment.text === 'brand new live output')?.baselineChars).toBeUndefined()
+    act(() => { view.getByTestId('hidden').hidden = false })
+    await settle()
+    expect(view.getByTestId('hidden').textContent).toBe('hidden history')
+  })
+
+  it('updates host text without re-registering or reading unchanged nodes', async () => {
+    const playback = engine()
+    const upsert = vi.spyOn(playback, 'upsert')
+    const update = vi.spyOn(playback, 'updateSegments')
+    const tree = (text: string) => <Probe playback={playback}><span>{text}</span><aside data-testid="idle">idle</aside></Probe>
+    const view = render(tree('ab'))
+    await settle()
+    const idle = watchTextData(view.getByTestId('idle').firstChild as Text)
+    view.rerender(tree('abcd'))
+    await settle()
+    expect(upsert).toHaveBeenCalledTimes(1)
+    expect(registered(update).map(segment => segment.text)).toEqual(['abcd'])
+    expect(idle.reads()).toBe(0)
+    idle.restore()
+  })
+
+  it('does no DOM text work on an unchanged renderer commit', async () => {
+    const playback = engine()
+    const tree = () => <Probe playback={playback}><span data-testid="text">abcd</span></Probe>
+    const view = render(tree())
+    await settle()
+    const text = watchTextData(view.getByTestId('text').firstChild as Text)
+    view.rerender(tree())
+    await settle()
+    expect(text.reads()).toBe(0)
+    text.restore()
+  })
+
+  it('keeps an empty displayed Text binding when moving its subtree', async () => {
+    const playback = engine()
+    const view = render(<Probe playback={playback}><span data-testid="moving">ab</span><aside data-testid="target" /></Probe>)
+    await settle()
+    const moving = view.getByTestId('moving')
+    expect(moving.textContent).toBe('')
+    act(() => view.getByTestId('target').appendChild(moving))
+    await settle()
+    expect(moving.textContent).toBe('')
+    await paint(2)
+    expect(moving.textContent).toBe('ab')
+  })
+
+  it('inherits hidden ancestors when a descendant changes attributes or text', async () => {
+    const playback = engine()
+    const patch = vi.spyOn(playback, 'patch')
+    const view = render(<Probe playback={playback}>
+      <section data-testid="hidden" hidden><span data-testid="target">hidden</span></section>
+      <aside data-testid="idle">idle</aside>
+    </Probe>)
+    await settle()
+    const idle = watchTextData(view.getByTestId('idle').firstChild as Text)
+    const target = view.getByTestId('target')
+    act(() => {
+      target.className = 'updated'
+      ;(target.firstChild as Text).data = 'updated hidden text'
+    })
+    await settle()
+    expect(target.textContent).toBe('updated hidden text')
+    expect(patch).not.toHaveBeenCalled()
+    act(() => { view.getByTestId('hidden').hidden = false })
+    await settle()
+    expect(target.textContent).toBe('updated hidden text')
+    expect(idle.reads()).toBe(0)
+    idle.restore()
+  })
+
+  it('scans hidden append targets locally and snapshots their contents on reveal', async () => {
+    const playback = engine()
+    const view = render(<Probe playback={playback}>
+      <section data-testid="hidden" hidden /><aside data-testid="idle">idle</aside>
+    </Probe>)
+    await settle()
+    const idle = watchTextData(view.getByTestId('idle').firstChild as Text)
+    const target = view.getByTestId('hidden')
+    act(() => { target.textContent = 'hidden addition' })
+    await settle()
+    act(() => { target.hidden = false })
+    await settle()
+    expect(target.textContent).toBe('hidden addition')
+    expect(idle.reads()).toBe(0)
+    idle.restore()
+  })
+
+  it('inherits native control labels during a descendant-only attribute scan', async () => {
+    const playback = engine()
+    const view = render(<Probe playback={playback}><button><span data-testid="label">Open</span></button></Probe>)
+    await settle()
+    act(() => {
+      const label = view.getByTestId('label')
+      label.className = 'changed'
+      ;(label.firstChild as Text).data = 'Open more'
+    })
+    await settle()
+    expect(view.getByRole('button').textContent).toBe('Open more')
+    expect(frames.size).toBe(0)
+  })
+
+  it('ignores transient detached additions without rescanning indexed siblings', async () => {
+    const playback = engine()
+    const view = render(<Probe playback={playback}><aside data-testid="idle">idle</aside></Probe>)
+    await settle()
+    const idle = watchTextData(view.getByTestId('idle').firstChild as Text)
+    const temporary = document.createElement('span')
+    temporary.textContent = 'temporary'
+    act(() => {
+      view.getByTestId('card:visible').appendChild(temporary)
+      temporary.remove()
+    })
+    await settle()
+    expect(idle.reads()).toBe(0)
+    idle.restore()
+  })
+
+  it('keeps host edits queued during commits between two local scan regions', async () => {
+    const playback = engine()
+    let duringCommit: (() => void) | undefined
+    const view = render(<Probe playback={playback} revealInitial={false} onCommit={() => {
+      const edit = duringCommit
+      duringCommit = undefined
+      edit?.()
+    }}>
+      <section data-testid="first">a</section><section data-testid="second">b</section>
+      <aside data-testid="tail">c</aside>
+    </Probe>)
+    await settle()
+    duringCommit = () => { (view.getByTestId('tail').firstChild as Text).data = 'cXY' }
+    act(() => {
+      const first = view.getByTestId('first')
+      ;(first.firstChild as Text).data = 'aXY'
+      first.className = 'updated'
+      view.getByTestId('second').className = 'updated'
+    })
+    await settle()
+    await paint(10)
+    expect(view.getByTestId('first').textContent).toBe('aXY')
+    expect(view.getByTestId('tail').textContent).toBe('cXY')
+  })
+
+  it('reuses unrelated Unicode source metadata through appends and local attribute scans', async () => {
+    const playback = engine()
+    const history = '😀history'.repeat(512)
+    const view = render(<Probe playback={playback} revealInitial={false}>
+      <aside>{history}</aside><section data-testid="target">active</section>
+    </Probe>)
+    await settle()
+    const iterate = String.prototype[Symbol.iterator]
+    let historyWalks = 0
+    vi.spyOn(String.prototype, Symbol.iterator).mockImplementation(function (this: string) {
+      if (this.valueOf() === history) historyWalks++
+      return iterate.call(this)
+    })
+    const addition = document.createElement('em')
+    addition.textContent = 'new'
+    act(() => view.getByTestId('card:visible').appendChild(addition))
+    await settle()
+    act(() => { view.getByTestId('target').className = 'updated' })
+    await settle()
+    expect(historyWalks).toBe(0)
+  })
+
+  it('registers previously blank text locally when the host fills it', async () => {
+    const playback = engine()
+    const view = render(<Probe playback={playback}>
+      <section data-testid="target">{' '}</section><aside data-testid="idle">idle</aside>
+    </Probe>)
+    await settle()
+    const idle = watchTextData(view.getByTestId('idle').firstChild as Text)
+    act(() => { (view.getByTestId('target').firstChild as Text).data = 'new text' })
+    await settle()
+    expect(view.getByTestId('target').textContent).toBe('')
+    expect(idle.reads()).toBe(0)
+    idle.restore()
+  })
+
   it('serializes separate renderer owners by their provided source order', async () => {
     const playback = engine()
     const view = render(<>
@@ -118,6 +527,7 @@ describe('usePlaybackDomText', () => {
     await paint()
     expect(view.getByTestId('second').textContent).toBe('X')
   })
+
 
   it('keeps full host text through React appends and ignores its own observer writes', async () => {
     const playback = engine()

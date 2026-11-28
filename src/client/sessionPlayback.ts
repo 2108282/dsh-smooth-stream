@@ -26,6 +26,9 @@ export interface PlaybackConfiguration {
   tuning?: Partial<StreamDebugTuning>
 }
 
+/** Receives only source IDs whose displayed state was dirtied by a publish. */
+export type PlaybackChangeListener = (ids: readonly string[]) => void
+
 export interface SessionPlaybackOptions extends PlaybackConfiguration {
   requestFrame?: (callback: (time: number) => void) => number
   cancelFrame?: (handle: number) => void
@@ -72,6 +75,10 @@ function startsWith<T>(value: readonly T[], prefix: readonly T[]): boolean {
   return true
 }
 
+function sameOrder(left: readonly number[], right: readonly number[]): boolean {
+  return compareOrder(left, right) === 0
+}
+
 /** A single-clock playback queue shared by every owner in one session. */
 export class SessionPlayback {
   private readonly requestFrame: (callback: (time: number) => void) => number
@@ -83,10 +90,12 @@ export class SessionPlayback {
   private readonly owners = new Map<string, Map<string, PlaybackSegment>>()
   private readonly states = new Map<string, SegmentState>()
   private readonly active = new Map<string, PlaybackSegment>()
+  private readonly activeOwners = new Map<string, string>()
   private ordered: PlaybackSegment[] = []
   private readonly dirtyDisplays = new Set<string>()
   private readonly displays = new Map<string, PlaybackDisplay>()
   private readonly listeners = new Set<() => void>()
+  private readonly changeListeners = new Set<PlaybackChangeListener>()
   private enabled = true
   private disposed = false
   private frame: number | undefined
@@ -113,9 +122,28 @@ export class SessionPlayback {
     return () => { this.listeners.delete(listener) }
   }
 
+  readonly subscribeChanges = (listener: PlaybackChangeListener): (() => void) => {
+    if (this.disposed) return () => {}
+    this.changeListeners.add(listener)
+    return () => { this.changeListeners.delete(listener) }
+  }
+
   readonly getRevision = (): number => this.revision
 
   readonly read = (id: string): PlaybackDisplay => this.displays.get(id) ?? EMPTY_DISPLAY
+
+  /** Read the synchronous engine state for DOM restoration before its queued publish. */
+  readonly readCurrent = (id: string): PlaybackDisplay => {
+    const segment = this.active.get(id)
+    const state = this.states.get(id)
+    return segment === undefined || state === undefined
+      ? EMPTY_DISPLAY
+      : {
+          text: state.entered ? state.displayText : '',
+          entered: state.entered,
+          pending: !this.isComplete(state),
+        }
+  }
 
   upsert(owner: string, segments: readonly PlaybackSegment[], animate: boolean): void {
     if (this.disposed) return
@@ -142,6 +170,118 @@ export class SessionPlayback {
     }
     this.owners.set(owner, next)
     this.rebuildActive()
+    this.rehideSuccessors(reopened)
+    if (!this.enabled) this.adoptAll()
+    else this.queuePump()
+    this.trimLedger()
+  }
+
+  /**
+   * Update existing sources without rebuilding an owner's complete snapshot.
+   * Use this for text-only edits whose queue order and membership are unchanged.
+   */
+  updateSegments(owner: string, segments: readonly PlaybackSegment[], animate: boolean): void {
+    if (this.disposed) return
+    const owned = this.owners.get(owner)
+    if (owned === undefined) return
+    const reopened = new Set<string>()
+    let orderChanged = false
+    for (const source of segments) {
+      const previousSegment = owned.get(source.id)
+      if (previousSegment === undefined) continue
+      const segment: PlaybackSegment = {
+        id: source.id,
+        order: [...source.order],
+        text: source.text,
+        sealed: source.sealed,
+        hidden: source.hidden === true,
+        awaitPresentation: source.awaitPresentation === true,
+        ...(source.generation === undefined ? {} : { generation: source.generation }),
+        ...(source.baselineChars === undefined ? {} : { baselineChars: source.baselineChars }),
+      }
+      orderChanged ||= !sameOrder(previousSegment.order, segment.order)
+      owned.set(segment.id, segment)
+      if (this.activeOwners.get(segment.id) !== owner) continue
+      const previous = this.states.get(segment.id)
+      const wasComplete = previous !== undefined && this.isComplete(previous)
+      this.active.set(segment.id, segment)
+      this.updateState(segment, animate)
+      const updated = this.states.get(segment.id)!
+      if (wasComplete && !this.isComplete(updated)) reopened.add(segment.id)
+    }
+    if (orderChanged) {
+      this.ordered = [...this.active.values()].sort((left, right) =>
+        compareOrder(left.order, right.order) || left.id.localeCompare(right.id))
+    }
+    this.rehideSuccessors(reopened)
+    if (!this.enabled) this.adoptAll()
+    else this.queuePump()
+    this.trimLedger()
+  }
+
+  /** Apply localized source insertions, changes, or removals. */
+  patch(owner: string, upserts: readonly PlaybackSegment[], removals: readonly string[], animate: boolean): void {
+    if (this.disposed) return
+    let owned = this.owners.get(owner)
+    if (owned === undefined) this.owners.set(owner, owned = new Map())
+    const touched = new Set<string>(removals)
+    for (const source of upserts) touched.add(source.id)
+    if (touched.size === 0) return
+    for (const id of removals) owned.delete(id)
+    for (const source of upserts) {
+      owned.set(source.id, {
+        id: source.id,
+        order: [...source.order],
+        text: source.text,
+        sealed: source.sealed,
+        hidden: source.hidden === true,
+        awaitPresentation: source.awaitPresentation === true,
+        ...(source.generation === undefined ? {} : { generation: source.generation }),
+        ...(source.baselineChars === undefined ? {} : { baselineChars: source.baselineChars }),
+      })
+    }
+
+    const reopened = new Set<string>()
+    let activeChanged = false
+    let orderChanged = false
+    for (const id of touched) {
+      let nextOwner: string | undefined
+      let nextSegment: PlaybackSegment | undefined
+      for (const [candidate, segments] of this.owners) {
+        const segment = segments.get(id)
+        if (segment !== undefined) {
+          nextOwner = candidate
+          nextSegment = segment
+        }
+      }
+      const previousOwner = this.activeOwners.get(id)
+      const previousSegment = this.active.get(id)
+      if (previousSegment !== undefined && !sameOrder(previousSegment.order, nextSegment?.order ?? [])) {
+        orderChanged = true
+      }
+      if (nextOwner === undefined || nextSegment === undefined) {
+        if (previousSegment !== undefined) {
+          this.active.delete(id)
+          this.activeOwners.delete(id)
+          this.dirtyDisplays.add(id)
+          activeChanged = true
+        }
+        continue
+      }
+      if (previousOwner !== nextOwner || previousSegment === undefined) activeChanged = true
+      if (previousSegment === undefined) this.dirtyDisplays.add(id)
+      this.activeOwners.set(id, nextOwner)
+      this.active.set(id, nextSegment)
+      const previous = this.states.get(id)
+      const wasComplete = previous !== undefined && this.isComplete(previous)
+      this.updateState(nextSegment, nextOwner === owner ? animate : true)
+      const updated = this.states.get(id)!
+      if ((previousSegment === undefined || wasComplete) && !this.isComplete(updated)) reopened.add(id)
+    }
+    if (activeChanged || orderChanged) {
+      this.ordered = [...this.active.values()].sort((left, right) =>
+        compareOrder(left.order, right.order) || left.id.localeCompare(right.id))
+    }
     this.rehideSuccessors(reopened)
     if (!this.enabled) this.adoptAll()
     else this.queuePump()
@@ -224,11 +364,13 @@ export class SessionPlayback {
     this.resetClock()
     this.owners.clear()
     this.active.clear()
+    this.activeOwners.clear()
     this.ordered = []
     this.dirtyDisplays.clear()
     this.states.clear()
     this.displays.clear()
     this.listeners.clear()
+    this.changeListeners.clear()
   }
 
   private applyConfiguration(configuration: PlaybackConfiguration): boolean {
@@ -261,6 +403,10 @@ export class SessionPlayback {
 
   private updateState(segment: PlaybackSegment, animate: boolean): void {
     let state = this.states.get(segment.id)
+    const previousText = state?.text
+    const previousDisplay = state?.displayText
+    const previousEntered = state?.entered
+    const previousPending = state === undefined ? undefined : !this.isComplete(state)
     const wasHidden = state?.hidden ?? false
     const nextPoints = Array.from(segment.text)
     const presentationPending = this.enabled && animate && !segment.hidden && segment.awaitPresentation === true
@@ -334,21 +480,23 @@ export class SessionPlayback {
         if (completeBaseline) this.clearPresentation(segment.id, state)
       }
     }
-    this.dirtyDisplays.add(segment.id)
+    const nextPending = !this.isComplete(state)
+    if (previousText !== state.text || previousDisplay !== state.displayText || previousEntered !== state.entered
+      || previousPending !== nextPending || previousText === undefined) {
+      this.dirtyDisplays.add(segment.id)
+    }
   }
 
-  private applyImmediateState(id: string, state: SegmentState): void {
+  private applyImmediateState(_id: string, state: SegmentState): void {
     if (!state.animate) {
       state.entered = true
       state.consumed = state.points.length
       state.displayText = state.text
       state.fraction = 0
-      this.dirtyDisplays.add(id)
     } else if (state.hidden) {
       state.consumed = state.points.length
       if (state.entered) state.displayText = state.text
       state.fraction = 0
-      this.dirtyDisplays.add(id)
     }
   }
 
@@ -379,8 +527,12 @@ export class SessionPlayback {
   private rebuildActive(): void {
     const previousIds = new Set(this.active.keys())
     this.active.clear()
-    for (const owner of this.owners.values()) {
-      for (const [id, segment] of owner) this.active.set(id, segment)
+    this.activeOwners.clear()
+    for (const [owner, segments] of this.owners) {
+      for (const [id, segment] of segments) {
+        this.active.set(id, segment)
+        this.activeOwners.set(id, owner)
+      }
     }
     for (const id of previousIds) if (!this.active.has(id)) this.dirtyDisplays.add(id)
     for (const id of this.active.keys()) if (!previousIds.has(id)) this.dirtyDisplays.add(id)
@@ -564,9 +716,14 @@ export class SessionPlayback {
         else this.displays.delete(id)
         changed = true
       }
-      if (!changed) return
-      this.revision++
-      for (const listener of [...this.listeners]) listener()
+      if (changed) {
+        this.revision++
+        for (const listener of [...this.listeners]) listener()
+      }
+      // A source can be dirty because its native host text changed while the
+      // displayed prefix stayed equal. DOM bridges still need that source ID
+      // so they can restore the prefix without touching unrelated nodes.
+      for (const listener of [...this.changeListeners]) listener(dirty)
     })
   }
 
